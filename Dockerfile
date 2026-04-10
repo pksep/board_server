@@ -13,11 +13,9 @@ RUN apt-get update \
 FROM base AS deps
 WORKDIR /app/board_server
 
-COPY contracts/package.json /app/contracts/package.json
-COPY contracts/dist /app/contracts/dist
-COPY board_server/package.json /app/board_server/package.json
-COPY board_server/bun.lock /app/board_server/bun.lock
-COPY board_server/.npmrc /app/board_server/.npmrc
+COPY package.json /app/board_server/package.json
+COPY bun.lock /app/board_server/bun.lock
+COPY .npmrc /app/board_server/.npmrc
 
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --frozen-lockfile --ignore-scripts \
@@ -25,10 +23,10 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
 
 FROM deps AS build
 
-COPY board_server/tsconfig.json /app/board_server/tsconfig.json
-COPY board_server/tsconfig.build.json /app/board_server/tsconfig.build.json
-COPY board_server/nest-cli.json /app/board_server/nest-cli.json
-COPY board_server/src /app/board_server/src
+COPY tsconfig.json /app/board_server/tsconfig.json
+COPY tsconfig.build.json /app/board_server/tsconfig.build.json
+COPY nest-cli.json /app/board_server/nest-cli.json
+COPY src /app/board_server/src
 
 RUN bun run build
 
@@ -37,10 +35,9 @@ WORKDIR /app/board_server
 
 ENV NODE_ENV=production
 
-COPY --from=deps /app/contracts /app/contracts
 COPY --from=deps /app/board_server/node_modules /app/board_server/node_modules
 COPY --from=build /app/board_server/dist /app/board_server/dist
-COPY board_server/package.json /app/board_server/package.json
+COPY package.json /app/board_server/package.json
 
 EXPOSE 5000
 

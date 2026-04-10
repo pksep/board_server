@@ -19,6 +19,20 @@ $ cp .env.docker.example .env
 $ docker compose --env-file .env -f docker-compose.yml up -d
 ```
 
+Сборка контейнера приложения выполняется прямо из каталога `board_server`.
+
+Используйте:
+
+```bash
+$ bun run docker:build
+```
+
+Эквивалентная ручная команда:
+
+```bash
+$ docker build -f Dockerfile -t board-server:local .
+```
+
 Вместо docker можно использовать и другие менеджеры контейнеров, такие как [podman](https://podman.io) или [nerdctl](https://github.com/containerd/nerdctl)
 
 При инициализации (Если база данных абсолютли пустая), необходимо выполнить сидирования в строгом порядке.
