@@ -12,6 +12,7 @@ import { isDatabaseEmpty } from './scripts/is-database-empty';
 import { getConnectionToken } from '@nestjs/sequelize';
 import { LoggerService } from './modules/logger/logger.service';
 import { AllExceptionsFilter } from './modules/logger/filters/all-exceptions.filter';
+import { json, urlencoded } from 'express';
 
 (async () => {
   const app = await NestFactory.create(AppModule, {
@@ -34,6 +35,8 @@ import { AllExceptionsFilter } from './modules/logger/filters/all-exceptions.fil
   const isAllowAll = allowedOrigins.includes('*');
 
   app.use(cookieParser());
+  app.use(json({ limit: '50mb' }));
+  app.use(urlencoded({ extended: true, limit: '50mb' }));
 
   app.enableCors({
     exposedHeaders: ['Content-Encoding'],

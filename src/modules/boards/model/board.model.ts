@@ -8,10 +8,11 @@ import {
   BelongsTo,
   HasMany
 } from 'sequelize-typescript';
-import { BoardColumn } from 'src/modules/columns/model/board-column.model';
 
 // Lazy require для решения circular dependency (Board ↔ Project)
 const lazyProject = () => require('../../projects/model/project.model').Project;
+const lazyBoardColumn = () =>
+  require('../../columns/model/board-column.model').BoardColumn;
 
 @Table({ tableName: 'boards', paranoid: true })
 export class Board extends Model<Board> {
@@ -49,6 +50,6 @@ export class Board extends Model<Board> {
   project: any;
 
   @ApiHideProperty()
-  @HasMany(() => BoardColumn)
-  columns: BoardColumn[];
+  @HasMany(lazyBoardColumn)
+  columns: any[];
 }

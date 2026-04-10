@@ -3,7 +3,6 @@ import { InjectModel } from '@nestjs/sequelize';
 import { Board } from './model/board.model';
 import { CreateBoardDto } from './dto/create-board.dto';
 import { UpdateBoardDto } from './dto/update-board.dto';
-import { BoardColumn } from '../columns/model/board-column.model';
 import { WsGateway } from '../ws/ws.gateway';
 
 @Injectable()
@@ -19,7 +18,7 @@ export class BoardsService {
     try {
       return await this.boardRepository.findAll({
         where: { projectId },
-        include: [{ model: BoardColumn, attributes: ['id'] }],
+        include: [{ association: 'columns', attributes: ['id'] }],
         order: [
           ['order', 'ASC'],
           ['createdAt', 'ASC']
@@ -39,7 +38,8 @@ export class BoardsService {
       const board = await this.boardRepository.findByPk(id, {
         include: [
           {
-            model: BoardColumn,
+            association: 'columns',
+            separate: true,
             order: [['order', 'ASC']]
           }
         ]

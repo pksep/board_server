@@ -17,10 +17,19 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const req = ctx.getRequest<Request>();
     const res = ctx.getResponse<Response>();
 
+    const isPayloadTooLarge =
+      (exception as { type?: string })?.type === 'entity.too.large' ||
+      (exception as { status?: number })?.status ===
+        HttpStatus.PAYLOAD_TOO_LARGE ||
+      (exception as { statusCode?: number })?.statusCode ===
+        HttpStatus.PAYLOAD_TOO_LARGE;
+
     const status =
       exception instanceof HttpException
         ? exception.getStatus()
-        : HttpStatus.INTERNAL_SERVER_ERROR;
+        : isPayloadTooLarge
+          ? HttpStatus.PAYLOAD_TOO_LARGE
+          : HttpStatus.INTERNAL_SERVER_ERROR;
 
     this.logger.error(
       exception instanceof Error ? exception.message : 'Unknown error',
@@ -32,7 +41,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
       message:
         exception instanceof HttpException
           ? exception.getResponse()
-          : 'Internal server error',
+          : isPayloadTooLarge
+            ? 'Размер запроса превышает 50 МБ'
+            : 'Internal server error',
       reqId: req.id
     });
   }

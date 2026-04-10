@@ -1,39 +1,47 @@
+# syntax=docker/dockerfile:1.7
+
 FROM node:20-slim AS base
 
-RUN apt-get update && \
-    apt-get install -y curl unzip gnupg2 lsb-release  && \
-    rm -rf /var/lib/apt/lists/*
+ENV BUN_INSTALL=/root/.bun
+ENV PATH=$BUN_INSTALL/bin:$PATH
 
-RUN curl -fsSL https://bun.sh/install | bash
-ENV BUN_INSTALL="/root/.bun"
-ENV PATH="$BUN_INSTALL/bin:$PATH"
-ENV NODE_OPTIONS="--max_old_space_size=4096 --unhandled-rejections=strict"
-ENV UV_THREADPOOL_SIZE=4
-
-RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg && \
-    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
-    apt-get update && \
-    apt-get install -y postgresql-client-16 && \
-    rm -rf /var/lib/apt/lists/*
-
-
-
-COPY . /app
-WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl unzip \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL https://bun.sh/install | bash
 
 FROM base AS deps
-RUN --mount=type=cache,id=bun,target=/root/.bun/install/cache \
-    bun install --frozen-lockfile || (echo "bun.lockb is missing or invalid, regenerating..." && bun install)
+WORKDIR /app/board_server
 
-FROM base
-COPY --from=deps /app/node_modules /app/node_modules
+COPY contracts/package.json /app/contracts/package.json
+COPY contracts/dist /app/contracts/dist
+COPY board_server/package.json /app/board_server/package.json
+COPY board_server/bun.lock /app/board_server/bun.lock
+COPY board_server/.npmrc /app/board_server/.npmrc
 
-RUN npm install -g pm2 cross-env
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    bun install --frozen-lockfile --ignore-scripts \
+    || bun install --ignore-scripts
 
-RUN --mount=type=cache,id=build,target=/app/dist bun run build:lib && bun run build
+FROM deps AS build
 
-RUN rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+COPY board_server/tsconfig.json /app/board_server/tsconfig.json
+COPY board_server/tsconfig.build.json /app/board_server/tsconfig.build.json
+COPY board_server/nest-cli.json /app/board_server/nest-cli.json
+COPY board_server/src /app/board_server/src
+
+RUN bun run build
+
+FROM node:20-slim AS runtime
+WORKDIR /app/board_server
+
+ENV NODE_ENV=production
+
+COPY --from=deps /app/contracts /app/contracts
+COPY --from=deps /app/board_server/node_modules /app/board_server/node_modules
+COPY --from=build /app/board_server/dist /app/board_server/dist
+COPY board_server/package.json /app/board_server/package.json
 
 EXPOSE 5000
 
-CMD ["sh", "-c", "pm2-runtime start ecosystem.config.js --only instance1"]
+CMD ["node", "dist/main.js"]
