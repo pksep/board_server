@@ -37,6 +37,7 @@ ENV NODE_ENV=production
 
 COPY --from=deps /app/board_server/node_modules /app/board_server/node_modules
 COPY --from=build /app/board_server/dist /app/board_server/dist
+COPY env /app/board_server/env
 COPY package.json /app/board_server/package.json
 
 EXPOSE 5000
