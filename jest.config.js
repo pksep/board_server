@@ -2,9 +2,7 @@ module.exports = {
   preset: 'ts-jest',
   testEnvironment: 'node',
   moduleNameMapper: {
-    '^src/(.*)$': '<rootDir>/src/$1',
-    '^@pksep/zod-shared$':
-      '<rootDir>/packages/zod-shared/dist/index.js'
+    '^src/(.*)$': '<rootDir>/src/$1'
   },
   maxWorkers: 4,
   workerIdleMemoryLimit: '1024MB',
