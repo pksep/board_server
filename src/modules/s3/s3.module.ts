@@ -3,15 +3,16 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { Client } from 'minio';
 import { S3Service } from './s3.service';
 import { ConfigConstains } from 'src/configs/env.config';
+import { getEnvFilePaths } from 'src/configs/env-paths';
 import * as dotenv from 'dotenv';
 import { S3MockService } from './s3.mock.service';
 import { S3Controller } from './s3.controller';
 
 import { S3_PROVIDE_NAME } from './s3.constants';
 
-dotenv.config({
-  path: `env/.${process.env.NODE_ENV}.env`
-});
+for (const envPath of getEnvFilePaths()) {
+  dotenv.config({ path: envPath });
+}
 
 const noRunMode = process.env.MINIO_DISABLED === 'true';
 

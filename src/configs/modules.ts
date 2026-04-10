@@ -12,6 +12,7 @@ import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { DevtoolsModule } from '@nestjs/devtools-integration';
 import configFactory, { ConfigConstains } from './env.config';
+import { getEnvFilePaths } from './env-paths';
 
 import { S3Module } from 'src/modules/s3/s3.module';
 import { redisStore } from 'cache-manager-redis-yet';
@@ -31,7 +32,7 @@ export const getCoreModules = (): (
   }),
 
   ConfigModule.forRoot({
-    envFilePath: `env/.${process.env.NODE_ENV}.env`,
+    envFilePath: getEnvFilePaths(),
     isGlobal: true,
     cache: true,
     load: [configFactory]
