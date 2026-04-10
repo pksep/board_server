@@ -1,0 +1,11 @@
+
+postgres:
+  image: postgres:15
+  user: erp_user
+  password: erp_pass
+  database: comments_db
+  storage: 5Gi
+
+redis:
+  image: redis:7
+  storage: 1Gi

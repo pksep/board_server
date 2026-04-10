@@ -1,0 +1,13 @@
+#   Refer for explanation to following link:
+#   https://github.com/evilmartians/lefthook/blob/master/docs/configuration.md
+[pre-push.commands.lint]
+run = "bun run lint"
+
+[[pre-commit.only]]
+ref = "main"
+
+[[pre-commit.only]]
+ref = "canary"
+
+[pre-commit.commands.protected]
+run = "echo 'Protected branch' && exit 1"

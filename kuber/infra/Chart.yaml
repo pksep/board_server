@@ -1,0 +1,5 @@
+
+apiVersion: v2
+name: infra-chart
+description: Shared infrastructure stack (Postgres, Redis, Neo4j, MinIO, Typesense)
+version: 1.0.0

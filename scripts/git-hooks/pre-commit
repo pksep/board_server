@@ -1,0 +1,18 @@
+#!/bin/sh
+# pre-commit hook to run unit tests
+echo "Running unit tests before commit..."
+
+# Run build & unit tests
+bun run build:lib
+bun run test:unit
+
+# Capture exit code
+RESULT=$?
+
+if [ $RESULT -ne 0 ]; then
+  echo "Unit tests failed! Commit aborted."
+  exit 1
+fi
+
+echo "All tests passed. Proceeding with commit."
+exit 0

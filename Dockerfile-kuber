@@ -1,0 +1,50 @@
+FROM node:20-slim
+
+ARG NODE_ENV=production
+
+# Установка зависимостей ОС
+RUN apt-get update && \
+    apt-get install -y curl unzip gnupg2 lsb-release && \
+    rm -rf /var/lib/apt/lists/*
+
+# Установка Bun
+ENV BUN_INSTALL="/root/.bun"
+ENV PATH="$BUN_INSTALL/bin:$PATH"
+RUN curl -fsSL https://bun.sh/install | bash
+
+# Установка PostgreSQL 16 клиент
+RUN curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
+    apt-get update && \
+    apt-get install -y postgresql-client-16 && \
+    rm -rf /var/lib/apt/lists/*
+
+
+
+# Копирование кода
+WORKDIR /app
+ARG ENV_FILE=.production.env
+COPY . .
+COPY ./env/${ENV_FILE} /app/env/.production.env
+ 
+RUN bun install --frozen-lockfile --ignore-scripts
+RUN bun run build:lib && bun run build
+ 
+RUN npm install -g pm2
+ 
+ENV NODE_OPTIONS="--max_old_space_size=4096 --unhandled-rejections=strict"
+ENV UV_THREADPOOL_SIZE=4
+
+COPY docker-entrypoint.sh /usr/local/bin/
+
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENV INSTANCE_NAME="instance1"
+ENV RUN_DB_SETUP="true" 
+
+EXPOSE 5000
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+ 
+CMD ["sh", "-c", "pm2-runtime start ecosystem.config.js --only ${INSTANCE_NAME}"]

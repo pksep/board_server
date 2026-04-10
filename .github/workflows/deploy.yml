@@ -1,0 +1,19 @@
+name: Remote Dispath Deploy
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  call-deploy:
+    uses: Denis112345/actions/.github/workflows/deploy-template.yml@main
+    with:
+      app_name: 'board-server'
+      deploy_env: 'dev'
+    secrets:
+      DEV_SSH_HOST: ${{ secrets.DEV_SSH_HOST }}
+      DEV_SSH_USER: ${{ secrets.DEV_SSH_USER }}
+      DEV_SSH_KEY: ${{ secrets.DEV_SSH_KEY }}
+      DEV_SSH_PORT: ${{ secrets.DEV_SSH_PORT }}
+      ALLOW_REPOS: ${{ secrets.ALLOW_REPOS }}

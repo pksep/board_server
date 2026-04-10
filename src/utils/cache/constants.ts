@@ -1,0 +1,3 @@
+export enum CACHE_MANAGER_PREFIX {
+  FILE_NAME = 'FILE_NAME'
+}

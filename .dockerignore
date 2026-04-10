@@ -1,0 +1,79 @@
+migration_records.txt
+
+/src/libs/files/static/zip/*.zip
+/backups/*.gz
+# compiled output
+/dist
+/src/lib/db/*
+/node_modules
+.clinic
+/documentation
+# Logs
+logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# OS
+.DS_Store
+
+# Tests
+/coverage
+/.nyc_output
+
+# IDEs and editors
+/.idea
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+
+# IDE - VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.dependencygraph/*
+
+#pm2
+.deploys
+current
+source/
+
+# compose data
+.compose-data
+
+# VCS/CI
+.git
+.github
+.husky
+
+# API/tools
+.insomnia
+
+# Caches
+.pnpm-store
+.eslintcache
+.cache
+.turbo
+npm-cache/
+yarn-cache/
+
+# Temp
+.tmp
+tmp
+temp
+
+# Docker compose files (not needed in build context)
+docker-compose*.yml
+
+# Packages artifacts
+*.tgz
+
+.qodo

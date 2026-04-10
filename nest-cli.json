@@ -1,0 +1,34 @@
+{
+  "projects": {
+    "draft": {
+      "type": "library",
+      "root": "libs/draft",
+      "entryFile": "index",
+      "sourceRoot": "libs/draft/src",
+      "compilerOptions": {
+        "tsConfigPath": "libs/draft/tsconfig.lib.json"
+      }
+    },
+    "files": {
+      "type": "library",
+      "root": "libs/files",
+      "entryFile": "index",
+      "sourceRoot": "libs/files/src",
+      "compilerOptions": {
+        "tsConfigPath": "libs/files/tsconfig.lib.json"
+      }
+    }
+  },
+  "compilerOptions": {
+    "builder": "swc",
+    "typeCheck": false,
+    "afterBuild": [
+      {
+        "command": "mkdir -p dist/backups"
+      },
+      {
+        "command": "mkdir -p logs"
+      }
+    ]
+  }
+}
