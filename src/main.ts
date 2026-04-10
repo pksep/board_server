@@ -80,9 +80,9 @@ import { json, urlencoded } from 'express';
   app.useGlobalPipes(new ValidationPipe());
 
   const config = new DocumentBuilder()
-    .setTitle('СЭП:Умный Пресс')
+    .setTitle('SEP Board Server')
     .setDescription(
-      'Документация взаимодействия с APi приложения Системы атоматизации производства СЭП:Умный Пресс'
+      'Документация API сервиса управления проектами, досками, колонками, задачами и пользователями'
     )
     .setVersion('0.0.2')
     .addCookieAuth(
