@@ -56,6 +56,7 @@
     "@nestjs/swagger": "^7.1.14",
     "@nestjs/websockets": "^10.2.7",
     "@pksep/contracts": "^1.0.1",
+    "@pksep/reqi": "^0.0.25",
     "@swc/cli": "^0.8.1",
     "@swc/core": "^1.15.24",
     "@types/bun": "^1.2.10",

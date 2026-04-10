@@ -1,4 +1,21 @@
 services:
+  board_server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        ENV_FILE: .production.env
+    container_name: board-server-local
+    ports:
+      - "5000:5000"
+    env_file:
+      - env/.production.env
+    depends_on:
+      - minio
+      - redis
+      - rabbitmq
+    restart: unless-stopped
+
   minio:
     image: quay.io/minio/minio:latest
     container_name: minio-local
@@ -23,6 +40,17 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: rabbitmq-local
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
     restart: unless-stopped
 
 volumes:

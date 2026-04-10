@@ -13,6 +13,8 @@ import { IS_PUBLIC_KEY } from './public.decorator';
 import { User } from '../users/model/users.model';
 import { ConfigConstains } from 'src/configs/env.config';
 
+const { Reqi } = require('@pksep/reqi');
+
 /** Имя cookie, которую выдаёт board-сервер */
 const BOARD_TOKEN_COOKIE = 'board_token';
 /** Имя cookie, которую выдаёт ERP */
@@ -137,18 +139,19 @@ export class TokenAuth implements CanActivate {
     }
 
     try {
-      const response = await fetch(`${erpApiUrl}/api/auth/check`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: erpToken })
+      const normalizedApiUrl = erpApiUrl.replace(/\/+$/, '');
+      const erpApiBaseUrl = normalizedApiUrl.endsWith('/api')
+        ? normalizedApiUrl
+        : `${normalizedApiUrl}/api`;
+
+      const erpApi = new Reqi(erpApiBaseUrl, {
+        credentials: 'include'
       });
-
-      if (!response.ok) {
-        this.logger.warn(`ERP auth/check returned ${response.status}`);
-        return null;
-      }
-
-      const result = await response.json();
+      const result = await erpApi.post(
+        '/auth/check',
+        { token: erpToken },
+        { parsed: true }
+      );
 
       if (!result.ok || !result.user) {
         this.logger.warn('ERP auth/check returned ok=false or no user');
