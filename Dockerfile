@@ -33,12 +33,13 @@ RUN bun run build
 FROM node:20-slim AS runtime
 WORKDIR /app/board_server
 
+ARG ENV_FILE=.production.env
 ENV NODE_ENV=production
 
 COPY --from=deps /app/board_server/node_modules /app/board_server/node_modules
 COPY --from=build /app/board_server/dist /app/board_server/dist
-COPY env /app/board_server/env
 COPY package.json /app/board_server/package.json
+COPY env/${ENV_FILE} /app/board_server/env/.production.env
 
 EXPOSE 5000
 
