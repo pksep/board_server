@@ -1,4 +1,3 @@
-// Файл, где вы инициализируете Sequelize
 import { Sequelize } from 'sequelize';
 import * as dotenv from 'dotenv';
 import configFactory from '../../configs/env.config';
