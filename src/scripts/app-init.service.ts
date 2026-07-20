@@ -45,7 +45,6 @@ export class AppInitService implements OnApplicationBootstrap {
         __dirname,
         '..',
         '..',
-        '..',
         'seeders',
         `${seed.path}.js`
       );
