@@ -14,6 +14,8 @@ import { Module, Logger } from '@nestjs/common';
 import { SequelizeModule } from '@nestjs/sequelize';
 import { ConfigModule } from '@nestjs/config';
 import { getSequelizeConfig } from 'src/configs/postgres.config';
+import configFactory from 'src/configs/env.config';
+import { getEnvFilePaths } from 'src/configs/env-paths';
 import { User } from 'src/modules/users/model/users.model';
 import { LoggerModule } from 'src/modules/logger/logger.module';
 
@@ -28,9 +30,14 @@ interface ErpUser {
 
 @Module({
   imports: [
-    ConfigModule.forRoot(),
+    ConfigModule.forRoot({
+      envFilePath: getEnvFilePaths(),
+      isGlobal: true,
+      cache: true,
+      load: [configFactory]
+    }),
     LoggerModule,
-    SequelizeModule.forRootAsync(getSequelizeConfig({})),
+    SequelizeModule.forRootAsync(getSequelizeConfig({ logging: false })),
     SequelizeModule.forFeature([User])
   ]
 })
