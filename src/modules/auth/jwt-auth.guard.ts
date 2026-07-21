@@ -43,8 +43,10 @@ export class TokenAuth implements CanActivate {
     const req = context.switchToHttp().getRequest();
     const res = context.switchToHttp().getResponse();
 
+    const requestUrl = req?.originalUrl || req?.url || '';
+
     // SSE без аутентификации
-    if (req.originalUrl.indexOf('sse-') !== -1) return true;
+    if (requestUrl.indexOf('sse-') !== -1) return true;
 
     const isLocalhost =
       this.isDev && ['localhost', '127.0.0.1'].includes(req.hostname);
