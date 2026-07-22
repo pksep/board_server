@@ -20,6 +20,18 @@ const BOARD_TOKEN_COOKIE = 'board_token';
 /** Имя cookie, которую выдаёт ERP */
 const ERP_TOKEN_COOKIE = 'access_token';
 
+type RequestWithUrl = {
+  originalUrl?: unknown;
+  url?: unknown;
+};
+
+export function getRequestUrl(request: RequestWithUrl): string | null {
+  if (typeof request.originalUrl === 'string') return request.originalUrl;
+  if (typeof request.url === 'string') return request.url;
+
+  return null;
+}
+
 @Injectable()
 export class TokenAuth implements CanActivate {
   private readonly logger = new Logger(TokenAuth.name);
@@ -43,10 +55,16 @@ export class TokenAuth implements CanActivate {
     const req = context.switchToHttp().getRequest();
     const res = context.switchToHttp().getResponse();
 
-    const requestUrl = req?.originalUrl || req?.url || '';
+    const requestUrl = getRequestUrl(req);
 
     // SSE без аутентификации
-    if (requestUrl.indexOf('sse-') !== -1) return true;
+    if (requestUrl?.includes('sse-')) return true;
+
+    if (requestUrl === null) {
+      this.logger.warn(
+        `Auth request URL is missing; transport=${String(context.getType())}`
+      );
+    }
 
     const isLocalhost =
       this.isDev && ['localhost', '127.0.0.1'].includes(req.hostname);
