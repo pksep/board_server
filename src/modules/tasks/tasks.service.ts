@@ -205,11 +205,17 @@ export class TasksService {
       }
       const taskCounter = project.taskCounter;
 
-      // Определяем order
-      const maxOrder = await this.taskRepository.max<number, Task>('order', {
-        where: { columnId },
-        transaction
-      });
+      // Вставляем новую верхнеуровневую задачу в начало колонки.
+      await this.taskRepository.update(
+        { order: this.sequelize.literal('"order" + 1') as any },
+        {
+          where: {
+            columnId,
+            parentTaskId: null
+          },
+          transaction
+        }
+      );
 
       const task = await this.taskRepository.create(
         {
@@ -220,7 +226,7 @@ export class TasksService {
           approvalStatus: dto.approvalStatus || '',
           dueDate: dto.dueDate || null,
           columnId,
-          order: (maxOrder || 0) + 1,
+          order: 0,
           createdById: userId
         } as any,
         { transaction }
