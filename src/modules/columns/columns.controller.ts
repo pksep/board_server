@@ -13,6 +13,8 @@ import { ColumnsService } from './columns.service';
 import { CreateColumnDto } from './dto/create-column.dto';
 import { UpdateColumnDto } from './dto/update-column.dto';
 import { ReorderColumnsDto } from './dto/reorder-columns.dto';
+import { CurrentUser } from '../auth/current-user.decorator';
+import { IUserDataToken } from '../auth/interfaces/interface';
 
 @ApiTags('Колонки')
 @Controller()
@@ -21,31 +23,46 @@ export class ColumnsController {
 
   @ApiOperation({ summary: 'Колонки доски' })
   @Get('boards/:boardId/columns')
-  getByBoard(@Param('boardId') boardId: number) {
-    return this.columnsService.getByBoard(+boardId);
+  getByBoard(
+    @Param('boardId') boardId: number,
+    @CurrentUser() user: IUserDataToken
+  ) {
+    return this.columnsService.getByBoard(+boardId, user.id);
   }
 
   @ApiOperation({ summary: 'Создать колонку' })
   @Post('boards/:boardId/columns')
-  create(@Param('boardId') boardId: number, @Body() dto: CreateColumnDto) {
-    return this.columnsService.create(+boardId, dto);
+  create(
+    @Param('boardId') boardId: number,
+    @Body() dto: CreateColumnDto,
+    @CurrentUser() user: IUserDataToken
+  ) {
+    return this.columnsService.create(+boardId, dto, user.id);
   }
 
   @ApiOperation({ summary: 'Обновить колонку' })
   @Put('columns/:id')
-  update(@Param('id') id: number, @Body() dto: UpdateColumnDto) {
-    return this.columnsService.update(+id, dto);
+  update(
+    @Param('id') id: number,
+    @Body() dto: UpdateColumnDto,
+    @CurrentUser() user: IUserDataToken
+  ) {
+    return this.columnsService.update(+id, dto, user.id);
   }
 
   @ApiOperation({ summary: 'Удалить колонку (soft delete)' })
   @Delete('columns/:id')
-  delete(@Param('id') id: number) {
-    return this.columnsService.delete(+id);
+  delete(@Param('id') id: number, @CurrentUser() user: IUserDataToken) {
+    return this.columnsService.delete(+id, user.id);
   }
 
   @ApiOperation({ summary: 'Переупорядочить колонки' })
   @Patch('boards/:boardId/columns/reorder')
-  reorder(@Param('boardId') boardId: number, @Body() dto: ReorderColumnsDto) {
-    return this.columnsService.reorder(+boardId, dto);
+  reorder(
+    @Param('boardId') boardId: number,
+    @Body() dto: ReorderColumnsDto,
+    @CurrentUser() user: IUserDataToken
+  ) {
+    return this.columnsService.reorder(+boardId, dto, user.id);
   }
 }

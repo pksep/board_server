@@ -8,6 +8,8 @@ import { TaskTag } from './model/task-tag.model';
 import { TaskAttachment } from './model/task-attachment.model';
 import { Project } from '../projects/model/project.model';
 import { BoardColumn } from '../columns/model/board-column.model';
+import { Board } from '../boards/model/board.model';
+import { ProjectsModule } from '../projects/projects.module';
 
 @Module({
   controllers: [TasksController],
@@ -19,8 +21,10 @@ import { BoardColumn } from '../columns/model/board-column.model';
       TaskTag,
       TaskAttachment,
       Project,
-      BoardColumn
-    ])
+      BoardColumn,
+      Board
+    ]),
+    ProjectsModule
   ],
   exports: [TasksService]
 })

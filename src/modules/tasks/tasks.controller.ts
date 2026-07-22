@@ -24,20 +24,26 @@ export class TasksController {
 
   @ApiOperation({ summary: 'Все задачи доски' })
   @Get('boards/:boardId/tasks')
-  getByBoard(@Param('boardId') boardId: number) {
-    return this.tasksService.getByBoard(+boardId);
+  getByBoard(
+    @Param('boardId') boardId: number,
+    @CurrentUser() user: IUserDataToken
+  ) {
+    return this.tasksService.getByBoard(+boardId, user.id);
   }
 
   @ApiOperation({ summary: 'Получить задачу по ID' })
   @Get('tasks/:id')
-  getById(@Param('id') id: number) {
-    return this.tasksService.getById(+id);
+  getById(@Param('id') id: number, @CurrentUser() user: IUserDataToken) {
+    return this.tasksService.getById(+id, user.id);
   }
 
   @ApiOperation({ summary: 'Все задачи колонки' })
   @Get('columns/:columnId/tasks')
-  getByColumn(@Param('columnId') columnId: number) {
-    return this.tasksService.getByColumn(+columnId);
+  getByColumn(
+    @Param('columnId') columnId: number,
+    @CurrentUser() user: IUserDataToken
+  ) {
+    return this.tasksService.getByColumn(+columnId, user.id);
   }
 
   @ApiOperation({ summary: 'Создать задачу в колонке' })
@@ -62,35 +68,44 @@ export class TasksController {
 
   @ApiOperation({ summary: 'Получить подзадачи' })
   @Get('tasks/:id/subtasks')
-  getSubtasks(@Param('id') id: number) {
-    return this.tasksService.getSubtasks(+id);
+  getSubtasks(@Param('id') id: number, @CurrentUser() user: IUserDataToken) {
+    return this.tasksService.getSubtasks(+id, user.id);
   }
 
   @ApiOperation({ summary: 'Обновить задачу' })
   @Put('tasks/:id')
-  update(@Param('id') id: number, @Body() dto: UpdateTaskDto) {
-    return this.tasksService.update(+id, dto);
+  update(
+    @Param('id') id: number,
+    @Body() dto: UpdateTaskDto,
+    @CurrentUser() user: IUserDataToken
+  ) {
+    return this.tasksService.update(+id, dto, user.id);
   }
 
   @ApiOperation({ summary: 'Переместить задачу' })
   @Patch('tasks/:id/move')
-  move(@Param('id') id: number, @Body() dto: MoveTaskDto) {
-    return this.tasksService.move(+id, dto);
+  move(
+    @Param('id') id: number,
+    @Body() dto: MoveTaskDto,
+    @CurrentUser() user: IUserDataToken
+  ) {
+    return this.tasksService.move(+id, dto, user.id);
   }
 
   @ApiOperation({ summary: 'Удалить задачу (soft delete)' })
   @Delete('tasks/:id')
-  delete(@Param('id') id: number) {
-    return this.tasksService.delete(+id);
+  delete(@Param('id') id: number, @CurrentUser() user: IUserDataToken) {
+    return this.tasksService.delete(+id, user.id);
   }
 
   @ApiOperation({ summary: 'Получить URL для прямой загрузки файла в MinIO' })
   @Post('tasks/:id/attachments/presign')
   generatePresignedUrl(
     @Param('id') id: number,
-    @Body() dto: CreateAttachmentDto
+    @Body() dto: CreateAttachmentDto,
+    @CurrentUser() user: IUserDataToken
   ) {
-    return this.tasksService.generatePresignedUrl(+id, dto);
+    return this.tasksService.generatePresignedUrl(+id, dto, user.id);
   }
 
   @ApiOperation({ summary: 'Подтвердить загрузку вложения' })
@@ -107,8 +122,9 @@ export class TasksController {
   @Delete('tasks/:taskId/attachments/:attachmentId')
   deleteAttachment(
     @Param('taskId') taskId: number,
-    @Param('attachmentId') attachmentId: number
+    @Param('attachmentId') attachmentId: number,
+    @CurrentUser() user: IUserDataToken
   ) {
-    return this.tasksService.deleteAttachment(+taskId, +attachmentId);
+    return this.tasksService.deleteAttachment(+taskId, +attachmentId, user.id);
   }
 }

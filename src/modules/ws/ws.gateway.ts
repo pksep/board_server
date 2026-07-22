@@ -11,6 +11,9 @@ import { Server, Socket } from 'socket.io';
 import { Injectable, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as cookie from 'cookie';
+import { InjectModel } from '@nestjs/sequelize';
+import { Board } from '../boards/model/board.model';
+import { ProjectAccessService } from '../projects/project-access.service';
 
 @Injectable()
 @WebSocketGateway({
@@ -23,7 +26,11 @@ import * as cookie from 'cookie';
 export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(WsGateway.name);
 
-  constructor(private jwtService: JwtService) {}
+  constructor(
+    private jwtService: JwtService,
+    @InjectModel(Board) private boardRepository: typeof Board,
+    private projectAccess: ProjectAccessService
+  ) {}
 
   @WebSocketServer()
   server: Server;
@@ -66,7 +73,7 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   // === Подписка на комнаты ===
 
   @SubscribeMessage('board:join')
-  handleJoinBoard(
+  async handleJoinBoard(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { boardId: number }
   ) {
@@ -76,6 +83,19 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
         data: { message: 'boardId is required and must be a number' }
       };
     }
+    const board = await this.boardRepository.findByPk(data.boardId);
+    if (!board) {
+      return { event: 'error', data: { message: 'Доска не найдена' } };
+    }
+    try {
+      await this.projectAccess.assertCanRead(
+        board.projectId,
+        Number((client as any).user?.id)
+      );
+    } catch {
+      return { event: 'error', data: { message: 'Доска не найдена' } };
+    }
+
     const room = `board:${data.boardId}`;
     client.join(room);
     this.logger.log(`${client.id} joined ${room}`);
@@ -100,7 +120,7 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('project:join')
-  handleJoinProject(
+  async handleJoinProject(
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { projectId: number }
   ) {
@@ -110,6 +130,15 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
         data: { message: 'projectId is required and must be a number' }
       };
     }
+    try {
+      await this.projectAccess.assertCanRead(
+        data.projectId,
+        Number((client as any).user?.id)
+      );
+    } catch {
+      return { event: 'error', data: { message: 'Проект не найден' } };
+    }
+
     const room = `project:${data.projectId}`;
     client.join(room);
     this.logger.log(`${client.id} joined ${room}`);
@@ -157,6 +186,26 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   ) {
     this.server.to(`board:${boardId}`).emit('task:moved', data);
+  }
+
+  emitTaskRelocated(
+    sourceBoardId: number,
+    targetBoardId: number,
+    data: {
+      task: any;
+      taskIds: number[];
+      fromProjectId: number;
+      toProjectId: number;
+      fromBoardId: number;
+      toBoardId: number;
+      fromColumnId: number;
+      toColumnId: number;
+      order: number;
+    }
+  ) {
+    this.server
+      .to([`board:${sourceBoardId}`, `board:${targetBoardId}`])
+      .emit('task:relocated', data);
   }
 
   /** Колонки */

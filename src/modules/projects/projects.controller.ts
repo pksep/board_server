@@ -31,8 +31,8 @@ export class ProjectsController {
   @ApiOperation({ summary: 'Получить проект по ID' })
   @ApiResponse({ status: 200, type: Project })
   @Get(':id')
-  getById(@Param('id') id: number) {
-    return this.projectsService.getById(+id);
+  getById(@Param('id') id: number, @CurrentUser() user: IUserDataToken) {
+    return this.projectsService.getById(+id, user.id);
   }
 
   @ApiOperation({ summary: 'Проверить уникальность префикса' })
@@ -62,8 +62,8 @@ export class ProjectsController {
 
   @ApiOperation({ summary: 'Удалить проект (soft delete)' })
   @Delete(':id')
-  delete(@Param('id') id: number) {
-    return this.projectsService.delete(+id);
+  delete(@Param('id') id: number, @CurrentUser() user: IUserDataToken) {
+    return this.projectsService.delete(+id, user.id);
   }
 
   @ApiOperation({ summary: 'Toggle избранное' })

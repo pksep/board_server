@@ -4,6 +4,7 @@ import { Board } from './model/board.model';
 import { CreateBoardDto } from './dto/create-board.dto';
 import { UpdateBoardDto } from './dto/update-board.dto';
 import { WsGateway } from '../ws/ws.gateway';
+import { ProjectAccessService } from '../projects/project-access.service';
 
 @Injectable()
 export class BoardsService {
@@ -11,11 +12,13 @@ export class BoardsService {
 
   constructor(
     @InjectModel(Board) private boardRepository: typeof Board,
-    private wsGateway: WsGateway
+    private wsGateway: WsGateway,
+    private projectAccess: ProjectAccessService
   ) {}
 
-  async getByProject(projectId: number): Promise<Board[]> {
+  async getByProject(projectId: number, userId: number): Promise<Board[]> {
     try {
+      await this.projectAccess.assertCanRead(projectId, userId);
       return await this.boardRepository.findAll({
         where: { projectId },
         include: [{ association: 'columns', attributes: ['id'] }],
@@ -25,6 +28,7 @@ export class BoardsService {
         ]
       });
     } catch (error) {
+      if (error instanceof HttpException) throw error;
       this.logger.error('getByProject failed', error);
       throw new HttpException(
         'Ошибка при получении досок',
@@ -33,8 +37,14 @@ export class BoardsService {
     }
   }
 
-  async getById(id: number): Promise<Board> {
+  async getById(id: number, userId: number): Promise<Board> {
     try {
+      const plainBoard = await this.boardRepository.findByPk(id);
+      if (!plainBoard) {
+        throw new HttpException('Доска не найдена', HttpStatus.NOT_FOUND);
+      }
+      await this.projectAccess.assertCanRead(plainBoard.projectId, userId);
+
       const board = await this.boardRepository.findByPk(id, {
         include: [
           {
@@ -58,8 +68,13 @@ export class BoardsService {
     }
   }
 
-  async create(projectId: number, dto: CreateBoardDto): Promise<Board> {
+  async create(
+    projectId: number,
+    dto: CreateBoardDto,
+    userId: number
+  ): Promise<Board> {
     try {
+      await this.projectAccess.assertCanRead(projectId, userId);
       const maxOrder = await this.boardRepository.max<number, Board>('order', {
         where: { projectId }
       });
@@ -73,6 +88,7 @@ export class BoardsService {
       } as any);
       return board;
     } catch (error) {
+      if (error instanceof HttpException) throw error;
       this.logger.error('create board failed', error);
       throw new HttpException(
         'Ошибка при создании доски',
@@ -81,12 +97,17 @@ export class BoardsService {
     }
   }
 
-  async update(id: number, dto: UpdateBoardDto): Promise<Board> {
+  async update(
+    id: number,
+    dto: UpdateBoardDto,
+    userId: number
+  ): Promise<Board> {
     try {
       const board = await this.boardRepository.findByPk(id);
       if (!board) {
         throw new HttpException('Доска не найдена', HttpStatus.NOT_FOUND);
       }
+      await this.projectAccess.assertCanRead(board.projectId, userId);
       if (dto.title !== undefined) board.title = dto.title;
       if (dto.startDate !== undefined) board.startDate = dto.startDate as any;
       if (dto.endDate !== undefined) board.endDate = dto.endDate as any;
@@ -102,8 +123,13 @@ export class BoardsService {
     }
   }
 
-  async reorder(projectId: number, ids: number[]): Promise<void> {
+  async reorder(
+    projectId: number,
+    ids: number[],
+    userId: number
+  ): Promise<void> {
     try {
+      await this.projectAccess.assertCanRead(projectId, userId);
       const promises = ids.map((id, idx) =>
         this.boardRepository.update({ order: idx } as any, {
           where: { id, projectId }
@@ -114,6 +140,7 @@ export class BoardsService {
       // WS: уведомляем о порядке досок
       this.wsGateway.emitBoardReordered(projectId, ids);
     } catch (error) {
+      if (error instanceof HttpException) throw error;
       this.logger.error('reorder boards failed', error);
       throw new HttpException(
         'Ошибка при сортировке досок',
@@ -122,12 +149,13 @@ export class BoardsService {
     }
   }
 
-  async delete(id: number): Promise<void> {
+  async delete(id: number, userId: number): Promise<void> {
     try {
       const board = await this.boardRepository.findByPk(id);
       if (!board) {
         throw new HttpException('Доска не найдена', HttpStatus.NOT_FOUND);
       }
+      await this.projectAccess.assertCanRead(board.projectId, userId);
       await board.destroy();
     } catch (error) {
       if (error instanceof HttpException) throw error;

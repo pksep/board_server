@@ -17,7 +17,8 @@ import { ProjectTag } from '../tags/model/project-tag.model';
 import { WsGateway } from '../ws/ws.gateway';
 import { S3Service } from '../s3/s3.service';
 import { v4 as uuidv4 } from 'uuid';
-import { Op } from 'sequelize';
+import { Op, Transaction } from 'sequelize';
+import { ProjectAccessService } from '../projects/project-access.service';
 
 @Injectable()
 export class TasksService {
@@ -31,9 +32,11 @@ export class TasksService {
     private attachmentRepository: typeof TaskAttachment,
     @InjectModel(Project) private projectRepository: typeof Project,
     @InjectModel(BoardColumn) private columnRepository: typeof BoardColumn,
+    @InjectModel(Board) private boardRepository: typeof Board,
     private sequelize: Sequelize,
     private wsGateway: WsGateway,
-    private s3Service: S3Service
+    private s3Service: S3Service,
+    private projectAccess: ProjectAccessService
   ) {}
 
   /** Получить boardId по columnId */
@@ -47,7 +50,7 @@ export class TasksService {
   /** Получить projectId через column → board → project */
   private async getProjectIdByColumnId(
     columnId: number,
-    transaction?: any
+    transaction?: Transaction
   ): Promise<number> {
     const column = await this.columnRepository.findByPk(columnId, {
       include: [{ model: Board, attributes: ['projectId'] }],
@@ -57,6 +60,54 @@ export class TasksService {
       throw new HttpException('Колонка не найдена', HttpStatus.NOT_FOUND);
     }
     return column.board.projectId;
+  }
+
+  private async getColumnLocation(
+    columnId: number,
+    transaction?: Transaction
+  ): Promise<{ column: BoardColumn; board: Board; projectId: number }> {
+    const column = await this.columnRepository.findByPk(columnId, {
+      transaction
+    });
+    if (!column) {
+      throw new HttpException('Колонка не найдена', HttpStatus.NOT_FOUND);
+    }
+
+    const board = await this.boardRepository.findByPk(column.boardId, {
+      transaction
+    });
+    if (!board) {
+      throw new HttpException('Доска не найдена', HttpStatus.NOT_FOUND);
+    }
+
+    return { column, board, projectId: board.projectId };
+  }
+
+  private async assertColumnAccess(
+    columnId: number,
+    userId: number,
+    transaction?: Transaction
+  ) {
+    const location = await this.getColumnLocation(columnId, transaction);
+    await this.projectAccess.assertCanRead(
+      location.projectId,
+      userId,
+      transaction
+    );
+    return location;
+  }
+
+  private async assertTaskAccess(
+    taskId: number,
+    userId: number,
+    transaction?: Transaction
+  ): Promise<Task> {
+    const task = await this.taskRepository.findByPk(taskId, { transaction });
+    if (!task) {
+      throw new HttpException('Задача не найдена', HttpStatus.NOT_FOUND);
+    }
+    await this.assertColumnAccess(task.columnId, userId, transaction);
+    return task;
   }
 
   /** Общие include для задачи */
@@ -88,9 +139,13 @@ export class TasksService {
           'id',
           'taskNumber',
           'title',
+          'description',
           'priority',
+          'approvalStatus',
           'dueDate',
-          'parentTaskId'
+          'parentTaskId',
+          'columnId',
+          'order'
         ],
         include: [
           {
@@ -111,8 +166,13 @@ export class TasksService {
   /**
    * Получить все задачи доски
    */
-  async getByBoard(boardId: number): Promise<Task[]> {
+  async getByBoard(boardId: number, userId: number): Promise<Task[]> {
     try {
+      const board = await this.boardRepository.findByPk(boardId);
+      if (!board) {
+        throw new HttpException('Доска не найдена', HttpStatus.NOT_FOUND);
+      }
+      await this.projectAccess.assertCanRead(board.projectId, userId);
       const columns = await this.columnRepository.findAll({
         where: { boardId },
         attributes: ['id']
@@ -125,6 +185,7 @@ export class TasksService {
         order: [['order', 'ASC']]
       });
     } catch (error) {
+      if (error instanceof HttpException) throw error;
       this.logger.error('getByBoard failed', error);
       throw new HttpException(
         'Ошибка при получении задач',
@@ -136,14 +197,16 @@ export class TasksService {
   /**
    * Получить все задачи колонки
    */
-  async getByColumn(columnId: number): Promise<Task[]> {
+  async getByColumn(columnId: number, userId: number): Promise<Task[]> {
     try {
+      await this.assertColumnAccess(columnId, userId);
       return await this.taskRepository.findAll({
         where: { columnId, parentTaskId: null },
         include: this.taskIncludes(),
         order: [['order', 'ASC']]
       });
     } catch (error) {
+      if (error instanceof HttpException) throw error;
       this.logger.error('getByColumn failed', error);
       throw new HttpException(
         'Ошибка при получении задач колонки',
@@ -155,8 +218,9 @@ export class TasksService {
   /**
    * Получить задачу по ID
    */
-  async getById(id: number): Promise<Task> {
+  async getById(id: number, userId: number): Promise<Task> {
     try {
+      await this.assertTaskAccess(id, userId);
       const task = await this.taskRepository.findByPk(id, {
         include: this.taskIncludes()
       });
@@ -188,6 +252,7 @@ export class TasksService {
         columnId,
         transaction
       );
+      await this.projectAccess.assertCanRead(projectId, userId, transaction);
 
       // Инкрементируем счётчик задач в проекте
       await this.projectRepository.increment('taskCounter', {
@@ -255,7 +320,7 @@ export class TasksService {
       }
 
       await transaction.commit();
-      const result = await this.getById(task.id);
+      const result = await this.getById(task.id, userId);
 
       // WS: уведомляем о создании
       const boardId = await this.getBoardIdByColumnId(columnId);
@@ -297,6 +362,7 @@ export class TasksService {
         parent.columnId,
         transaction
       );
+      await this.projectAccess.assertCanRead(projectId, userId, transaction);
 
       await this.projectRepository.increment('taskCounter', {
         where: { id: projectId },
@@ -351,7 +417,7 @@ export class TasksService {
       }
 
       await transaction.commit();
-      const result = await this.getById(task.id);
+      const result = await this.getById(task.id, userId);
 
       // WS: уведомляем о создании подзадачи
       const boardId = await this.getBoardIdByColumnId(parent.columnId);
@@ -372,14 +438,16 @@ export class TasksService {
   /**
    * Получить подзадачи
    */
-  async getSubtasks(parentId: number): Promise<Task[]> {
+  async getSubtasks(parentId: number, userId: number): Promise<Task[]> {
     try {
+      await this.assertTaskAccess(parentId, userId);
       return await this.taskRepository.findAll({
         where: { parentTaskId: parentId },
         include: this.taskIncludes(),
         order: [['createdAt', 'ASC']]
       });
     } catch (error) {
+      if (error instanceof HttpException) throw error;
       this.logger.error('getSubtasks failed', error);
       throw new HttpException(
         'Ошибка при получении подзадач',
@@ -391,13 +459,10 @@ export class TasksService {
   /**
    * Обновить задачу
    */
-  async update(id: number, dto: UpdateTaskDto): Promise<Task> {
+  async update(id: number, dto: UpdateTaskDto, userId: number): Promise<Task> {
     const transaction = await this.sequelize.transaction();
     try {
-      const task = await this.taskRepository.findByPk(id, { transaction });
-      if (!task) {
-        throw new HttpException('Задача не найдена', HttpStatus.NOT_FOUND);
-      }
+      const task = await this.assertTaskAccess(id, userId, transaction);
 
       if (dto.title !== undefined) task.title = dto.title;
       if (dto.description !== undefined) task.description = dto.description;
@@ -440,7 +505,7 @@ export class TasksService {
       }
 
       await transaction.commit();
-      const result = await this.getById(id);
+      const result = await this.getById(id, userId);
 
       // WS: уведомляем об обновлении
       const boardId = await this.getBoardIdByColumnId(result.columnId);
@@ -458,49 +523,191 @@ export class TasksService {
     }
   }
 
+  private async getTaskHierarchy(
+    root: Task,
+    transaction: Transaction
+  ): Promise<Task[]> {
+    const hierarchy: Task[] = [root];
+    let parentIds = [root.id];
+
+    while (parentIds.length) {
+      const children = await this.taskRepository.findAll({
+        where: { parentTaskId: parentIds },
+        order: [
+          ['parentTaskId', 'ASC'],
+          ['order', 'ASC'],
+          ['id', 'ASC']
+        ],
+        transaction,
+        lock: transaction.LOCK.UPDATE
+      });
+      if (!children.length) break;
+      hierarchy.push(...children);
+      parentIds = children.map(child => child.id);
+    }
+
+    return hierarchy;
+  }
+
+  private async normalizeColumnWithoutTask(
+    columnId: number,
+    taskId: number,
+    transaction: Transaction
+  ): Promise<void> {
+    const tasks = await this.taskRepository.findAll({
+      where: {
+        columnId,
+        parentTaskId: null,
+        id: { [Op.ne]: taskId }
+      },
+      order: [
+        ['order', 'ASC'],
+        ['id', 'ASC']
+      ],
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+
+    await Promise.all(
+      tasks.map((task, index) =>
+        task.order === index
+          ? Promise.resolve(task)
+          : task.update({ order: index } as any, { transaction })
+      )
+    );
+  }
+
+  private async placeTaskInColumn(
+    task: Task,
+    columnId: number,
+    requestedOrder: number,
+    transaction: Transaction
+  ): Promise<number> {
+    const tasks = await this.taskRepository.findAll({
+      where: {
+        columnId,
+        parentTaskId: null,
+        id: { [Op.ne]: task.id }
+      },
+      order: [
+        ['order', 'ASC'],
+        ['id', 'ASC']
+      ],
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+    const order = Math.max(0, Math.min(requestedOrder, tasks.length));
+
+    await Promise.all(
+      tasks.map((item, index) => {
+        const nextOrder = index < order ? index : index + 1;
+        return item.order === nextOrder
+          ? Promise.resolve(item)
+          : item.update({ order: nextOrder } as any, { transaction });
+      })
+    );
+
+    task.columnId = columnId;
+    task.order = order;
+    await task.save({ transaction });
+    return order;
+  }
+
   /**
-   * Переместить задачу (с пересчётом order в целевой колонке)
+   * Переместить родительскую задачу вместе со всей иерархией.
    */
-  async move(id: number, dto: MoveTaskDto): Promise<Task> {
+  async move(id: number, dto: MoveTaskDto, userId: number): Promise<Task> {
     const transaction = await this.sequelize.transaction();
     try {
-      const task = await this.taskRepository.findByPk(id, { transaction });
-      if (!task) {
-        throw new HttpException('Задача не найдена', HttpStatus.NOT_FOUND);
+      const task = await this.assertTaskAccess(id, userId, transaction);
+      if (task.parentTaskId) {
+        throw new HttpException(
+          'Перемещайте родительскую задачу вместе с подзадачами',
+          HttpStatus.BAD_REQUEST
+        );
       }
 
+      const source = await this.getColumnLocation(task.columnId, transaction);
+      const target = await this.assertColumnAccess(
+        dto.columnId,
+        userId,
+        transaction
+      );
+      const hierarchy = await this.getTaskHierarchy(task, transaction);
+      const taskIds = hierarchy.map(item => item.id);
+      const isCrossProject = source.projectId !== target.projectId;
+      const isCrossBoard = source.board.id !== target.board.id;
       const fromColumnId = task.columnId;
 
-      // Сдвигаем order в целевой колонке: все задачи с order >= dto.order сдвигаем на +1
-      await this.taskRepository.update(
-        { order: this.sequelize.literal('"order" + 1') as any },
-        {
-          where: {
-            columnId: dto.columnId,
-            parentTaskId: null,
-            order: { [Op.gte]: dto.order },
-            id: { [Op.ne]: id }
-          },
+      if (fromColumnId !== dto.columnId) {
+        await this.normalizeColumnWithoutTask(
+          fromColumnId,
+          task.id,
           transaction
-        }
+        );
+      }
+
+      const order = await this.placeTaskInColumn(
+        task,
+        dto.columnId,
+        dto.order,
+        transaction
       );
 
-      task.columnId = dto.columnId;
-      task.order = dto.order;
-      await task.save({ transaction });
+      for (const child of hierarchy.slice(1)) {
+        child.columnId = dto.columnId;
+      }
+
+      if (isCrossProject) {
+        const targetProject = await this.projectRepository.findByPk(
+          target.projectId,
+          { transaction, lock: transaction.LOCK.UPDATE }
+        );
+        if (!targetProject) {
+          throw new HttpException('Проект не найден', HttpStatus.NOT_FOUND);
+        }
+
+        const firstTaskNumber = targetProject.taskCounter + 1;
+        targetProject.taskCounter += hierarchy.length;
+        await targetProject.save({ transaction });
+
+        hierarchy.forEach((item, index) => {
+          item.taskNumber = firstTaskNumber + index;
+        });
+
+        await this.taskTagRepository.destroy({
+          where: { taskId: taskIds },
+          transaction
+        });
+      }
+
+      await Promise.all(hierarchy.map(item => item.save({ transaction })));
 
       await transaction.commit();
+      const result = await this.getById(id, userId);
 
-      // WS: уведомляем о перемещении
-      const boardId = await this.getBoardIdByColumnId(dto.columnId);
-      this.wsGateway.emitTaskMoved(boardId, {
-        taskId: id,
-        fromColumnId,
-        toColumnId: dto.columnId,
-        order: dto.order
-      });
+      if (isCrossBoard) {
+        this.wsGateway.emitTaskRelocated(source.board.id, target.board.id, {
+          task: result,
+          taskIds,
+          fromProjectId: source.projectId,
+          toProjectId: target.projectId,
+          fromBoardId: source.board.id,
+          toBoardId: target.board.id,
+          fromColumnId,
+          toColumnId: dto.columnId,
+          order
+        });
+      } else {
+        this.wsGateway.emitTaskMoved(target.board.id, {
+          taskId: id,
+          fromColumnId,
+          toColumnId: dto.columnId,
+          order
+        });
+      }
 
-      return task;
+      return result;
     } catch (error) {
       await transaction.rollback();
       if (error instanceof HttpException) throw error;
@@ -515,12 +722,9 @@ export class TasksService {
   /**
    * Soft delete задачи
    */
-  async delete(id: number): Promise<void> {
+  async delete(id: number, userId: number): Promise<void> {
     try {
-      const task = await this.taskRepository.findByPk(id);
-      if (!task) {
-        throw new HttpException('Задача не найдена', HttpStatus.NOT_FOUND);
-      }
+      const task = await this.assertTaskAccess(id, userId);
 
       const boardId = await this.getBoardIdByColumnId(task.columnId);
       await task.destroy();
@@ -542,13 +746,11 @@ export class TasksService {
    */
   async generatePresignedUrl(
     taskId: number,
-    dto: CreateAttachmentDto
+    dto: CreateAttachmentDto,
+    userId: number
   ): Promise<{ presignedUrl: string; objectName: string }> {
     try {
-      const task = await this.taskRepository.findByPk(taskId);
-      if (!task) {
-        throw new HttpException('Задача не найдена', HttpStatus.NOT_FOUND);
-      }
+      await this.assertTaskAccess(taskId, userId);
 
       const ext = dto.fileName.split('.').pop() || 'bin';
       const objectName = `tasks/${taskId}/${uuidv4()}.${ext}`;
@@ -575,10 +777,7 @@ export class TasksService {
     userId: number
   ): Promise<TaskAttachment> {
     try {
-      const task = await this.taskRepository.findByPk(taskId);
-      if (!task) {
-        throw new HttpException('Задача не найдена', HttpStatus.NOT_FOUND);
-      }
+      const task = await this.assertTaskAccess(taskId, userId);
       if (!dto.objectName) {
         throw new HttpException(
           'Не передан objectName',
@@ -605,7 +804,7 @@ export class TasksService {
       } as any);
 
       const boardId = await this.getBoardIdByColumnId(task.columnId);
-      const updatedTask = await this.getById(taskId);
+      const updatedTask = await this.getById(taskId, userId);
       this.wsGateway.emitTaskUpdated(boardId, updatedTask);
 
       return attachment;
@@ -622,8 +821,13 @@ export class TasksService {
   /**
    * Удалить вложение
    */
-  async deleteAttachment(taskId: number, attachmentId: number): Promise<void> {
+  async deleteAttachment(
+    taskId: number,
+    attachmentId: number,
+    userId: number
+  ): Promise<void> {
     try {
+      await this.assertTaskAccess(taskId, userId);
       const attachment = await this.attachmentRepository.findOne({
         where: { id: attachmentId, taskId }
       });
@@ -637,7 +841,7 @@ export class TasksService {
       const task = await this.taskRepository.findByPk(taskId);
       if (task) {
         const boardId = await this.getBoardIdByColumnId(task.columnId);
-        const updatedTask = await this.getById(taskId);
+        const updatedTask = await this.getById(taskId, userId);
         this.wsGateway.emitTaskUpdated(boardId, updatedTask);
       }
     } catch (error) {

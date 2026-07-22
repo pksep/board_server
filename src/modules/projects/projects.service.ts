@@ -8,6 +8,7 @@ import { UserFavorite } from './model/user-favorite.model';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { UpdateProjectDto } from './dto/update-project.dto';
 import { ProjectTag } from '../tags/model/project-tag.model';
+import { ProjectAccessService } from './project-access.service';
 
 @Injectable()
 export class ProjectsService {
@@ -17,7 +18,8 @@ export class ProjectsService {
     @InjectModel(Project) private projectRepository: typeof Project,
     @InjectModel(ProjectMember) private memberRepository: typeof ProjectMember,
     @InjectModel(UserFavorite) private favoriteRepository: typeof UserFavorite,
-    private sequelize: Sequelize
+    private sequelize: Sequelize,
+    private projectAccess: ProjectAccessService
   ) {}
 
   /**
@@ -65,8 +67,9 @@ export class ProjectsService {
   /**
    * Получить проект по ID
    */
-  async getById(id: number): Promise<Project> {
+  async getById(id: number, userId: number): Promise<Project> {
     try {
+      await this.projectAccess.assertCanRead(id, userId);
       const project = await this.projectRepository.findByPk(id, {
         include: [
           {
@@ -145,7 +148,7 @@ export class ProjectsService {
 
       await transaction.commit();
 
-      return this.getById(project.id);
+      return this.getById(project.id, userId);
     } catch (error) {
       await transaction.rollback();
       if (error instanceof HttpException) throw error;
@@ -162,15 +165,11 @@ export class ProjectsService {
   async update(dto: UpdateProjectDto, userId: number): Promise<Project> {
     const transaction = await this.sequelize.transaction();
     try {
-      void userId;
-
-      const project = await this.projectRepository.findByPk(dto.id, {
+      const project = await this.projectAccess.assertCanManage(
+        dto.id,
+        userId,
         transaction
-      });
-
-      if (!project) {
-        throw new HttpException('Проект не найден', HttpStatus.NOT_FOUND);
-      }
+      );
 
       if (dto.title !== undefined) project.title = dto.title;
       if (dto.description !== undefined) project.description = dto.description;
@@ -184,7 +183,8 @@ export class ProjectsService {
           transaction
         });
 
-        const members = dto.membersIds.map(id => ({
+        const memberIds = Array.from(new Set([userId, ...dto.membersIds]));
+        const members = memberIds.map(id => ({
           projectId: dto.id,
           userId: id
         }));
@@ -198,7 +198,7 @@ export class ProjectsService {
 
       await transaction.commit();
 
-      return this.getById(dto.id);
+      return this.getById(dto.id, userId);
     } catch (error) {
       await transaction.rollback();
       if (error instanceof HttpException) throw error;
@@ -213,12 +213,9 @@ export class ProjectsService {
   /**
    * Soft delete проекта
    */
-  async delete(id: number): Promise<void> {
+  async delete(id: number, userId: number): Promise<void> {
     try {
-      const project = await this.projectRepository.findByPk(id);
-      if (!project) {
-        throw new HttpException('Проект не найден', HttpStatus.NOT_FOUND);
-      }
+      const project = await this.projectAccess.assertCanManage(id, userId);
       await project.destroy(); // paranoid → soft delete
     } catch (error) {
       if (error instanceof HttpException) throw error;
@@ -238,6 +235,7 @@ export class ProjectsService {
     userId: number
   ): Promise<{ isFavorite: boolean }> {
     try {
+      await this.projectAccess.assertCanRead(projectId, userId);
       const existing = await this.favoriteRepository.findOne({
         where: { projectId, userId }
       });
@@ -250,6 +248,7 @@ export class ProjectsService {
       await this.favoriteRepository.create({ projectId, userId } as any);
       return { isFavorite: true };
     } catch (error) {
+      if (error instanceof HttpException) throw error;
       this.logger.error('toggleFavorite failed', error);
       throw new HttpException(
         'Ошибка при обновлении избранного',
