@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Put
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -16,6 +17,7 @@ import { UpdateTaskDto } from './dto/update-task.dto';
 import { MoveTaskDto } from './dto/move-task.dto';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { IUserDataToken } from '../auth/interfaces/interface';
+import { ActivityHistoryQueryDto } from '../activity-events/dto/activity-history-query.dto';
 
 @ApiTags('Задачи')
 @Controller()
@@ -35,6 +37,16 @@ export class TasksController {
   @Get('tasks/:id')
   getById(@Param('id') id: number, @CurrentUser() user: IUserDataToken) {
     return this.tasksService.getById(+id, user.id);
+  }
+
+  @ApiOperation({ summary: 'Получить историю изменений задачи' })
+  @Get('tasks/:id/history')
+  getHistory(
+    @Param('id') id: number,
+    @Query() query: ActivityHistoryQueryDto,
+    @CurrentUser() user: IUserDataToken
+  ) {
+    return this.tasksService.getHistory(+id, user.id, query);
   }
 
   @ApiOperation({ summary: 'Все задачи колонки' })

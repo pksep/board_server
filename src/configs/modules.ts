@@ -22,6 +22,7 @@ import { BoardsModule } from 'src/modules/boards/boards.module';
 import { ColumnsModule } from 'src/modules/columns/columns.module';
 import { TasksModule } from 'src/modules/tasks/tasks.module';
 import { WsModule } from 'src/modules/ws/ws.module';
+import { ActivityEventsModule } from 'src/modules/activity-events/activity-events.module';
 
 export const getCoreModules = (): (
   | DynamicModule
@@ -103,6 +104,7 @@ export const getAppModule = (): Type<any>[] => [
   TagsModule,
   BoardsModule,
   ColumnsModule,
+  ActivityEventsModule,
   TasksModule,
   WsModule
 ];

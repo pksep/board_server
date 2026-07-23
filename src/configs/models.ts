@@ -9,6 +9,7 @@ import { Task } from 'src/modules/tasks/model/task.model';
 import { TaskAssignee } from 'src/modules/tasks/model/task-assignee.model';
 import { TaskTag } from 'src/modules/tasks/model/task-tag.model';
 import { TaskAttachment } from 'src/modules/tasks/model/task-attachment.model';
+import { ActivityEvent } from 'src/modules/activity-events/model/activity-event.model';
 
 const models = [
   User,
@@ -21,7 +22,8 @@ const models = [
   Task,
   TaskAssignee,
   TaskTag,
-  TaskAttachment
+  TaskAttachment,
+  ActivityEvent
 ];
 
 export default models;

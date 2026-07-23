@@ -10,6 +10,7 @@ import { Project } from '../projects/model/project.model';
 import { BoardColumn } from '../columns/model/board-column.model';
 import { Board } from '../boards/model/board.model';
 import { ProjectsModule } from '../projects/projects.module';
+import { ActivityEventsModule } from '../activity-events/activity-events.module';
 
 @Module({
   controllers: [TasksController],
@@ -24,7 +25,8 @@ import { ProjectsModule } from '../projects/projects.module';
       BoardColumn,
       Board
     ]),
-    ProjectsModule
+    ProjectsModule,
+    ActivityEventsModule
   ],
   exports: [TasksService]
 })

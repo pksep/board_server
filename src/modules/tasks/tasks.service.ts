@@ -19,6 +19,12 @@ import { S3Service } from '../s3/s3.service';
 import { v4 as uuidv4 } from 'uuid';
 import { Op, Transaction } from 'sequelize';
 import { ProjectAccessService } from '../projects/project-access.service';
+import { ActivityEventsService } from '../activity-events/activity-events.service';
+import {
+  ActivityActionType,
+  ActivityEntityType
+} from '../activity-events/activity-events.constants';
+import { ActivityHistoryQueryDto } from '../activity-events/dto/activity-history-query.dto';
 
 @Injectable()
 export class TasksService {
@@ -36,7 +42,8 @@ export class TasksService {
     private sequelize: Sequelize,
     private wsGateway: WsGateway,
     private s3Service: S3Service,
-    private projectAccess: ProjectAccessService
+    private projectAccess: ProjectAccessService,
+    private activityEvents: ActivityEventsService
   ) {}
 
   /** Получить boardId по columnId */
@@ -108,6 +115,60 @@ export class TasksService {
     }
     await this.assertColumnAccess(task.columnId, userId, transaction);
     return task;
+  }
+
+  private normalizeIds(ids: number[] = []): number[] {
+    return [...new Set(ids.map(Number))].sort((left, right) => left - right);
+  }
+
+  private normalizeDate(
+    value: Date | string | null | undefined
+  ): string | null {
+    if (!value) return null;
+    const date = value instanceof Date ? value : new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value) : date.toISOString();
+  }
+
+  private async getAssigneeIds(
+    taskId: number,
+    transaction: Transaction
+  ): Promise<number[]> {
+    const assignees = await this.assigneeRepository.findAll({
+      where: { taskId },
+      attributes: ['userId'],
+      transaction
+    });
+    return this.normalizeIds(assignees.map(assignee => assignee.userId));
+  }
+
+  private async getTagIds(
+    taskId: number,
+    transaction: Transaction
+  ): Promise<number[]> {
+    const tags = await this.taskTagRepository.findAll({
+      where: { taskId },
+      attributes: ['projectTagId'],
+      transaction
+    });
+    return this.normalizeIds(tags.map(tag => tag.projectTagId));
+  }
+
+  private createdTaskChanges(
+    task: Task,
+    assigneeIds: number[] = [],
+    tagIds: number[] = []
+  ) {
+    return this.activityEvents.buildChanges({
+      title: { before: null, after: task.title },
+      description: { before: null, after: task.description },
+      priority: { before: null, after: task.priority },
+      approvalStatus: { before: null, after: task.approvalStatus },
+      dueDate: { before: null, after: this.normalizeDate(task.dueDate) },
+      columnId: { before: null, after: task.columnId },
+      parentTaskId: { before: null, after: task.parentTaskId },
+      assigneeIds: { before: [], after: this.normalizeIds(assigneeIds) },
+      tagIds: { before: [], after: this.normalizeIds(tagIds) }
+    });
   }
 
   /** Общие include для задачи */
@@ -238,6 +299,19 @@ export class TasksService {
     }
   }
 
+  async getHistory(id: number, userId: number, query: ActivityHistoryQueryDto) {
+    const task = await this.assertTaskAccess(id, userId);
+    const projectId = await this.getProjectIdByColumnId(task.columnId);
+
+    return this.activityEvents.findByEntity({
+      projectId,
+      entityType: ActivityEntityType.Task,
+      entityId: String(id),
+      limit: query.limit,
+      beforeId: query.beforeId
+    });
+  }
+
   /**
    * Создать задачу в колонке
    */
@@ -319,6 +393,19 @@ export class TasksService {
         );
       }
 
+      await this.activityEvents.create(
+        {
+          projectId,
+          entityType: ActivityEntityType.Task,
+          entityId: String(task.id),
+          actionType: ActivityActionType.Created,
+          actorUserId: userId,
+          changes: this.createdTaskChanges(task, dto.assigneeIds, dto.tagIds),
+          metadata: { taskNumber: task.taskNumber }
+        },
+        { transaction }
+      );
+
       await transaction.commit();
       const result = await this.getById(task.id, userId);
 
@@ -328,7 +415,9 @@ export class TasksService {
 
       return result;
     } catch (error) {
-      await transaction.rollback();
+      if (!transaction.finished) {
+        await transaction.rollback();
+      }
       if (error instanceof HttpException) throw error;
       this.logger.error('create task failed', error);
       throw new HttpException(
@@ -416,6 +505,22 @@ export class TasksService {
         );
       }
 
+      await this.activityEvents.create(
+        {
+          projectId,
+          entityType: ActivityEntityType.Task,
+          entityId: String(task.id),
+          actionType: ActivityActionType.Created,
+          actorUserId: userId,
+          changes: this.createdTaskChanges(task, dto.assigneeIds, dto.tagIds),
+          metadata: {
+            taskNumber: task.taskNumber,
+            parentTaskId: parent.id
+          }
+        },
+        { transaction }
+      );
+
       await transaction.commit();
       const result = await this.getById(task.id, userId);
 
@@ -425,7 +530,9 @@ export class TasksService {
 
       return result;
     } catch (error) {
-      await transaction.rollback();
+      if (!transaction.finished) {
+        await transaction.rollback();
+      }
       if (error instanceof HttpException) throw error;
       this.logger.error('createSubtask failed', error);
       throw new HttpException(
@@ -463,6 +570,25 @@ export class TasksService {
     const transaction = await this.sequelize.transaction();
     try {
       const task = await this.assertTaskAccess(id, userId, transaction);
+      const projectId = await this.getProjectIdByColumnId(
+        task.columnId,
+        transaction
+      );
+      const before = {
+        title: task.title,
+        description: task.description,
+        priority: task.priority,
+        dueDate: this.normalizeDate(task.dueDate),
+        approvalStatus: task.approvalStatus,
+        assigneeIds:
+          dto.assigneeIds === undefined
+            ? undefined
+            : await this.getAssigneeIds(id, transaction),
+        tagIds:
+          dto.tagIds === undefined
+            ? undefined
+            : await this.getTagIds(id, transaction)
+      };
 
       if (dto.title !== undefined) task.title = dto.title;
       if (dto.description !== undefined) task.description = dto.description;
@@ -504,6 +630,64 @@ export class TasksService {
         }
       }
 
+      const changedFields: Record<string, { before: unknown; after: unknown }> =
+        {};
+      if (dto.title !== undefined) {
+        changedFields.title = { before: before.title, after: task.title };
+      }
+      if (dto.description !== undefined) {
+        changedFields.description = {
+          before: before.description,
+          after: task.description
+        };
+      }
+      if (dto.priority !== undefined) {
+        changedFields.priority = {
+          before: before.priority,
+          after: task.priority
+        };
+      }
+      if (dto.dueDate !== undefined) {
+        changedFields.dueDate = {
+          before: before.dueDate,
+          after: this.normalizeDate(task.dueDate)
+        };
+      }
+      if (dto.approvalStatus !== undefined) {
+        changedFields.approvalStatus = {
+          before: before.approvalStatus,
+          after: task.approvalStatus
+        };
+      }
+      if (dto.assigneeIds !== undefined) {
+        changedFields.assigneeIds = {
+          before: before.assigneeIds,
+          after: this.normalizeIds(dto.assigneeIds)
+        };
+      }
+      if (dto.tagIds !== undefined) {
+        changedFields.tagIds = {
+          before: before.tagIds,
+          after: this.normalizeIds(dto.tagIds)
+        };
+      }
+
+      const changes = this.activityEvents.buildChanges(changedFields);
+      if (changes.length) {
+        await this.activityEvents.create(
+          {
+            projectId,
+            entityType: ActivityEntityType.Task,
+            entityId: String(task.id),
+            actionType: ActivityActionType.Updated,
+            actorUserId: userId,
+            changes,
+            metadata: { taskNumber: task.taskNumber }
+          },
+          { transaction }
+        );
+      }
+
       await transaction.commit();
       const result = await this.getById(id, userId);
 
@@ -513,7 +697,9 @@ export class TasksService {
 
       return result;
     } catch (error) {
-      await transaction.rollback();
+      if (!transaction.finished) {
+        await transaction.rollback();
+      }
       if (error instanceof HttpException) throw error;
       this.logger.error('update task failed', error);
       throw new HttpException(
@@ -635,6 +821,16 @@ export class TasksService {
       );
       const hierarchy = await this.getTaskHierarchy(task, transaction);
       const taskIds = hierarchy.map(item => item.id);
+      const beforeMove = new Map(
+        hierarchy.map(item => [
+          item.id,
+          {
+            columnId: item.columnId,
+            order: item.order,
+            taskNumber: item.taskNumber
+          }
+        ])
+      );
       const isCrossProject = source.projectId !== target.projectId;
       const isCrossBoard = source.board.id !== target.board.id;
       const fromColumnId = task.columnId;
@@ -683,6 +879,69 @@ export class TasksService {
 
       await Promise.all(hierarchy.map(item => item.save({ transaction })));
 
+      for (const item of hierarchy) {
+        const previous = beforeMove.get(item.id);
+        const changes = this.activityEvents.buildChanges({
+          projectId: {
+            before: source.projectId,
+            after: target.projectId
+          },
+          boardId: {
+            before: source.board.id,
+            after: target.board.id
+          },
+          columnId: {
+            before: previous.columnId,
+            after: item.columnId
+          },
+          order: {
+            before: previous.order,
+            after: item.order
+          },
+          taskNumber: {
+            before: previous.taskNumber,
+            after: item.taskNumber
+          }
+        });
+
+        if (!changes.length) continue;
+
+        const event = {
+          entityType: ActivityEntityType.Task,
+          entityId: String(item.id),
+          actionType: ActivityActionType.Moved,
+          actorUserId: userId,
+          changes,
+          metadata: {
+            rootTaskId: task.id,
+            hierarchySize: hierarchy.length
+          }
+        };
+
+        if (isCrossProject) {
+          await this.activityEvents.create(
+            {
+              ...event,
+              projectId: source.projectId,
+              metadata: { ...event.metadata, direction: 'out' }
+            },
+            { transaction }
+          );
+        }
+
+        await this.activityEvents.create(
+          {
+            ...event,
+            projectId: target.projectId,
+            metadata: {
+              ...event.metadata,
+              direction: isCrossProject ? 'in' : 'within'
+            }
+          },
+          { transaction }
+        );
+      }
+
       await transaction.commit();
       const result = await this.getById(id, userId);
 
@@ -709,7 +968,9 @@ export class TasksService {
 
       return result;
     } catch (error) {
-      await transaction.rollback();
+      if (!transaction.finished) {
+        await transaction.rollback();
+      }
       if (error instanceof HttpException) throw error;
       this.logger.error('move task failed', error);
       throw new HttpException(
@@ -723,15 +984,40 @@ export class TasksService {
    * Soft delete задачи
    */
   async delete(id: number, userId: number): Promise<void> {
+    const transaction = await this.sequelize.transaction();
     try {
-      const task = await this.assertTaskAccess(id, userId);
+      const task = await this.assertTaskAccess(id, userId, transaction);
+      const projectId = await this.getProjectIdByColumnId(
+        task.columnId,
+        transaction
+      );
 
       const boardId = await this.getBoardIdByColumnId(task.columnId);
-      await task.destroy();
+      await task.destroy({ transaction });
+      await this.activityEvents.create(
+        {
+          projectId,
+          entityType: ActivityEntityType.Task,
+          entityId: String(task.id),
+          actionType: ActivityActionType.Deleted,
+          actorUserId: userId,
+          changes: this.activityEvents.buildChanges({
+            title: { before: task.title, after: null },
+            columnId: { before: task.columnId, after: null },
+            parentTaskId: { before: task.parentTaskId, after: null }
+          }),
+          metadata: { taskNumber: task.taskNumber }
+        },
+        { transaction }
+      );
+      await transaction.commit();
 
       // WS: уведомляем об удалении
       this.wsGateway.emitTaskDeleted(boardId, id);
     } catch (error) {
+      if (!transaction.finished) {
+        await transaction.rollback();
+      }
       if (error instanceof HttpException) throw error;
       this.logger.error('delete task failed', error);
       throw new HttpException(
