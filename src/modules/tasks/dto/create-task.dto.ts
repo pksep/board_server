@@ -5,13 +5,17 @@ import {
   IsString,
   IsDateString,
   IsArray,
-  IsEnum
+  IsEnum,
+  MaxLength
 } from 'class-validator';
 
 export class CreateTaskDto {
   @ApiProperty({ example: 'Исправить баг', description: 'Название задачи' })
   @IsString()
   @IsNotEmpty({ message: 'Название задачи обязательно' })
+  @MaxLength(255, {
+    message: 'Название задачи не должно превышать 255 символов'
+  })
   title: string;
 
   @ApiProperty({ description: 'Описание (HTML)' })
