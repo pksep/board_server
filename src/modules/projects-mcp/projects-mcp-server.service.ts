@@ -147,7 +147,7 @@ export class ProjectsMcpServerService {
         this.assertScope(auth, ProjectsMcpScope.Read);
         await this.projectAccess.assertCanRead(projectId, auth.user.id);
         return this.toolResult(
-          await this.boardsService.getByProject(projectId)
+          await this.boardsService.getByProject(projectId, auth.user.id)
         );
       }
     );

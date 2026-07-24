@@ -39,7 +39,7 @@ import { json, urlencoded } from 'express';
   app.use(urlencoded({ extended: true, limit: '50mb' }));
 
   app.enableCors({
-    exposedHeaders: ['Content-Encoding'],
+    exposedHeaders: ['Content-Encoding', 'WWW-Authenticate'],
     origin: (origin, callback) => {
       if (isAllowAll) {
         callback(null, true);

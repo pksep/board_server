@@ -51,15 +51,17 @@ export class ProjectsMcpMetadataController {
 
   @Get()
   getMetadata(@Req() request: Request) {
-    const erpApiUrl =
+    const authorizationServerUrl =
+      this.configService.get<string>('mcpProjects.authorizationServerUrl') ||
       this.configService.get<string>('erpApiUrl') ||
       `${request.protocol}://${request.get('host')}`;
-    const authorizationServer = erpApiUrl
+    const authorizationServer = authorizationServerUrl
       .replace(/\/+$/, '')
       .replace(/\/api$/, '');
-    const resource =
+    const resource = (
       this.configService.get<string>('mcpProjects.resourceUrl') ||
-      `${request.protocol}://${request.get('host')}/mcp/projects`;
+      `${request.protocol}://${request.get('host')}/mcp/projects`
+    ).replace(/\/+$/, '');
 
     return {
       resource,

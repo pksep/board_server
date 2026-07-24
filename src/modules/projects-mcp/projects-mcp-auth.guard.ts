@@ -1,6 +1,7 @@
 import {
   CanActivate,
   ExecutionContext,
+  ForbiddenException,
   Injectable,
   UnauthorizedException
 } from '@nestjs/common';
@@ -11,7 +12,9 @@ import { Request, Response } from 'express';
 import { User } from 'src/modules/users/model/users.model';
 import {
   PROJECTS_MCP_AUDIENCE,
-  PROJECTS_MCP_SCOPES
+  PROJECTS_MCP_SCOPES,
+  PROJECTS_MCP_TOOL_SCOPES,
+  ProjectsMcpScope
 } from './projects-mcp.constants';
 import { ProjectsMcpAuthContext } from './interfaces/projects-mcp.interface';
 
@@ -48,10 +51,9 @@ export class ProjectsMcpAuthGuard implements CanActivate {
     const resourceUrl =
       this.configService.get<string>('mcpProjects.resourceUrl') ||
       `${request.protocol}://${request.get('host')}/mcp/projects`;
-    const resourceMetadataUrl = resourceUrl.replace(
-      /\/mcp\/projects$/,
-      '/.well-known/oauth-protected-resource/mcp/projects'
-    );
+    const normalizedResourceUrl = resourceUrl.replace(/\/+$/, '');
+    const resource = new URL(normalizedResourceUrl);
+    const resourceMetadataUrl = `${resource.origin}/.well-known/oauth-protected-resource${resource.pathname}`;
 
     const authorization = request.header('authorization');
     const match = authorization?.match(/^Bearer\s+(.+)$/i);
@@ -96,6 +98,7 @@ export class ProjectsMcpAuthGuard implements CanActivate {
       );
     }
 
+    this.assertRequestScope(request, response, scopes);
     const user = await this.upsertBoardUser(data.user);
     const auth: ProjectsMcpAuthContext = {
       user: {
@@ -114,6 +117,40 @@ export class ProjectsMcpAuthGuard implements CanActivate {
 
     (request as Request & { mcpAuth: ProjectsMcpAuthContext }).mcpAuth = auth;
     return true;
+  }
+
+  private assertRequestScope(
+    request: Request,
+    response: Response,
+    scopes: Set<string>
+  ): void {
+    const body = request.body as
+      | {
+          method?: unknown;
+          params?: { name?: unknown };
+        }
+      | undefined;
+    let requiredScope: ProjectsMcpScope | undefined;
+
+    if (
+      body?.method === 'tools/call' &&
+      typeof body.params?.name === 'string'
+    ) {
+      requiredScope = PROJECTS_MCP_TOOL_SCOPES[body.params.name];
+    } else if (
+      body?.method === 'resources/read' ||
+      body?.method === 'resources/list'
+    ) {
+      requiredScope = ProjectsMcpScope.Read;
+    }
+
+    if (requiredScope && !scopes.has(requiredScope)) {
+      response.setHeader(
+        'WWW-Authenticate',
+        `Bearer error="insufficient_scope", scope="${requiredScope}"`
+      );
+      throw new ForbiddenException(`Недостаточный scope: ${requiredScope}`);
+    }
   }
 
   private setAuthenticateHeader(

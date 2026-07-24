@@ -34,7 +34,8 @@ export default function configFactory() {
     mcpProjects: {
       audience: process.env.MCP_PROJECTS_AUDIENCE || 'board-projects-mcp',
       resourceUrl: process.env.MCP_PROJECTS_RESOURCE_URL || '',
-      introspectionUrl: process.env.MCP_PROJECTS_INTROSPECTION_URL || ''
+      introspectionUrl: process.env.MCP_PROJECTS_INTROSPECTION_URL || '',
+      authorizationServerUrl: process.env.MCP_AUTH_ISSUER || ''
     }
   } as const;
 }

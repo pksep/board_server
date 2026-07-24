@@ -22,7 +22,7 @@ describe('ProjectsMcpServerService', () => {
     assertCanRead: jest.fn()
   };
   const boardsService = {
-    getByProject: jest.fn()
+    getByProject: jest.fn().mockResolvedValue([])
   };
   const tagsService = {
     getByProject: jest.fn()
@@ -74,6 +74,12 @@ describe('ProjectsMcpServerService', () => {
     expect(list.structuredContent).toEqual({
       data: [{ id: 1, title: 'Board', prefix: 'BRD', description: '' }]
     });
+
+    await client.callTool({
+      name: 'project_boards_list',
+      arguments: { projectId: 1 }
+    });
+    expect(boardsService.getByProject).toHaveBeenCalledWith(1, 7);
 
     await client.close();
     await server.close();
