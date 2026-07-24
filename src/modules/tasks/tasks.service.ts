@@ -541,6 +541,24 @@ export class TasksService {
         { transaction }
       );
 
+      await this.activityEvents.create(
+        {
+          projectId,
+          entityType: ActivityEntityType.Task,
+          entityId: String(parent.id),
+          actionType: ActivityActionType.Updated,
+          actorUserId: userId,
+          changes: [],
+          metadata: {
+            eventType: 'subtask_created',
+            subtaskId: task.id,
+            subtaskTitle: task.title,
+            taskNumber: task.taskNumber
+          }
+        },
+        { transaction }
+      );
+
       await transaction.commit();
       const result = await this.getById(task.id, userId);
 
