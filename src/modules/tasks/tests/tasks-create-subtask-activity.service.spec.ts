@@ -4,6 +4,7 @@ import { TasksService } from '../tasks.service';
 describe('TasksService.createSubtask activity', () => {
   it('фиксирует создание в историях подзадачи и родительской задачи', async () => {
     const transaction = {
+      LOCK: { UPDATE: 'UPDATE' },
       commit: jest.fn(),
       rollback: jest.fn(),
       finished: false
@@ -14,7 +15,7 @@ describe('TasksService.createSubtask activity', () => {
     };
     const subtask = {
       id: 11,
-      taskNumber: 9,
+      taskNumber: 0,
       title: 'Новая подзадача',
       description: '',
       priority: '',
@@ -25,7 +26,7 @@ describe('TasksService.createSubtask activity', () => {
     };
     const taskRepository = {
       findByPk: jest.fn().mockResolvedValue(parent),
-      create: jest.fn().mockResolvedValue(subtask)
+      create: jest.fn(async task => Object.assign(subtask, task))
     };
     const columnRepository = {
       findByPk: jest.fn(async (_id: number, options: any) =>
@@ -34,9 +35,13 @@ describe('TasksService.createSubtask activity', () => {
           : { id: 5, boardId: 20 }
       )
     };
+    const project = {
+      id: 30,
+      taskCounter: 4,
+      save: jest.fn().mockResolvedValue(undefined)
+    };
     const projectRepository = {
-      increment: jest.fn(),
-      findByPk: jest.fn().mockResolvedValue({ id: 30, taskCounter: 9 })
+      findByPk: jest.fn().mockResolvedValue(project)
     };
     const projectAccess = { assertCanRead: jest.fn() };
     const activityEvents = {
@@ -58,7 +63,10 @@ describe('TasksService.createSubtask activity', () => {
       projectRepository as any,
       columnRepository as any,
       {} as any,
-      { transaction: jest.fn().mockResolvedValue(transaction) } as any,
+      {
+        transaction: jest.fn().mockResolvedValue(transaction),
+        query: jest.fn().mockResolvedValue([{ maxTaskNumber: 5 }])
+      } as any,
       wsGateway as any,
       {} as any,
       projectAccess as any,
@@ -68,6 +76,12 @@ describe('TasksService.createSubtask activity', () => {
 
     await service.createSubtask(10, { title: subtask.title }, 7);
 
+    expect(subtask.taskNumber).toBe(6);
+    expect(project.taskCounter).toBe(6);
+    expect(projectRepository.findByPk).toHaveBeenCalledWith(30, {
+      transaction,
+      lock: 'UPDATE'
+    });
     expect(activityEvents.create).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
@@ -90,7 +104,7 @@ describe('TasksService.createSubtask activity', () => {
           eventType: 'subtask_created',
           subtaskId: 11,
           subtaskTitle: 'Новая подзадача',
-          taskNumber: 9
+          taskNumber: 6
         }
       }),
       { transaction }

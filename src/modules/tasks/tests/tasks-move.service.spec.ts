@@ -88,7 +88,10 @@ describe('TasksService.move', () => {
       projectRepository as any,
       columnRepository as any,
       boardRepository as any,
-      { transaction: jest.fn().mockResolvedValue(transaction) } as any,
+      {
+        transaction: jest.fn().mockResolvedValue(transaction),
+        query: jest.fn().mockResolvedValue([{ maxTaskNumber: 100 }])
+      } as any,
       wsGateway as any,
       {} as any,
       projectAccess as any,

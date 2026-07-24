@@ -17,7 +17,7 @@ import { ProjectTag } from '../tags/model/project-tag.model';
 import { WsGateway } from '../ws/ws.gateway';
 import { S3Service } from '../s3/s3.service';
 import { v4 as uuidv4 } from 'uuid';
-import { Op, Transaction } from 'sequelize';
+import { Op, QueryTypes, Transaction } from 'sequelize';
 import { ProjectAccessService } from '../projects/project-access.service';
 import { ActivityEventsService } from '../activity-events/activity-events.service';
 import {
@@ -127,6 +127,53 @@ export class TasksService {
     if (!value) return null;
     const date = value instanceof Date ? value : new Date(value);
     return Number.isNaN(date.getTime()) ? String(value) : date.toISOString();
+  }
+
+  /**
+   * Атомарно выделяет последовательный диапазон номеров задач проекта.
+   */
+  private async allocateTaskNumbers(
+    projectId: number,
+    count: number,
+    transaction: Transaction
+  ): Promise<number> {
+    // Блокировка проекта сериализует все конкурентные операции нумерации.
+    const project = await this.projectRepository.findByPk(projectId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+    if (!project) {
+      throw new HttpException('Проект не найден', HttpStatus.NOT_FOUND);
+    }
+
+    // Реальный максимум страхует проекты с устаревшим taskCounter.
+    const [maximum] = await this.sequelize.query<{
+      maxTaskNumber: number | string;
+    }>(
+      `SELECT COALESCE(MAX(task.task_number), 0)::int AS "maxTaskNumber"
+       FROM tasks task
+       INNER JOIN board_columns column_item
+         ON column_item.id = task.column_id
+       INNER JOIN boards board
+         ON board.id = column_item.board_id
+       WHERE board.project_id = :projectId`,
+      {
+        replacements: { projectId },
+        transaction,
+        type: QueryTypes.SELECT
+      }
+    );
+
+    const currentMaximum = Math.max(
+      Number(project.taskCounter) || 0,
+      Number(maximum?.maxTaskNumber) || 0
+    );
+    const firstTaskNumber = currentMaximum + 1;
+
+    project.taskCounter = currentMaximum + count;
+    await project.save({ transaction });
+
+    return firstTaskNumber;
   }
 
   /**
@@ -348,21 +395,11 @@ export class TasksService {
       );
       await this.projectAccess.assertCanRead(projectId, userId, transaction);
 
-      // Инкрементируем счётчик задач в проекте
-      await this.projectRepository.increment('taskCounter', {
-        where: { id: projectId },
+      const taskCounter = await this.allocateTaskNumbers(
+        projectId,
+        1,
         transaction
-      });
-
-      // Перечитываем проект чтобы получить актуальный taskCounter
-      const project = await this.projectRepository.findByPk(projectId, {
-        attributes: ['id', 'taskCounter'],
-        transaction
-      });
-      if (!project) {
-        throw new HttpException('Проект не найден', HttpStatus.NOT_FOUND);
-      }
-      const taskCounter = project.taskCounter;
+      );
 
       // Вставляем новую верхнеуровневую задачу в начало колонки.
       await this.taskRepository.update(
@@ -473,22 +510,11 @@ export class TasksService {
       );
       await this.projectAccess.assertCanRead(projectId, userId, transaction);
 
-      await this.projectRepository.increment('taskCounter', {
-        where: { id: projectId },
+      const taskCounter = await this.allocateTaskNumbers(
+        projectId,
+        1,
         transaction
-      });
-
-      const updatedProject = await this.projectRepository.findByPk(projectId, {
-        attributes: ['id', 'taskCounter'],
-        transaction
-      });
-      const taskCounter = updatedProject?.taskCounter;
-      if (!taskCounter) {
-        throw new HttpException(
-          'Проект не найден или не удалось получить счётчик',
-          HttpStatus.NOT_FOUND
-        );
-      }
+      );
 
       const task = await this.taskRepository.create(
         {
@@ -901,17 +927,11 @@ export class TasksService {
       }
 
       if (isCrossProject) {
-        const targetProject = await this.projectRepository.findByPk(
+        const firstTaskNumber = await this.allocateTaskNumbers(
           target.projectId,
-          { transaction, lock: transaction.LOCK.UPDATE }
+          hierarchy.length,
+          transaction
         );
-        if (!targetProject) {
-          throw new HttpException('Проект не найден', HttpStatus.NOT_FOUND);
-        }
-
-        const firstTaskNumber = targetProject.taskCounter + 1;
-        targetProject.taskCounter += hierarchy.length;
-        await targetProject.save({ transaction });
 
         hierarchy.forEach((item, index) => {
           item.taskNumber = firstTaskNumber + index;
