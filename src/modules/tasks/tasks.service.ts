@@ -618,6 +618,7 @@ export class TasksService {
         priority: task.priority,
         dueDate: this.normalizeDate(task.dueDate),
         approvalStatus: task.approvalStatus,
+        parentTaskId: task.parentTaskId,
         assigneeIds:
           dto.assigneeIds === undefined
             ? undefined
@@ -634,6 +635,7 @@ export class TasksService {
       if (dto.dueDate !== undefined) task.dueDate = dto.dueDate as any;
       if (dto.approvalStatus !== undefined)
         task.approvalStatus = dto.approvalStatus;
+      if (dto.parentTaskId !== undefined) task.parentTaskId = dto.parentTaskId;
 
       await task.save({ transaction });
 
@@ -695,6 +697,12 @@ export class TasksService {
         changedFields.approvalStatus = {
           before: before.approvalStatus,
           after: task.approvalStatus
+        };
+      }
+      if (dto.parentTaskId !== undefined) {
+        changedFields.parentTaskId = {
+          before: before.parentTaskId,
+          after: task.parentTaskId
         };
       }
       if (dto.assigneeIds !== undefined) {

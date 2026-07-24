@@ -16,6 +16,7 @@ describe('TasksService.update activity', () => {
       dueDate: null,
       approvalStatus: '',
       columnId: 10,
+      parentTaskId: 8,
       save: jest.fn().mockResolvedValue(undefined)
     };
     const taskRepository = {
@@ -78,7 +79,8 @@ describe('TasksService.update activity', () => {
       {
         title: 'Новое название',
         description: '<p><br></p>',
-        assigneeIds: [3]
+        assigneeIds: [3],
+        parentTaskId: null
       },
       7
     );
@@ -95,11 +97,13 @@ describe('TasksService.update activity', () => {
             before: 'Старое название',
             after: 'Новое название'
           },
+          { field: 'parentTaskId', before: 8, after: null },
           { field: 'assigneeIds', before: [2], after: [3] }
         ]
       }),
       { transaction }
     );
+    expect(task.parentTaskId).toBeNull();
     expect(transaction.commit).toHaveBeenCalledTimes(1);
     expect(transaction.rollback).not.toHaveBeenCalled();
   });

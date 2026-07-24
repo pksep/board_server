@@ -77,7 +77,7 @@ export class Task extends Model<Task> {
   @ApiProperty({ example: null, description: 'ID родительской задачи' })
   @ForeignKey(() => Task)
   @Column({ type: DataType.INTEGER, allowNull: true, field: 'parent_task_id' })
-  parentTaskId: number;
+  parentTaskId: number | null;
 
   @ApiProperty({ example: 0, description: 'Порядок в колонке' })
   @Column({ type: DataType.INTEGER, allowNull: false, defaultValue: 0 })
