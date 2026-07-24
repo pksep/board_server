@@ -10,6 +10,7 @@ import { TaskAssignee } from 'src/modules/tasks/model/task-assignee.model';
 import { TaskTag } from 'src/modules/tasks/model/task-tag.model';
 import { TaskAttachment } from 'src/modules/tasks/model/task-attachment.model';
 import { ActivityEvent } from 'src/modules/activity-events/model/activity-event.model';
+import { McpProjectOperation } from 'src/modules/projects-mcp/model/mcp-project-operation.model';
 
 const models = [
   User,
@@ -23,7 +24,8 @@ const models = [
   TaskAssignee,
   TaskTag,
   TaskAttachment,
-  ActivityEvent
+  ActivityEvent,
+  McpProjectOperation
 ];
 
 export default models;

@@ -23,6 +23,7 @@ import { ColumnsModule } from 'src/modules/columns/columns.module';
 import { TasksModule } from 'src/modules/tasks/tasks.module';
 import { WsModule } from 'src/modules/ws/ws.module';
 import { ActivityEventsModule } from 'src/modules/activity-events/activity-events.module';
+import { ProjectsMcpModule } from 'src/modules/projects-mcp/projects-mcp.module';
 
 export const getCoreModules = (): (
   | DynamicModule
@@ -105,6 +106,7 @@ export const getAppModule = (): Type<any>[] => [
   BoardsModule,
   ColumnsModule,
   ActivityEventsModule,
+  ProjectsMcpModule,
   TasksModule,
   WsModule
 ];

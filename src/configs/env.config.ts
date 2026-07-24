@@ -30,6 +30,11 @@ export default function configFactory() {
     compressionThresold: Number(process.env.COMPRESSION_THRESHOLD) || 1024,
     commentService: {
       url: process.env.COMMENTS_SERVICE_URL!
+    },
+    mcpProjects: {
+      audience: process.env.MCP_PROJECTS_AUDIENCE || 'board-projects-mcp',
+      resourceUrl: process.env.MCP_PROJECTS_RESOURCE_URL || '',
+      introspectionUrl: process.env.MCP_PROJECTS_INTROSPECTION_URL || ''
     }
   } as const;
 }

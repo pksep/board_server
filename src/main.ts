@@ -1,7 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
-import { ValidationPipe } from '@nestjs/common';
+import { RequestMethod, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import configFactory, { ConfigConstains } from './configs/env.config';
 
@@ -62,7 +62,15 @@ import { json, urlencoded } from 'express';
     },
     credentials: true
   });
-  app.setGlobalPrefix('api');
+  app.setGlobalPrefix('api', {
+    exclude: [
+      { path: 'mcp/projects', method: RequestMethod.ALL },
+      {
+        path: '.well-known/oauth-protected-resource/mcp/projects',
+        method: RequestMethod.GET
+      }
+    ]
+  });
 
   const logger = app.get(LoggerService);
   app.useGlobalFilters(new AllExceptionsFilter(logger));
