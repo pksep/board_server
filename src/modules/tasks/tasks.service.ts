@@ -129,6 +129,26 @@ export class TasksService {
     return Number.isNaN(date.getTime()) ? String(value) : date.toISOString();
   }
 
+  /**
+   * Нормализует пустое HTML-описание для сравнения в истории действий.
+   */
+  private normalizeDescription(value: string | null | undefined): string {
+    // Tiptap может представить пустой редактор как пустую строку или пустой p.
+    const description = value?.trim() || '';
+    if (!description) {
+      return '';
+    }
+
+    // Убираем только безопасную пустую обёртку, сохраняя значимые HTML-элементы.
+    const content = description
+      .replace(/&(?:nbsp|#160|#xA0);/gi, '')
+      .replace(/<br\s*\/?>/gi, '')
+      .replace(/<\/?(?:p|div)(?:\s[^>]*)?>/gi, '')
+      .trim();
+
+    return content ? description : '';
+  }
+
   private async getAssigneeIds(
     taskId: number,
     transaction: Transaction
@@ -637,8 +657,8 @@ export class TasksService {
       }
       if (dto.description !== undefined) {
         changedFields.description = {
-          before: before.description,
-          after: task.description
+          before: this.normalizeDescription(before.description),
+          after: this.normalizeDescription(task.description)
         };
       }
       if (dto.priority !== undefined) {

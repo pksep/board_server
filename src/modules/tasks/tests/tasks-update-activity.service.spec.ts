@@ -2,7 +2,7 @@ import { ActivityActionType } from '../../activity-events/activity-events.consta
 import { TasksService } from '../tasks.service';
 
 describe('TasksService.update activity', () => {
-  it('фиксирует field diff и связи в транзакции изменения задачи', async () => {
+  it('фиксирует field diff без ложного изменения пустого описания', async () => {
     const transaction = {
       commit: jest.fn(),
       rollback: jest.fn()
@@ -11,7 +11,7 @@ describe('TasksService.update activity', () => {
       id: 42,
       taskNumber: 12,
       title: 'Старое название',
-      description: '',
+      description: null,
       priority: 'low',
       dueDate: null,
       approvalStatus: '',
@@ -73,7 +73,15 @@ describe('TasksService.update activity', () => {
       activityEvents as any
     );
 
-    await service.update(42, { title: 'Новое название', assigneeIds: [3] }, 7);
+    await service.update(
+      42,
+      {
+        title: 'Новое название',
+        description: '<p><br></p>',
+        assigneeIds: [3]
+      },
+      7
+    );
 
     expect(activityEvents.create).toHaveBeenCalledWith(
       expect.objectContaining({
