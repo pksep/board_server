@@ -5,7 +5,8 @@ describe('TasksService.update activity', () => {
   it('фиксирует field diff без ложного изменения пустого описания', async () => {
     const transaction = {
       commit: jest.fn(),
-      rollback: jest.fn()
+      rollback: jest.fn(),
+      LOCK: { UPDATE: 'UPDATE' }
     };
     const task = {
       id: 42,
@@ -17,10 +18,34 @@ describe('TasksService.update activity', () => {
       approvalStatus: '',
       columnId: 10,
       parentTaskId: 8,
+      order: 0,
       save: jest.fn().mockResolvedValue(undefined)
     };
+    const parentTask = {
+      id: 8,
+      columnId: 10,
+      parentTaskId: null,
+      order: 2
+    };
+    const trailingTask = {
+      id: 43,
+      columnId: 10,
+      parentTaskId: null,
+      order: 3,
+      update: jest.fn().mockResolvedValue(undefined)
+    };
     const taskRepository = {
-      findByPk: jest.fn().mockResolvedValue(task)
+      findByPk: jest.fn(async (id: number) =>
+        id === parentTask.id ? parentTask : task
+      ),
+      findAll: jest
+        .fn()
+        .mockResolvedValue([
+          { id: 40, order: 0, update: jest.fn() },
+          { id: 41, order: 1, update: jest.fn() },
+          parentTask,
+          trailingTask
+        ])
     };
     const assigneeRepository = {
       findAll: jest.fn().mockResolvedValue([{ userId: 2 }]),
@@ -98,12 +123,18 @@ describe('TasksService.update activity', () => {
             after: 'Новое название'
           },
           { field: 'parentTaskId', before: 8, after: null },
+          { field: 'order', before: 0, after: 3 },
           { field: 'assigneeIds', before: [2], after: [3] }
         ]
       }),
       { transaction }
     );
     expect(task.parentTaskId).toBeNull();
+    expect(task.order).toBe(3);
+    expect(trailingTask.update).toHaveBeenCalledWith(
+      { order: 4 },
+      { transaction }
+    );
     expect(transaction.commit).toHaveBeenCalledTimes(1);
     expect(transaction.rollback).not.toHaveBeenCalled();
   });

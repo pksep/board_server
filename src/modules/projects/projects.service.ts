@@ -27,6 +27,14 @@ export class ProjectsService {
    */
   async getAll(userId: number): Promise<Project[]> {
     try {
+      const memberProjectRows = await this.memberRepository.findAll({
+        where: { userId },
+        attributes: ['projectId']
+      });
+      const memberProjectIds = memberProjectRows.map(
+        member => member.projectId
+      );
+
       const projects = await this.projectRepository.findAll({
         include: [
           {
@@ -45,9 +53,13 @@ export class ProjectsService {
           }
         ],
         where: {
-          [Op.or]: [{ createdById: userId }, { '$members.user_id$': userId }]
+          [Op.or]: [
+            { createdById: userId },
+            ...(memberProjectIds.length
+              ? [{ id: { [Op.in]: memberProjectIds } }]
+              : [])
+          ]
         },
-        subQuery: false,
         order: [['createdAt', 'DESC']]
       });
 

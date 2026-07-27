@@ -1,10 +1,13 @@
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/sequelize';
+import { Op } from 'sequelize';
 import { Board } from './model/board.model';
 import { CreateBoardDto } from './dto/create-board.dto';
 import { UpdateBoardDto } from './dto/update-board.dto';
 import { WsGateway } from '../ws/ws.gateway';
 import { ProjectAccessService } from '../projects/project-access.service';
+import { BoardColumn } from '../columns/model/board-column.model';
+import { Task } from '../tasks/model/task.model';
 
 @Injectable()
 export class BoardsService {
@@ -12,20 +15,85 @@ export class BoardsService {
 
   constructor(
     @InjectModel(Board) private boardRepository: typeof Board,
+    @InjectModel(BoardColumn)
+    private columnRepository: typeof BoardColumn,
+    @InjectModel(Task) private taskRepository: typeof Task,
     private wsGateway: WsGateway,
     private projectAccess: ProjectAccessService
   ) {}
 
-  async getByProject(projectId: number, userId: number): Promise<Board[]> {
+  async getByProject(
+    projectId: number,
+    userId: number
+  ): Promise<Array<Board & { tasksCount: number }>> {
     try {
       await this.projectAccess.assertCanRead(projectId, userId);
-      return await this.boardRepository.findAll({
+      const boards = await this.boardRepository.findAll({
         where: { projectId },
         include: [{ association: 'columns', attributes: ['id'] }],
         order: [
           ['order', 'ASC'],
           ['createdAt', 'ASC']
         ]
+      });
+
+      if (!boards.length) {
+        return [];
+      }
+
+      const boardIds = boards.map(board => board.id);
+      const columns = await this.columnRepository.findAll({
+        where: { boardId: { [Op.in]: boardIds } },
+        attributes: ['id', 'boardId'],
+        raw: true
+      });
+      const columnIds = columns.map(column => column.id);
+      const tasksCountByColumnId = new Map<number, number>();
+
+      if (columnIds.length) {
+        const taskCounts = await this.taskRepository.findAll({
+          attributes: [
+            'columnId',
+            [
+              this.taskRepository.sequelize.fn(
+                'COUNT',
+                this.taskRepository.sequelize.col('id')
+              ),
+              'tasksCount'
+            ]
+          ],
+          where: {
+            columnId: { [Op.in]: columnIds },
+            parentTaskId: null
+          },
+          group: ['columnId'],
+          raw: true
+        });
+
+        taskCounts.forEach((item: Task & { tasksCount: number | string }) => {
+          tasksCountByColumnId.set(item.columnId, Number(item.tasksCount) || 0);
+        });
+      }
+
+      const columnIdsByBoardId = new Map<number, number[]>();
+      columns.forEach(column => {
+        const boardColumnIds = columnIdsByBoardId.get(column.boardId) || [];
+        boardColumnIds.push(column.id);
+        columnIdsByBoardId.set(column.boardId, boardColumnIds);
+      });
+
+      return boards.map(board => {
+        const boardColumnIds = columnIdsByBoardId.get(board.id) || [];
+        const tasksCount = boardColumnIds.reduce(
+          (total, columnId) =>
+            total + (tasksCountByColumnId.get(columnId) || 0),
+          0
+        );
+
+        return {
+          ...board.toJSON(),
+          tasksCount
+        } as Board & { tasksCount: number };
       });
     } catch (error) {
       if (error instanceof HttpException) throw error;

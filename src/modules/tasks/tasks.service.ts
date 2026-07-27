@@ -644,6 +644,8 @@ export class TasksService {
         priority: task.priority,
         dueDate: this.normalizeDate(task.dueDate),
         approvalStatus: task.approvalStatus,
+        columnId: task.columnId,
+        order: task.order,
         parentTaskId: task.parentTaskId,
         assigneeIds:
           dto.assigneeIds === undefined
@@ -654,6 +656,31 @@ export class TasksService {
             ? undefined
             : await this.getTagIds(id, transaction)
       };
+
+      if (dto.parentTaskId === null && task.parentTaskId) {
+        // Откреплённая подзадача становится верхнеуровневой рядом с родителем.
+        const parentTask = await this.taskRepository.findByPk(
+          task.parentTaskId,
+          {
+            transaction,
+            lock: transaction.LOCK.UPDATE
+          }
+        );
+        if (!parentTask) {
+          throw new HttpException(
+            'Родительская задача не найдена',
+            HttpStatus.NOT_FOUND
+          );
+        }
+
+        // Общий helper нормализует order остальных верхнеуровневых задач.
+        await this.placeTaskInColumn(
+          task,
+          parentTask.columnId,
+          parentTask.order + 1,
+          transaction
+        );
+      }
 
       if (dto.title !== undefined) task.title = dto.title;
       if (dto.description !== undefined) task.description = dto.description;
@@ -729,6 +756,14 @@ export class TasksService {
         changedFields.parentTaskId = {
           before: before.parentTaskId,
           after: task.parentTaskId
+        };
+        changedFields.columnId = {
+          before: before.columnId,
+          after: task.columnId
+        };
+        changedFields.order = {
+          before: before.order,
+          after: task.order
         };
       }
       if (dto.assigneeIds !== undefined) {

@@ -33,7 +33,8 @@
     "start:cli": "cross-env NODE_ENV=production node -r ts-node/register -r tsconfig-paths/register src/cli.ts",
     "test:e2e:local": "node ./bin/tests/e2e-runner.mjs",
     "postinstall": "node scripts/git-hooks/install-hooks.js",
-    "sync:users": "cross-env NODE_ENV=production ts-node -r tsconfig-paths/register src/scripts/sync-users.script.ts"
+    "sync:users": "cross-env NODE_ENV=production ts-node -r tsconfig-paths/register src/scripts/sync-users.script.ts",
+    "import:huly-board": "cross-env NODE_ENV=production ts-node -r tsconfig-paths/register src/scripts/import-huly-board.script.ts"
   },
   "dependencies": {
     "@bull-board/api": "^6.2.1",
@@ -117,6 +118,10 @@
   },
   "devDependencies": {
     "@compodoc/compodoc": "^1.1.25",
+    "@hcengineering/api-client": "0.7.423",
+    "@hcengineering/core": "0.7.423",
+    "@hcengineering/task": "0.7.423",
+    "@hcengineering/tracker": "0.7.423",
     "@nestjs/cli": "^10.2.0",
     "@nestjs/schematics": "^10.0.2",
     "@nestjs/testing": "^10.3.9",
