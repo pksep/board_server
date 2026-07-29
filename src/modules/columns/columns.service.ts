@@ -56,6 +56,19 @@ export class ColumnsService {
     }
   }
 
+  async getById(id: number, userId: number): Promise<BoardColumn> {
+    try {
+      return await this.getAccessibleColumn(id, userId);
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      this.logger.error('getById failed', error);
+      throw new HttpException(
+        'Ошибка при получении колонки',
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
   async create(
     boardId: number,
     dto: CreateColumnDto,

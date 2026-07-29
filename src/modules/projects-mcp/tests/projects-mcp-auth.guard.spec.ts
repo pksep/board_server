@@ -78,6 +78,7 @@ describe('ProjectsMcpAuthGuard', () => {
     expect(request.mcpAuth).toMatchObject({
       clientId: 'codex',
       audience: 'board-projects-mcp',
+      accessToken: 'token',
       user: { id: 7, erpId: '77' }
     });
     expect(request.mcpAuth.scopes.has('projects:read')).toBe(true);
@@ -153,6 +154,48 @@ describe('ProjectsMcpAuthGuard', () => {
     expect(response.setHeader).toHaveBeenCalledWith(
       'WWW-Authenticate',
       'Bearer error="insufficient_scope", scope="projects:delete"'
+    );
+  });
+
+  it('требует projects:update для создания задач', async () => {
+    configService.get.mockImplementation((key: string) => {
+      if (key === 'mcpProjects.audience') return 'board-projects-mcp';
+      if (key === 'mcpProjects.introspectionUrl')
+        return 'https://erp.example/api/auth/check';
+      return undefined;
+    });
+    jest.spyOn(axios, 'post').mockResolvedValue({
+      data: {
+        ok: true,
+        user: { id: 77, login: 'DA', tabel: '007' },
+        token: {
+          audience: 'board-projects-mcp',
+          scopes: ['projects:read'],
+          clientId: 'codex'
+        }
+      }
+    });
+    userRepository.findOne.mockResolvedValue({
+      id: 7,
+      erpId: '77',
+      login: 'DA',
+      serviceNumber: '007',
+      initial: 'DA',
+      image: null,
+      ban: false,
+      role: '-'
+    });
+    const { context, response } = createContext('Bearer token', {
+      method: 'tools/call',
+      params: { name: 'tasks_create' }
+    });
+
+    await expect(guard.canActivate(context)).rejects.toMatchObject({
+      status: 403
+    });
+    expect(response.setHeader).toHaveBeenCalledWith(
+      'WWW-Authenticate',
+      'Bearer error="insufficient_scope", scope="projects:update"'
     );
   });
 });

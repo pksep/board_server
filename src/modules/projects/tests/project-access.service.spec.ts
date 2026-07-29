@@ -3,11 +3,15 @@ import { ProjectAccessService } from '../project-access.service';
 
 describe('ProjectAccessService', () => {
   const projectRepository = { findByPk: jest.fn() };
-  const memberRepository = { findOne: jest.fn() };
+  const memberRepository = {
+    findOne: jest.fn(),
+    findAll: jest.fn()
+  };
   const service = new ProjectAccessService(
     projectRepository as any,
     memberRepository as any
   );
+  const transaction = {} as any;
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -55,6 +59,32 @@ describe('ProjectAccessService', () => {
 
     await expect(service.assertCanManage(1, 30)).rejects.toMatchObject({
       status: HttpStatus.NOT_FOUND
+    });
+  });
+
+  it('разрешает назначать только участников проекта', async () => {
+    memberRepository.findAll.mockResolvedValue([{ userId: 2 }, { userId: 3 }]);
+
+    await expect(
+      service.assertAssigneesBelongToProject(10, [3, 2, 3], transaction)
+    ).resolves.toBeUndefined();
+    expect(memberRepository.findAll).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attributes: ['userId'],
+        where: expect.objectContaining({ projectId: 10 }),
+        transaction
+      })
+    );
+  });
+
+  it('отклоняет пользователя вне проекта', async () => {
+    memberRepository.findAll.mockResolvedValue([{ userId: 2 }]);
+
+    await expect(
+      service.assertAssigneesBelongToProject(10, [2, 99], transaction)
+    ).rejects.toMatchObject({
+      status: HttpStatus.BAD_REQUEST,
+      message: 'Исполнителями могут быть только участники проекта'
     });
   });
 });

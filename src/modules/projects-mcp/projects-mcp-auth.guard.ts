@@ -112,6 +112,7 @@ export class ProjectsMcpAuthGuard implements CanActivate {
       clientId: data.token?.clientId || 'unknown-mcp-client',
       audience: expectedAudience,
       scopes,
+      accessToken: match[1],
       tokenExpiresAt: data.token?.expiresAt
     };
 

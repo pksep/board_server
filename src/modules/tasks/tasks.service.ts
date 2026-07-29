@@ -394,6 +394,13 @@ export class TasksService {
         transaction
       );
       await this.projectAccess.assertCanRead(projectId, userId, transaction);
+      if (dto.assigneeIds?.length) {
+        await this.projectAccess.assertAssigneesBelongToProject(
+          projectId,
+          dto.assigneeIds,
+          transaction
+        );
+      }
 
       const taskCounter = await this.allocateTaskNumbers(
         projectId,
@@ -509,6 +516,13 @@ export class TasksService {
         transaction
       );
       await this.projectAccess.assertCanRead(projectId, userId, transaction);
+      if (dto.assigneeIds?.length) {
+        await this.projectAccess.assertAssigneesBelongToProject(
+          projectId,
+          dto.assigneeIds,
+          transaction
+        );
+      }
 
       const taskCounter = await this.allocateTaskNumbers(
         projectId,
@@ -638,6 +652,13 @@ export class TasksService {
         task.columnId,
         transaction
       );
+      if (dto.assigneeIds?.length) {
+        await this.projectAccess.assertAssigneesBelongToProject(
+          projectId,
+          dto.assigneeIds,
+          transaction
+        );
+      }
       const before = {
         title: task.title,
         description: task.description,
@@ -941,6 +962,22 @@ export class TasksService {
       const isCrossProject = source.projectId !== target.projectId;
       const isCrossBoard = source.board.id !== target.board.id;
       const fromColumnId = task.columnId;
+
+      if (isCrossProject) {
+        const assignees = await this.assigneeRepository.findAll({
+          attributes: ['userId'],
+          where: { taskId: { [Op.in]: taskIds } },
+          transaction
+        });
+        const assigneeIds = assignees.map(assignee => assignee.userId);
+        if (assigneeIds.length) {
+          await this.projectAccess.assertAssigneesBelongToProject(
+            target.projectId,
+            assigneeIds,
+            transaction
+          );
+        }
+      }
 
       if (fromColumnId !== dto.columnId) {
         await this.normalizeColumnWithoutTask(

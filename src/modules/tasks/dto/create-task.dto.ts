@@ -5,6 +5,8 @@ import {
   IsString,
   IsDateString,
   IsArray,
+  ArrayUnique,
+  IsInt,
   IsEnum,
   MaxLength
 } from 'class-validator';
@@ -36,6 +38,8 @@ export class CreateTaskDto {
   @ApiProperty({ example: [1, 2], description: 'ID исполнителей' })
   @IsOptional()
   @IsArray()
+  @ArrayUnique()
+  @IsInt({ each: true })
   assigneeIds?: number[];
 
   @ApiProperty({ example: [1, 3], description: 'ID тегов проекта' })

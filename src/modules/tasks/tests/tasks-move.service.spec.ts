@@ -40,6 +40,9 @@ describe('TasksService.move', () => {
       })
     };
     const taskTagRepository = { destroy: jest.fn() };
+    const assigneeRepository = {
+      findAll: jest.fn().mockResolvedValue([{ userId: 7 }])
+    };
     const targetProject = {
       id: 2,
       taskCounter: 100,
@@ -64,7 +67,10 @@ describe('TasksService.move', () => {
       emitTaskRelocated: jest.fn(),
       emitTaskMoved: jest.fn()
     };
-    const projectAccess = { assertCanRead: jest.fn() };
+    const projectAccess = {
+      assertCanRead: jest.fn(),
+      assertAssigneesBelongToProject: jest.fn()
+    };
     const activityEvents = {
       buildChanges: jest.fn(fields =>
         Object.entries(fields)
@@ -82,7 +88,7 @@ describe('TasksService.move', () => {
     };
     const service = new TasksService(
       taskRepository as any,
-      {} as any,
+      assigneeRepository as any,
       taskTagRepository as any,
       {} as any,
       projectRepository as any,
@@ -111,6 +117,11 @@ describe('TasksService.move', () => {
       where: { taskId: [1, 2] },
       transaction
     });
+    expect(projectAccess.assertAssigneesBelongToProject).toHaveBeenCalledWith(
+      2,
+      [7],
+      transaction
+    );
     expect(wsGateway.emitTaskRelocated).toHaveBeenCalledWith(
       20,
       40,

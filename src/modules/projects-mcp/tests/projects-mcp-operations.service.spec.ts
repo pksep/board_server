@@ -17,7 +17,8 @@ describe('ProjectsMcpOperationsService', () => {
     },
     clientId: 'codex',
     audience: 'board-projects-mcp',
-    scopes: new Set(['projects:create'])
+    scopes: new Set(['projects:create']),
+    accessToken: 'mcp-token'
   };
 
   beforeEach(() => {

@@ -5,6 +5,7 @@ export interface ProjectsMcpAuthContext {
   clientId: string;
   audience: string;
   scopes: Set<string>;
+  accessToken: string;
   tokenExpiresAt?: number;
 }
 

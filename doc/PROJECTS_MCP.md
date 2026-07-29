@@ -16,6 +16,45 @@ scopes:
 - `projects:members`
 - `projects:delete`
 
+Scopes относятся ко всему дереву проекта:
+
+- `projects:read` — проекты, доски, колонки, задачи, подзадачи, теги,
+  участники и комментарии;
+- `projects:create` — создание нового проекта;
+- `projects:update` — изменение проекта и участников рабочего дерева:
+  создание/изменение/сортировка досок и колонок, создание/изменение/
+  перемещение задач и создание комментариев;
+- `projects:members` — замена состава участников;
+- `projects:delete` — soft delete проекта, доски, колонки или задачи.
+
+## Tools
+
+Проекты:
+
+- `projects_list`, `projects_get`, `projects_create`, `projects_update`,
+  `projects_delete`;
+- `project_members_list`, `project_members_update`;
+- `project_boards_list`, `project_tags_list`.
+
+Доски и колонки:
+
+- `boards_get`, `boards_create`, `boards_update`, `boards_reorder`,
+  `boards_delete`;
+- `board_columns_list`, `columns_get`, `columns_create`, `columns_update`,
+  `columns_reorder`, `columns_delete`.
+
+Задачи:
+
+- `board_tasks_list`, `column_tasks_list`, `tasks_get`;
+- `tasks_create`, `tasks_update`, `tasks_move`, `tasks_delete`;
+- `task_subtasks_list`, `subtasks_create`;
+- `task_comments_list`, `task_comments_create`.
+
+`tasks_move` перемещает верхнеуровневую задачу вместе с иерархией подзадач.
+`tasks_update` принимает `parentTaskId: null`, чтобы открепить подзадачу.
+`task_comments_create` создаёт корневой комментарий либо reply, если переданы
+`threadId` и, при необходимости, `answerCommentId`.
+
 ## Получение токена
 
 Стандартный клиент получает токен через OAuth 2.1 Authorization Code + PKCE.
@@ -62,8 +101,15 @@ OAuth protected-resource metadata опубликованы по адресу:
 отклоняется. Операции сохраняются в `mcp_project_operations` вместе с
 actor, client, project, action и результатом.
 
-`projects_delete` дополнительно требует `confirm: true` и выполняет soft
-delete.
+`projects_delete`, `boards_delete`, `columns_delete` и `tasks_delete`
+дополнительно требуют `confirm: true` и выполняют soft delete.
+
+Комментарии хранятся в существующем ERP comments/thread контуре. Board сначала
+проверяет объектный доступ к задаче, затем пересылает исходный короткоживущий
+MCP Bearer token только в `/api/comments`. ERP принимает такой token на этом
+маршруте только с корректным audience и требуемым `projects:read`,
+`projects:update` или `projects:delete`; token не записывается в MCP operation
+audit.
 
 ## Конфигурация Board
 

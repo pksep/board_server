@@ -67,7 +67,10 @@ describe('TasksService.update activity', () => {
     const boardRepository = {
       findByPk: jest.fn().mockResolvedValue({ id: 20, projectId: 30 })
     };
-    const projectAccess = { assertCanRead: jest.fn() };
+    const projectAccess = {
+      assertCanRead: jest.fn(),
+      assertAssigneesBelongToProject: jest.fn()
+    };
     const activityEvents = {
       buildChanges: jest.fn(fields =>
         Object.entries(fields)
@@ -130,6 +133,11 @@ describe('TasksService.update activity', () => {
       { transaction }
     );
     expect(task.parentTaskId).toBeNull();
+    expect(projectAccess.assertAssigneesBelongToProject).toHaveBeenCalledWith(
+      30,
+      [3],
+      transaction
+    );
     expect(task.order).toBe(3);
     expect(trailingTask.update).toHaveBeenCalledWith(
       { order: 4 },

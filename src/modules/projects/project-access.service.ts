@@ -1,6 +1,6 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/sequelize';
-import { Transaction } from 'sequelize';
+import { Op, Transaction } from 'sequelize';
 import { Project } from './model/project.model';
 import { ProjectMember } from './model/project-member.model';
 
@@ -66,5 +66,36 @@ export class ProjectAccessService {
     }
 
     return project;
+  }
+
+  async assertAssigneesBelongToProject(
+    projectId: number,
+    userIds: number[] = [],
+    transaction?: Transaction
+  ): Promise<void> {
+    const normalizedUserIds = [
+      ...new Set(userIds.map(Number).filter(Number.isInteger))
+    ];
+    if (!normalizedUserIds.length) return;
+
+    const members = await this.memberRepository.findAll({
+      attributes: ['userId'],
+      where: {
+        projectId,
+        userId: { [Op.in]: normalizedUserIds }
+      },
+      transaction
+    });
+    const memberIds = new Set(members.map(member => Number(member.userId)));
+    const hasExternalAssignee = normalizedUserIds.some(
+      userId => !memberIds.has(userId)
+    );
+
+    if (hasExternalAssignee) {
+      throw new HttpException(
+        'Исполнителями могут быть только участники проекта',
+        HttpStatus.BAD_REQUEST
+      );
+    }
   }
 }
