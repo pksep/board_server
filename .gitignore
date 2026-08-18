@@ -9,6 +9,8 @@ packages/zod-shared/CHANGELOG.md
 
 migration_records.txt 
 /logs
+.local-data/
+.local-run/
 
 /src/libs/files/static/zip/*.zip
 /backups/*.gz

@@ -15,13 +15,16 @@ import { InjectModel } from '@nestjs/sequelize';
 import { Board } from '../boards/model/board.model';
 import { ProjectAccessService } from '../projects/project-access.service';
 
+const BOARD_SOCKET_PATH = process.env.BOARD_SOCKET_PATH || '/api/socket.io';
+
 @Injectable()
 @WebSocketGateway({
   cors: {
     origin: process.env.ALLOWED_ORIGIN || '*',
     credentials: true
   },
-  namespace: '/board'
+  namespace: '/board',
+  path: BOARD_SOCKET_PATH
 })
 export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(WsGateway.name);
