@@ -40,6 +40,8 @@ COPY --from=deps /app/board_server/node_modules /app/board_server/node_modules
 COPY --from=build /app/board_server/dist /app/board_server/dist
 COPY package.json /app/board_server/package.json
 COPY env/${ENV_FILE} /app/board_server/env/.production.env
+COPY migrations /app/board_server/migrations
+COPY seeders /app/board_server/seeders
 
 EXPOSE 5000
 

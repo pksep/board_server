@@ -928,26 +928,34 @@ export class TasksService {
   }
 
   /**
-   * Переместить родительскую задачу вместе со всей иерархией.
+   * Перемещает задачу в колонку.
+   * Родительская задача переносит всю иерархию, а подзадача может независимо
+   * менять колонку только внутри доски своего родителя.
    */
   async move(id: number, dto: MoveTaskDto, userId: number): Promise<Task> {
     const transaction = await this.sequelize.transaction();
     try {
       const task = await this.assertTaskAccess(id, userId, transaction);
-      if (task.parentTaskId) {
-        throw new HttpException(
-          'Перемещайте родительскую задачу вместе с подзадачами',
-          HttpStatus.BAD_REQUEST
-        );
-      }
-
+      const isSubtask = Boolean(task.parentTaskId);
       const source = await this.getColumnLocation(task.columnId, transaction);
       const target = await this.assertColumnAccess(
         dto.columnId,
         userId,
         transaction
       );
-      const hierarchy = await this.getTaskHierarchy(task, transaction);
+      const isCrossProject = source.projectId !== target.projectId;
+      const isCrossBoard = source.board.id !== target.board.id;
+
+      if (isSubtask && isCrossBoard) {
+        throw new HttpException(
+          'Подзадачу можно перемещать только между колонками текущей доски',
+          HttpStatus.BAD_REQUEST
+        );
+      }
+
+      const hierarchy = isSubtask
+        ? [task]
+        : await this.getTaskHierarchy(task, transaction);
       const taskIds = hierarchy.map(item => item.id);
       const beforeMove = new Map(
         hierarchy.map(item => [
@@ -959,8 +967,6 @@ export class TasksService {
           }
         ])
       );
-      const isCrossProject = source.projectId !== target.projectId;
-      const isCrossBoard = source.board.id !== target.board.id;
       const fromColumnId = task.columnId;
 
       if (isCrossProject) {
@@ -979,7 +985,7 @@ export class TasksService {
         }
       }
 
-      if (fromColumnId !== dto.columnId) {
+      if (!isSubtask && fromColumnId !== dto.columnId) {
         await this.normalizeColumnWithoutTask(
           fromColumnId,
           task.id,
@@ -987,12 +993,17 @@ export class TasksService {
         );
       }
 
-      const order = await this.placeTaskInColumn(
-        task,
-        dto.columnId,
-        dto.order,
-        transaction
-      );
+      let order = task.order;
+      if (isSubtask) {
+        task.columnId = dto.columnId;
+      } else {
+        order = await this.placeTaskInColumn(
+          task,
+          dto.columnId,
+          dto.order,
+          transaction
+        );
+      }
 
       for (const child of hierarchy.slice(1)) {
         child.columnId = dto.columnId;
@@ -1051,7 +1062,7 @@ export class TasksService {
           actorUserId: userId,
           changes,
           metadata: {
-            rootTaskId: task.id,
+            rootTaskId: task.parentTaskId || task.id,
             hierarchySize: hierarchy.length
           }
         };

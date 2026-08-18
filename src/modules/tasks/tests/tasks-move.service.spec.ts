@@ -1,5 +1,83 @@
 import { TasksService } from '../tasks.service';
 
+function createSubtaskMoveFixture(targetBoardId = 20) {
+  const transaction = {
+    LOCK: { UPDATE: 'UPDATE' },
+    commit: jest.fn(),
+    rollback: jest.fn()
+  };
+  const subtask = {
+    id: 2,
+    taskNumber: 6,
+    columnId: 10,
+    parentTaskId: 1,
+    order: 0,
+    save: jest.fn().mockResolvedValue(undefined)
+  };
+  const taskRepository = {
+    findByPk: jest.fn().mockResolvedValue(subtask),
+    findAll: jest.fn()
+  };
+  const columnRepository = {
+    findByPk: jest.fn(async (id: number) => ({
+      id,
+      boardId: id === 10 ? 20 : targetBoardId
+    }))
+  };
+  const boardRepository = {
+    findByPk: jest.fn(async (id: number) => ({ id, projectId: 1 }))
+  };
+  const wsGateway = {
+    emitTaskRelocated: jest.fn(),
+    emitTaskMoved: jest.fn()
+  };
+  const projectAccess = {
+    assertCanRead: jest.fn(),
+    assertAssigneesBelongToProject: jest.fn()
+  };
+  const activityEvents = {
+    buildChanges: jest.fn(fields =>
+      Object.entries(fields)
+        .filter(
+          ([, value]: any) =>
+            JSON.stringify(value.before) !== JSON.stringify(value.after)
+        )
+        .map(([field, value]: any) => ({
+          field,
+          before: value.before,
+          after: value.after
+        }))
+    ),
+    create: jest.fn()
+  };
+  const service = new TasksService(
+    taskRepository as any,
+    { findAll: jest.fn() } as any,
+    { destroy: jest.fn() } as any,
+    {} as any,
+    { findByPk: jest.fn() } as any,
+    columnRepository as any,
+    boardRepository as any,
+    {
+      transaction: jest.fn().mockResolvedValue(transaction),
+      query: jest.fn()
+    } as any,
+    wsGateway as any,
+    {} as any,
+    projectAccess as any,
+    activityEvents as any
+  );
+
+  return {
+    activityEvents,
+    service,
+    subtask,
+    taskRepository,
+    transaction,
+    wsGateway
+  };
+}
+
 describe('TasksService.move', () => {
   it('атомарно переносит и перенумеровывает родителя с подзадачами', async () => {
     const transaction = {
@@ -138,5 +216,60 @@ describe('TasksService.move', () => {
       { transaction }
     );
     expect(result).toBe(responseTask);
+  });
+
+  it('перемещает только подзадачу между колонками текущей доски', async () => {
+    const fixture = createSubtaskMoveFixture();
+
+    const result = await fixture.service.move(
+      fixture.subtask.id,
+      { columnId: 30, order: 0 },
+      7
+    );
+
+    expect(result).toBe(fixture.subtask);
+    expect(fixture.subtask.columnId).toBe(30);
+    expect(fixture.subtask.order).toBe(0);
+    expect(fixture.subtask.save).toHaveBeenCalledWith({
+      transaction: fixture.transaction
+    });
+    expect(fixture.taskRepository.findAll).not.toHaveBeenCalled();
+    expect(fixture.transaction.commit).toHaveBeenCalledTimes(1);
+    expect(fixture.transaction.rollback).not.toHaveBeenCalled();
+    expect(fixture.wsGateway.emitTaskMoved).toHaveBeenCalledWith(20, {
+      taskId: 2,
+      fromColumnId: 10,
+      toColumnId: 30,
+      order: 0
+    });
+    expect(fixture.wsGateway.emitTaskRelocated).not.toHaveBeenCalled();
+    expect(fixture.activityEvents.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entityId: '2',
+        metadata: expect.objectContaining({
+          rootTaskId: 1,
+          hierarchySize: 1,
+          direction: 'within'
+        })
+      }),
+      { transaction: fixture.transaction }
+    );
+  });
+
+  it('не позволяет перенести подзадачу на другую доску', async () => {
+    const fixture = createSubtaskMoveFixture(40);
+
+    await expect(
+      fixture.service.move(fixture.subtask.id, { columnId: 30, order: 0 }, 7)
+    ).rejects.toThrow(
+      'Подзадачу можно перемещать только между колонками текущей доски'
+    );
+
+    expect(fixture.subtask.columnId).toBe(10);
+    expect(fixture.subtask.save).not.toHaveBeenCalled();
+    expect(fixture.transaction.commit).not.toHaveBeenCalled();
+    expect(fixture.transaction.rollback).toHaveBeenCalledTimes(1);
+    expect(fixture.wsGateway.emitTaskMoved).not.toHaveBeenCalled();
+    expect(fixture.activityEvents.create).not.toHaveBeenCalled();
   });
 });

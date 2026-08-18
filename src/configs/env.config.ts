@@ -4,6 +4,7 @@ export type ConfigType = ReturnType<typeof configFactory>;
 
 export default function configFactory() {
   return {
+    host: process.env.HOST || '0.0.0.0',
     port: process.env.PORT!,
     allowedOrigin: process.env.ALLOWED_ORIGIN,
     database: {

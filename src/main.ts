@@ -83,6 +83,7 @@ import { json, urlencoded } from 'express';
 
   const configService = app.get(ConfigService);
   const portRun = configService.get(ConfigConstains.port);
+  const hostRun = configService.get(ConfigConstains.host);
   const applicationType = configService.get(ConfigConstains.applicationType);
 
   app.useGlobalPipes(new ValidationPipe());
@@ -126,7 +127,9 @@ import { json, urlencoded } from 'express';
     await sequelize.sync({ force: false, alter: false });
   }
 
-  await app.listen(portRun, () => {
-    console.info(`${applicationType}... Server running on port: ${portRun}`);
+  await app.listen(portRun, hostRun, () => {
+    console.info(
+      `${applicationType}... Server running on: ${hostRun}:${portRun}`
+    );
   });
 })();
