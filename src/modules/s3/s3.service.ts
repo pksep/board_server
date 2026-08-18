@@ -5,11 +5,20 @@ import { S3_PROVIDE_NAME } from './s3.constants';
 import { ConfigConstains } from 'src/configs/env.config';
 import mime from 'mime';
 import { calculateHash } from 'src/utils/methods/hash';
+import { extname } from 'path';
+import { v4 as uuidv4 } from 'uuid';
+import type { Request } from 'express';
 
 export interface IPutObjectResponse {
   objectName: string;
   hash: string;
   etag: string;
+}
+
+export interface IPresignedUploadResponse {
+  presignedUrl: string;
+  publicUrl: string;
+  objectName: string;
 }
 
 @Injectable()
@@ -123,6 +132,32 @@ export class S3Service {
     );
   }
 
+  /**
+   * Создаёт адреса для прямой загрузки контента задачи в настроенный бакет.
+   * В описание задачи возвращается только постоянный публичный URL.
+   */
+  async createPresignedUpload(
+    fileName: string,
+    mimeType: string,
+    req?: Request
+  ): Promise<IPresignedUploadResponse> {
+    const fileExtension = extname(fileName).toLowerCase();
+    const mimeExtension = mime.getExtension(mimeType);
+    const safeExtension = /^\.[a-z0-9]{1,10}$/i.test(fileExtension)
+      ? fileExtension
+      : mimeExtension
+        ? `.${mimeExtension}`
+        : '.bin';
+    const objectName = `task-content/${uuidv4()}${safeExtension}`;
+    const presignedUrl = await this.getPresignedPutUrl(objectName);
+
+    return {
+      presignedUrl,
+      publicUrl: this.getPublicUrl(objectName, req),
+      objectName
+    };
+  }
+
   getPublicUrl(objectName: string, req?: Request): string {
     if (!this.publicBaseUrl)
       throw new Error('Public base URL is not configured!');
@@ -140,11 +175,11 @@ export class S3Service {
       const host = forwarded || hostHeader?.split(':')[0];
 
       if (host && this.offlineHosts.includes(host)) {
-        const localUrl = `${this.localBaseUrl}/${this.bucketName}/${objectName}`;
+        const localUrl = `${this.localBaseUrl.replace(/\/+$/, '')}/${this.bucketName}/${objectName}`;
         console.log(`localCdnUrl: ${localUrl}`);
         return localUrl;
       }
     }
-    return `${this.publicBaseUrl}/${this.bucketName}/${objectName}`;
+    return `${this.publicBaseUrl.replace(/\/+$/, '')}/${this.bucketName}/${objectName}`;
   }
 }

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 
 @Injectable()
 export class S3MockService {
@@ -26,6 +26,14 @@ export class S3MockService {
 
   async getSignedUrl(): Promise<void> {
     console.error('lock server is turned off');
+  }
+
+  async getPresignedPutUrl(): Promise<never> {
+    throw new ServiceUnavailableException('MinIO отключён');
+  }
+
+  async createPresignedUpload(): Promise<never> {
+    throw new ServiceUnavailableException('MinIO отключён');
   }
 
   getPublicUrl() {
