@@ -28,6 +28,9 @@ export class S3Service {
   // Для локальной сети
   private readonly localBaseUrl: string;
   private readonly offlineHosts: string[];
+  private readonly accessKey: string;
+  private readonly secretKey: string;
+  private readonly isPathStyle: boolean;
 
   constructor(
     @Inject(S3_PROVIDE_NAME) private readonly s3Client: Client,
@@ -49,6 +52,14 @@ export class S3Service {
     this.localBaseUrl = this.configService.get<string>(
       ConfigConstains.minio.localBaseUrl
     );
+
+    this.accessKey = this.configService.get<string>(ConfigConstains.minio.user);
+    this.secretKey = this.configService.get<string>(
+      ConfigConstains.minio.password
+    );
+    this.isPathStyle =
+      this.configService.get<string>(ConfigConstains.minio.isPathStyle) ===
+      'true';
   }
 
   /**
@@ -123,13 +134,14 @@ export class S3Service {
 
   async getPresignedPutUrl(
     objectName: string,
+    req?: Request,
     expiry = 60 * 60
   ): Promise<string> {
-    return this.s3Client.presignedPutObject(
-      this.bucketName,
-      objectName,
-      expiry
-    );
+    const uploadBaseUrl = this.resolveAccessibleBaseUrl(req);
+    const region = await this.s3Client.getBucketRegionAsync(this.bucketName);
+    const uploadClient = this.createUploadClient(uploadBaseUrl, region);
+
+    return uploadClient.presignedPutObject(this.bucketName, objectName, expiry);
   }
 
   /**
@@ -149,7 +161,7 @@ export class S3Service {
         ? `.${mimeExtension}`
         : '.bin';
     const objectName = `task-content/${uuidv4()}${safeExtension}`;
-    const presignedUrl = await this.getPresignedPutUrl(objectName);
+    const presignedUrl = await this.getPresignedPutUrl(objectName, req);
 
     return {
       presignedUrl,
@@ -159,6 +171,13 @@ export class S3Service {
   }
 
   getPublicUrl(objectName: string, req?: Request): string {
+    return `${this.resolveAccessibleBaseUrl(req)}/${this.bucketName}/${objectName}`;
+  }
+
+  /**
+   * Выбирает адрес MinIO, доступный из браузера текущего пользователя.
+   */
+  private resolveAccessibleBaseUrl(req?: Request): string {
     if (!this.publicBaseUrl)
       throw new Error('Public base URL is not configured!');
 
@@ -175,11 +194,39 @@ export class S3Service {
       const host = forwarded || hostHeader?.split(':')[0];
 
       if (host && this.offlineHosts.includes(host)) {
-        const localUrl = `${this.localBaseUrl.replace(/\/+$/, '')}/${this.bucketName}/${objectName}`;
-        console.log(`localCdnUrl: ${localUrl}`);
-        return localUrl;
+        if (!this.localBaseUrl)
+          throw new Error('Local base URL is not configured!');
+
+        return this.localBaseUrl.replace(/\/+$/, '');
       }
     }
-    return `${this.publicBaseUrl.replace(/\/+$/, '')}/${this.bucketName}/${objectName}`;
+
+    return this.publicBaseUrl.replace(/\/+$/, '');
+  }
+
+  /**
+   * Создаёт подписывающий клиент для того же адреса, куда загружает браузер.
+   */
+  private createUploadClient(baseUrl: string, region: string): Client {
+    if (!this.accessKey || !this.secretKey)
+      throw new Error('MinIO credentials are not configured!');
+
+    const url = new URL(baseUrl);
+    if (url.pathname !== '/' && url.pathname !== '')
+      throw new Error('MinIO base URL must not contain a path!');
+
+    const useSSL = url.protocol === 'https:';
+    if (!useSSL && url.protocol !== 'http:')
+      throw new Error('MinIO base URL must use HTTP or HTTPS!');
+
+    return new Client({
+      endPoint: url.hostname,
+      port: url.port ? Number(url.port) : useSSL ? 443 : 80,
+      useSSL,
+      accessKey: this.accessKey,
+      secretKey: this.secretKey,
+      pathStyle: this.isPathStyle,
+      region
+    });
   }
 }

@@ -7,8 +7,10 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   Put
 } from '@nestjs/common';
+import type { Request } from 'express';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { TasksService } from './tasks.service';
 import { CreateTaskDto } from './dto/create-task.dto';
@@ -115,9 +117,10 @@ export class TasksController {
   generatePresignedUrl(
     @Param('id') id: number,
     @Body() dto: CreateAttachmentDto,
-    @CurrentUser() user: IUserDataToken
+    @CurrentUser() user: IUserDataToken,
+    @Req() request: Request
   ) {
-    return this.tasksService.generatePresignedUrl(+id, dto, user.id);
+    return this.tasksService.generatePresignedUrl(+id, dto, user.id, request);
   }
 
   @ApiOperation({ summary: 'Подтвердить загрузку вложения' })
