@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/sequelize';
 import axios from 'axios';
 import { Request, Response } from 'express';
+import { timingSafeEqual } from 'node:crypto';
 import { User } from 'src/modules/users/model/users.model';
 import {
   PROJECTS_MCP_AUDIENCE,
@@ -60,6 +61,10 @@ export class ProjectsMcpAuthGuard implements CanActivate {
     if (!match) {
       this.setAuthenticateHeader(response, resourceMetadataUrl);
       throw new UnauthorizedException('Требуется Bearer token');
+    }
+
+    if (await this.tryActivateLocalDevelopment(request, response, match[1])) {
+      return true;
     }
 
     const introspectionUrl = this.getIntrospectionUrl();
@@ -118,6 +123,92 @@ export class ProjectsMcpAuthGuard implements CanActivate {
 
     (request as Request & { mcpAuth: ProjectsMcpAuthContext }).mcpAuth = auth;
     return true;
+  }
+
+  private async tryActivateLocalDevelopment(
+    request: Request,
+    response: Response,
+    token: string
+  ): Promise<boolean> {
+    const enabled = this.configService.get<boolean>(
+      'mcpProjects.localDevelopment.enabled'
+    );
+    if (!enabled) return false;
+
+    const host = this.configService.get<string>('host') || '';
+    const remoteAddress = request.socket?.remoteAddress || request.ip || '';
+    if (!this.isLoopback(host) || !this.isLoopback(remoteAddress)) return false;
+
+    const configuredToken =
+      this.configService.get<string>('mcpProjects.localDevelopment.apiKey') ||
+      '';
+    const configuredTokenBuffer = Buffer.from(configuredToken);
+    const tokenBuffer = Buffer.from(token);
+    if (
+      configuredTokenBuffer.byteLength < 32 ||
+      tokenBuffer.byteLength !== configuredTokenBuffer.byteLength ||
+      !timingSafeEqual(tokenBuffer, configuredTokenBuffer)
+    ) {
+      return false;
+    }
+
+    const userId = this.configService.get<number>(
+      'mcpProjects.localDevelopment.userId'
+    );
+    const user = userId
+      ? await this.userRepository.findByPk(userId)
+      : undefined;
+    if (!user || user.ban) {
+      throw new UnauthorizedException(
+        'Локальный пользователь Projects MCP не найден или заблокирован'
+      );
+    }
+
+    const configuredScopes =
+      this.configService.get<string>('mcpProjects.localDevelopment.scopes') ||
+      '';
+    const scopes = new Set(
+      configuredScopes
+        .split(/\s+/)
+        .filter((scope): scope is ProjectsMcpScope =>
+          PROJECTS_MCP_SCOPES.includes(scope as ProjectsMcpScope)
+        )
+    );
+    if (!scopes.has(ProjectsMcpScope.Read)) {
+      throw new UnauthorizedException(
+        'Локальный Projects MCP требует scope projects:read'
+      );
+    }
+
+    this.assertRequestScope(request, response, scopes);
+    const expectedAudience =
+      this.configService.get<string>('mcpProjects.audience') ||
+      PROJECTS_MCP_AUDIENCE;
+    (request as Request & { mcpAuth: ProjectsMcpAuthContext }).mcpAuth = {
+      user: {
+        id: user.id,
+        erpId: user.erpId,
+        login: user.login,
+        serviceNumber: user.serviceNumber,
+        initial: user.initial,
+        role: user.role
+      },
+      clientId: request.header('x-mcp-client-id') || 'local-development',
+      audience: expectedAudience,
+      scopes,
+      accessToken: token
+    };
+    return true;
+  }
+
+  private isLoopback(value: string): boolean {
+    const normalized = value.trim().toLowerCase();
+    return (
+      normalized === 'localhost' ||
+      normalized === '127.0.0.1' ||
+      normalized === '::1' ||
+      normalized === '::ffff:127.0.0.1'
+    );
   }
 
   private assertRequestScope(

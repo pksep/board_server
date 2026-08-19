@@ -13,6 +13,7 @@ describe('ProjectsMcpAuthGuard', () => {
   };
   const userRepository = {
     findOne: jest.fn(),
+    findByPk: jest.fn(),
     create: jest.fn()
   };
   const guard = new ProjectsMcpAuthGuard(
@@ -27,6 +28,7 @@ describe('ProjectsMcpAuthGuard', () => {
     const request: any = {
       protocol: 'https',
       body,
+      socket: { remoteAddress: '127.0.0.1' },
       get: jest.fn().mockReturnValue('board.example'),
       header: jest.fn(name =>
         name === 'authorization' ? authorization : undefined
@@ -47,6 +49,75 @@ describe('ProjectsMcpAuthGuard', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    configService.get.mockImplementation((key: string) => {
+      if (key === 'mcpProjects.audience') return 'board-projects-mcp';
+      if (key === 'mcpProjects.introspectionUrl')
+        return 'https://erp.example/api/auth/check';
+      return undefined;
+    });
+  });
+
+  it('разрешает локальный MCP ключ только с настроенными scopes и пользователем', async () => {
+    const localToken = 'local-development-token-at-least-32-bytes';
+    const axiosPost = jest.spyOn(axios, 'post');
+    configService.get.mockImplementation((key: string) => {
+      if (key === 'host') return '127.0.0.1';
+      if (key === 'mcpProjects.audience') return 'board-projects-mcp';
+      if (key === 'mcpProjects.localDevelopment.enabled') return true;
+      if (key === 'mcpProjects.localDevelopment.apiKey') return localToken;
+      if (key === 'mcpProjects.localDevelopment.userId') return 1;
+      if (key === 'mcpProjects.localDevelopment.scopes')
+        return 'projects:read projects:update';
+      return undefined;
+    });
+    userRepository.findByPk.mockResolvedValue({
+      id: 1,
+      erpId: null,
+      login: 'Admin.A.A',
+      serviceNumber: '001',
+      initial: 'Admin',
+      ban: false,
+      role: 'admin'
+    });
+    const { context, request } = createContext(`Bearer ${localToken}`, {
+      method: 'tools/call',
+      params: { name: 'tasks_create' }
+    });
+
+    await expect(guard.canActivate(context)).resolves.toBe(true);
+    expect(axiosPost).not.toHaveBeenCalled();
+    expect(request.mcpAuth).toMatchObject({
+      clientId: 'local-development',
+      user: { id: 1 },
+      accessToken: localToken
+    });
+    expect(request.mcpAuth.scopes).toEqual(
+      new Set(['projects:read', 'projects:update'])
+    );
+  });
+
+  it('не применяет локальный MCP ключ для удалённого запроса', async () => {
+    const localToken = 'local-development-token-at-least-32-bytes';
+    configService.get.mockImplementation((key: string) => {
+      if (key === 'host') return '127.0.0.1';
+      if (key === 'mcpProjects.audience') return 'board-projects-mcp';
+      if (key === 'mcpProjects.localDevelopment.enabled') return true;
+      if (key === 'mcpProjects.localDevelopment.apiKey') return localToken;
+      if (key === 'mcpProjects.localDevelopment.userId') return 1;
+      if (key === 'mcpProjects.localDevelopment.scopes')
+        return 'projects:read projects:update';
+      if (key === 'mcpProjects.introspectionUrl')
+        return 'https://erp.example/api/auth/check';
+      return undefined;
+    });
+    jest.spyOn(axios, 'post').mockRejectedValue(new Error('not an ERP token'));
+    const { context, request } = createContext(`Bearer ${localToken}`);
+    request.socket.remoteAddress = '10.0.0.10';
+
+    await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
+      UnauthorizedException
+    );
+    expect(userRepository.findByPk).not.toHaveBeenCalled();
   });
 
   it('принимает ERP token только с нужным audience и scope', async () => {
