@@ -25,6 +25,7 @@ import {
   ActivityEntityType
 } from '../activity-events/activity-events.constants';
 import { ActivityHistoryQueryDto } from '../activity-events/dto/activity-history-query.dto';
+import type { Request } from 'express';
 
 @Injectable()
 export class TasksService {
@@ -1182,7 +1183,8 @@ export class TasksService {
   async generatePresignedUrl(
     taskId: number,
     dto: CreateAttachmentDto,
-    userId: number
+    userId: number,
+    req?: Request
   ): Promise<{ presignedUrl: string; objectName: string }> {
     try {
       await this.assertTaskAccess(taskId, userId);
@@ -1190,7 +1192,10 @@ export class TasksService {
       const ext = dto.fileName.split('.').pop() || 'bin';
       const objectName = `tasks/${taskId}/${uuidv4()}.${ext}`;
 
-      const presignedUrl = await this.s3Service.getPresignedPutUrl(objectName);
+      const presignedUrl = await this.s3Service.getPresignedPutUrl(
+        objectName,
+        req
+      );
 
       return { presignedUrl, objectName };
     } catch (error) {
