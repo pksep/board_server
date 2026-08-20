@@ -1,7 +1,7 @@
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/sequelize';
 import { Sequelize } from 'sequelize-typescript';
-import { Op } from 'sequelize';
+import { Op, Transaction } from 'sequelize';
 import { Project } from './model/project.model';
 import { ProjectMember } from './model/project-member.model';
 import { UserFavorite } from './model/user-favorite.model';
@@ -29,10 +29,13 @@ export class ProjectsService {
     try {
       const memberProjectRows = await this.memberRepository.findAll({
         where: { userId },
-        attributes: ['projectId']
+        attributes: ['projectId', 'order']
       });
       const memberProjectIds = memberProjectRows.map(
         member => member.projectId
+      );
+      const memberOrderByProjectId = new Map(
+        memberProjectRows.map(member => [member.projectId, member.order])
       );
 
       const projects = await this.projectRepository.findAll({
@@ -63,7 +66,18 @@ export class ProjectsService {
         order: [['createdAt', 'DESC']]
       });
 
-      return projects;
+      return projects.sort((left, right) => {
+        const leftOrder = memberOrderByProjectId.get(left.id);
+        const rightOrder = memberOrderByProjectId.get(right.id);
+
+        if (leftOrder !== undefined && rightOrder !== undefined) {
+          return leftOrder - rightOrder;
+        }
+        if (leftOrder !== undefined) return -1;
+        if (rightOrder !== undefined) return 1;
+
+        return right.createdAt.getTime() - left.createdAt.getTime();
+      });
     } catch (error) {
       this.logger.error(
         error instanceof Error ? error : 'getAll failed',
@@ -139,24 +153,24 @@ export class ProjectsService {
         { transaction }
       );
 
-      // Добавляем создателя как участника
-      await this.memberRepository.create(
-        { projectId: project.id, userId } as any,
-        { transaction }
+      // Для каждого участника порядок проектов хранится отдельно.
+      const memberIds = Array.from(
+        new Set([userId, ...(dto.membersIds || [])])
       );
-
-      // Добавляем остальных участников
-      if (dto.membersIds?.length) {
-        const members = dto.membersIds
-          .filter(id => id !== userId)
-          .map(id => ({ projectId: project.id, userId: id }));
-
-        if (members.length) {
-          await this.memberRepository.bulkCreate(members as any[], {
-            transaction
-          });
-        }
-      }
+      const nextOrderByMemberId = await this.getNextMemberOrders(
+        memberIds,
+        transaction
+      );
+      const members: Array<{
+        projectId: number;
+        userId: number;
+        order: number;
+      }> = memberIds.map(memberId => ({
+        projectId: project.id,
+        userId: memberId,
+        order: nextOrderByMemberId.get(memberId) ?? 0
+      }));
+      await this.memberRepository.bulkCreate(members as any[], { transaction });
 
       await transaction.commit();
 
@@ -190,19 +204,43 @@ export class ProjectsService {
 
       // Обновляем участников
       if (dto.membersIds) {
-        await this.memberRepository.destroy({
+        const desiredMemberIds = Array.from(
+          new Set([userId, ...dto.membersIds])
+        );
+        const existingMembers = await this.memberRepository.findAll({
           where: { projectId: dto.id },
           transaction
         });
+        const existingMemberIds = new Set(
+          existingMembers.map(member => member.userId)
+        );
 
-        const memberIds = Array.from(new Set([userId, ...dto.membersIds]));
-        const members = memberIds.map(id => ({
+        await this.memberRepository.destroy({
+          where: {
+            projectId: dto.id,
+            userId: { [Op.notIn]: desiredMemberIds }
+          },
+          transaction
+        });
+
+        const newMemberIds = desiredMemberIds.filter(
+          memberId => !existingMemberIds.has(memberId)
+        );
+        const nextOrderByMemberId = await this.getNextMemberOrders(
+          newMemberIds,
+          transaction
+        );
+        const newMembers: Array<{
+          projectId: number;
+          userId: number;
+          order: number;
+        }> = newMemberIds.map(memberId => ({
           projectId: dto.id,
-          userId: id
+          userId: memberId,
+          order: nextOrderByMemberId.get(memberId) ?? 0
         }));
-
-        if (members.length) {
-          await this.memberRepository.bulkCreate(members as any[], {
+        if (newMembers.length) {
+          await this.memberRepository.bulkCreate(newMembers as any[], {
             transaction
           });
         }
@@ -234,6 +272,54 @@ export class ProjectsService {
       this.logger.error('delete failed', error);
       throw new HttpException(
         'Ошибка при удалении проекта',
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  /**
+   * Сохраняет порядок всех доступных пользователю проектов.
+   */
+  async reorder(ids: number[], userId: number): Promise<void> {
+    const transaction = await this.sequelize.transaction();
+    try {
+      const memberships = await this.memberRepository.findAll({
+        attributes: ['projectId'],
+        where: { userId },
+        include: [{ model: Project, attributes: [], required: true }],
+        transaction,
+        lock: transaction.LOCK.UPDATE
+      });
+      const accessibleProjectIds = memberships.map(member => member.projectId);
+      const requestedIds = [...new Set(ids)];
+      const accessibleIdSet = new Set(accessibleProjectIds);
+
+      if (
+        requestedIds.length !== ids.length ||
+        requestedIds.length !== accessibleProjectIds.length ||
+        requestedIds.some(id => !accessibleIdSet.has(id))
+      ) {
+        throw new HttpException(
+          'Порядок должен содержать все доступные проекты без повторов',
+          HttpStatus.BAD_REQUEST
+        );
+      }
+
+      await Promise.all(
+        requestedIds.map((projectId, order) =>
+          this.memberRepository.update(
+            { order },
+            { where: { projectId, userId }, transaction }
+          )
+        )
+      );
+      await transaction.commit();
+    } catch (error) {
+      await transaction.rollback();
+      if (error instanceof HttpException) throw error;
+      this.logger.error('reorder failed', error);
+      throw new HttpException(
+        'Не удалось изменить порядок проектов',
         HttpStatus.INTERNAL_SERVER_ERROR
       );
     }
@@ -277,5 +363,29 @@ export class ProjectsService {
       where: { prefix: prefix.toUpperCase() }
     });
     return { available: !existing };
+  }
+
+  /** Одним запросом рассчитывает следующую позицию проекта для всех участников. */
+  private async getNextMemberOrders(
+    userIds: number[],
+    transaction: Transaction
+  ): Promise<Map<number, number>> {
+    if (!userIds.length) return new Map();
+
+    const memberships = await this.memberRepository.findAll({
+      attributes: ['userId', 'order'],
+      where: { userId: { [Op.in]: userIds } },
+      transaction
+    });
+    const nextOrderByMemberId = new Map(userIds.map(memberId => [memberId, 0]));
+
+    for (const membership of memberships) {
+      const nextOrder = membership.order + 1;
+      if (nextOrder > (nextOrderByMemberId.get(membership.userId) ?? 0)) {
+        nextOrderByMemberId.set(membership.userId, nextOrder);
+      }
+    }
+
+    return nextOrderByMemberId;
   }
 }

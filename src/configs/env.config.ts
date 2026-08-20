@@ -36,7 +36,15 @@ export default function configFactory() {
       audience: process.env.MCP_PROJECTS_AUDIENCE || 'board-projects-mcp',
       resourceUrl: process.env.MCP_PROJECTS_RESOURCE_URL || '',
       introspectionUrl: process.env.MCP_PROJECTS_INTROSPECTION_URL || '',
-      authorizationServerUrl: process.env.MCP_AUTH_ISSUER || ''
+      authorizationServerUrl: process.env.MCP_AUTH_ISSUER || '',
+      localDevelopment: {
+        enabled:
+          process.env.NODE_ENV !== 'production' &&
+          process.env.MCP_PROJECTS_LOCAL_DEV_ENABLED === 'true',
+        apiKey: process.env.MCP_PROJECTS_LOCAL_API_KEY || '',
+        userId: Number(process.env.MCP_PROJECTS_LOCAL_USER_ID) || 0,
+        scopes: process.env.MCP_PROJECTS_LOCAL_SCOPES || ''
+      }
     }
   } as const;
 }

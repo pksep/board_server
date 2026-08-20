@@ -32,6 +32,10 @@ export class ProjectMember extends Model<ProjectMember> {
   @Column({ type: DataType.INTEGER, allowNull: false, field: 'user_id' })
   userId: number;
 
+  @ApiProperty({ example: 0, description: 'Персональный порядок проекта' })
+  @Column({ type: DataType.INTEGER, allowNull: false, defaultValue: 0 })
+  order: number;
+
   @ApiHideProperty()
   @BelongsTo(lazyProject)
   project: any;

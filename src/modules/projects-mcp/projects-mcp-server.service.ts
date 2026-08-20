@@ -873,6 +873,9 @@ export class ProjectsMcpServerService {
         description: 'Создать верхнеуровневую задачу в колонке',
         inputSchema: {
           columnId: z.number().int().positive(),
+          columnTitle: title.describe(
+            'Точное название выбранной колонки для подтверждения пользователем'
+          ),
           ...taskCreateFields,
           idempotencyKey
         },
@@ -899,7 +902,8 @@ export class ProjectsMcpServerService {
             async () => {
               const projectId = await this.getProjectIdForColumn(
                 input.columnId,
-                auth.user.id
+                auth.user.id,
+                input.columnTitle
               );
               const task = await this.tasksService.create(
                 input.columnId,
@@ -1141,9 +1145,19 @@ export class ProjectsMcpServerService {
 
   private async getProjectIdForColumn(
     columnId: number,
-    userId: number
+    userId: number,
+    expectedColumnTitle?: string
   ): Promise<number> {
     const column = await this.columnsService.getById(columnId, userId);
+    if (
+      expectedColumnTitle &&
+      column.title.trim().toLocaleLowerCase('ru-RU') !==
+        expectedColumnTitle.trim().toLocaleLowerCase('ru-RU')
+    ) {
+      throw new BadRequestException(
+        'Название выбранной колонки не соответствует её фактическому названию'
+      );
+    }
     const board = await this.boardsService.getById(column.boardId, userId);
     return board.projectId;
   }
