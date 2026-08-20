@@ -18,8 +18,10 @@ COPY bun.lock /app/board_server/bun.lock
 COPY .npmrc /app/board_server/.npmrc
 
 RUN --mount=type=cache,target=/root/.bun/install/cache \
-    bun install --frozen-lockfile --ignore-scripts \
-    || bun install --ignore-scripts
+    bun install --frozen-lockfile --ignore-scripts
+
+# Fail during image build if Umzug's runtime dependency graph is incomplete.
+RUN node -e "require('umzug')"
 
 FROM deps AS build
 
