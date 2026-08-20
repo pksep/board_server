@@ -7,6 +7,7 @@ import { ProjectsModule } from '../projects/projects.module';
 import { TagsModule } from '../tags/tags.module';
 import { TasksModule } from '../tasks/tasks.module';
 import { User } from '../users/model/users.model';
+import { UsersModule } from '../users/users.module';
 import {
   ProjectsMcpController,
   ProjectsMcpMetadataController
@@ -25,6 +26,7 @@ import { McpProjectOperation } from './model/mcp-project-operation.model';
     ColumnsModule,
     TagsModule,
     TasksModule,
+    UsersModule,
     SequelizeModule.forFeature([McpProjectOperation, User])
   ],
   controllers: [ProjectsMcpController, ProjectsMcpMetadataController],
