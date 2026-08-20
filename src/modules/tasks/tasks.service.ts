@@ -26,6 +26,15 @@ import {
 } from '../activity-events/activity-events.constants';
 import { ActivityHistoryQueryDto } from '../activity-events/dto/activity-history-query.dto';
 import type { Request } from 'express';
+import { TaskListQueryDto } from './dto/task-list-query.dto';
+
+interface TaskListPage {
+  items: Task[];
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
 
 @Injectable()
 export class TasksService {
@@ -244,12 +253,14 @@ export class TasksService {
     return [
       {
         model: TaskAssignee,
+        separate: true,
         include: [
           { model: User, attributes: ['id', 'login', 'initial', 'image'] }
         ]
       },
       {
         model: TaskTag,
+        separate: true,
         include: [
           {
             model: ProjectTag,
@@ -259,11 +270,13 @@ export class TasksService {
       },
       {
         model: TaskAttachment,
+        separate: true,
         attributes: ['id', 'fileName', 'objectName', 'mimeType', 'size']
       },
       {
         model: Task,
         as: 'subtasks',
+        separate: true,
         attributes: [
           'id',
           'taskNumber',
@@ -279,10 +292,12 @@ export class TasksService {
         include: [
           {
             model: TaskAssignee,
+            separate: true,
             include: [{ model: User, attributes: ['id', 'login', 'initial'] }]
           },
           {
             model: TaskTag,
+            separate: true,
             include: [
               { model: ProjectTag, attributes: ['id', 'label', 'color'] }
             ]
@@ -326,14 +341,58 @@ export class TasksService {
   /**
    * Получить все задачи колонки
    */
-  async getByColumn(columnId: number, userId: number): Promise<Task[]> {
+  async getByColumn(
+    columnId: number,
+    userId: number,
+    query: TaskListQueryDto = {}
+  ): Promise<Task[] | TaskListPage> {
     try {
       await this.assertColumnAccess(columnId, userId);
-      return await this.taskRepository.findAll({
-        where: { columnId, parentTaskId: null },
-        include: this.taskIncludes(),
-        order: [['order', 'ASC']]
-      });
+      const search = query.search?.trim();
+      const rootTaskIds = search
+        ? await this.findMatchingRootTaskIds(columnId, search)
+        : null;
+      const where = {
+        columnId,
+        parentTaskId: null,
+        ...(rootTaskIds ? { id: { [Op.in]: rootTaskIds } } : {})
+      };
+      const isPaginated = query.limit !== undefined;
+      const limit = query.limit ?? 0;
+      const offset = query.offset ?? 0;
+
+      if (!isPaginated) {
+        return await this.taskRepository.findAll({
+          where,
+          include: this.taskIncludes(),
+          order: [
+            ['order', 'ASC'],
+            ['id', 'ASC']
+          ]
+        });
+      }
+
+      const [total, items] = await Promise.all([
+        this.taskRepository.count({ where }),
+        this.taskRepository.findAll({
+          where,
+          include: this.taskIncludes(),
+          order: [
+            ['order', 'ASC'],
+            ['id', 'ASC']
+          ],
+          limit,
+          offset
+        })
+      ]);
+
+      return {
+        items,
+        total,
+        limit,
+        offset,
+        hasMore: offset + items.length < total
+      };
     } catch (error) {
       if (error instanceof HttpException) throw error;
       this.logger.error('getByColumn failed', error);
@@ -345,13 +404,46 @@ export class TasksService {
   }
 
   /**
+   * Находит корневые задачи, у которых совпал номер, текст самой задачи
+   * или текст одной из подзадач.
+   */
+  private async findMatchingRootTaskIds(
+    columnId: number,
+    search: string
+  ): Promise<number[]> {
+    const trailingNumber = search.match(/(\d+)$/)?.[1];
+    const matches = await this.taskRepository.findAll({
+      where: {
+        columnId,
+        [Op.or]: [
+          { title: { [Op.iLike]: `%${search}%` } },
+          { description: { [Op.iLike]: `%${search}%` } },
+          ...(trailingNumber ? [{ taskNumber: Number(trailingNumber) }] : [])
+        ]
+      },
+      attributes: ['id', 'parentTaskId'],
+      raw: true
+    });
+
+    return [
+      ...new Set(matches.map(task => Number(task.parentTaskId || task.id)))
+    ];
+  }
+
+  /**
    * Получить задачу по ID
    */
   async getById(id: number, userId: number): Promise<Task> {
     try {
       await this.assertTaskAccess(id, userId);
       const task = await this.taskRepository.findByPk(id, {
-        include: this.taskIncludes()
+        include: [
+          ...this.taskIncludes(),
+          {
+            model: BoardColumn,
+            attributes: ['id', 'boardId']
+          }
+        ]
       });
       if (!task) {
         throw new HttpException('Задача не найдена', HttpStatus.NOT_FOUND);

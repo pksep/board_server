@@ -20,6 +20,7 @@ import { MoveTaskDto } from './dto/move-task.dto';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { IUserDataToken } from '../auth/interfaces/interface';
 import { ActivityHistoryQueryDto } from '../activity-events/dto/activity-history-query.dto';
+import { TaskListQueryDto } from './dto/task-list-query.dto';
 
 @ApiTags('Задачи')
 @Controller()
@@ -55,9 +56,10 @@ export class TasksController {
   @Get('columns/:columnId/tasks')
   getByColumn(
     @Param('columnId') columnId: number,
+    @Query() query: TaskListQueryDto,
     @CurrentUser() user: IUserDataToken
   ) {
-    return this.tasksService.getByColumn(+columnId, user.id);
+    return this.tasksService.getByColumn(+columnId, user.id, query);
   }
 
   @ApiOperation({ summary: 'Создать задачу в колонке' })
