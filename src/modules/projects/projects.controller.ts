@@ -15,6 +15,7 @@ import { UpdateProjectDto } from './dto/update-project.dto';
 import { Project } from './model/project.model';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { IUserDataToken } from '../auth/interfaces/interface';
+import { ReorderProjectsDto } from './dto/reorder-projects.dto';
 
 @ApiTags('Проекты')
 @Controller('projects')
@@ -46,6 +47,15 @@ export class ProjectsController {
   @Post()
   create(@Body() dto: CreateProjectDto, @CurrentUser() user: IUserDataToken) {
     return this.projectsService.create(dto, user.id);
+  }
+
+  @ApiOperation({ summary: 'Изменить персональный порядок проектов' })
+  @Patch('reorder')
+  reorder(
+    @Body() dto: ReorderProjectsDto,
+    @CurrentUser() user: IUserDataToken
+  ) {
+    return this.projectsService.reorder(dto.ids, user.id);
   }
 
   @ApiOperation({ summary: 'Обновить проект' })
