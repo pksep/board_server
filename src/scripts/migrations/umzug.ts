@@ -2,17 +2,11 @@ import { initializeSequelize } from './db';
 import { SequelizeStorage, Umzug } from 'umzug';
 import _yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
-const glob = require('glob');
+const { glob } = require('glob');
 
-function checkFileExists(pattern) {
-  return new Promise((resolve, reject) => {
-    glob(pattern, (err, matches) => {
-      if (err) {
-        return reject(err);
-      }
-      resolve(matches.length > 0);
-    });
-  });
+async function checkFileExists(pattern: string): Promise<boolean> {
+  const matches = await glob(pattern);
+  return matches.length > 0;
 }
 
 const toEnumsCommand = ['up', 'down', 'status'];
