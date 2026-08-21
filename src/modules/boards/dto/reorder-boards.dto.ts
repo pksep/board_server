@@ -7,10 +7,10 @@ import {
   Min
 } from 'class-validator';
 
-export class ReorderColumnsDto {
+export class ReorderBoardsDto {
   @ApiProperty({
     example: [3, 1, 2],
-    description: 'Массив ID колонок в новом порядке'
+    description: 'Полный список досок проекта в нужном порядке'
   })
   @IsArray()
   @ArrayMaxSize(1000)

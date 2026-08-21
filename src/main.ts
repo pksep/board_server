@@ -86,8 +86,6 @@ import { json, urlencoded } from 'express';
   const hostRun = configService.get(ConfigConstains.host);
   const applicationType = configService.get(ConfigConstains.applicationType);
 
-  app.useGlobalPipes(new ValidationPipe());
-
   const config = new DocumentBuilder()
     .setTitle('SEP Board Server')
     .setDescription(

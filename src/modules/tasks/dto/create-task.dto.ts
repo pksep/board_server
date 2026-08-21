@@ -8,7 +8,9 @@ import {
   ArrayUnique,
   IsInt,
   IsEnum,
-  MaxLength
+  MaxLength,
+  ArrayMaxSize,
+  Min
 } from 'class-validator';
 
 export class CreateTaskDto {
@@ -23,6 +25,7 @@ export class CreateTaskDto {
   @ApiProperty({ description: 'Описание (HTML)' })
   @IsOptional()
   @IsString()
+  @MaxLength(200000)
   description?: string;
 
   @ApiProperty({ enum: ['', 'low', 'medium', 'high', 'urgent'] })
@@ -38,13 +41,19 @@ export class CreateTaskDto {
   @ApiProperty({ example: [1, 2], description: 'ID исполнителей' })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(500)
   @ArrayUnique()
   @IsInt({ each: true })
+  @Min(1, { each: true })
   assigneeIds?: number[];
 
   @ApiProperty({ example: [1, 3], description: 'ID тегов проекта' })
   @IsOptional()
   @IsArray()
+  @ArrayMaxSize(500)
+  @ArrayUnique()
+  @IsInt({ each: true })
+  @Min(1, { each: true })
   tagIds?: number[];
 
   @ApiProperty({ enum: ['', 'yes', 'no'], description: 'Статус утверждения' })

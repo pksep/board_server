@@ -10,20 +10,27 @@ import {
 import * as z from 'zod/v4';
 import { BoardsService } from '../boards/boards.service';
 import { CreateBoardDto } from '../boards/dto/create-board.dto';
+import { ReorderBoardsDto } from '../boards/dto/reorder-boards.dto';
 import { UpdateBoardDto } from '../boards/dto/update-board.dto';
 import { ColumnsService } from '../columns/columns.service';
 import { CreateColumnDto } from '../columns/dto/create-column.dto';
 import { ReorderColumnsDto } from '../columns/dto/reorder-columns.dto';
 import { UpdateColumnDto } from '../columns/dto/update-column.dto';
+import { ActivityHistoryQueryDto } from '../activity-events/dto/activity-history-query.dto';
 import { CreateProjectDto } from '../projects/dto/create-project.dto';
+import { ReorderProjectsDto } from '../projects/dto/reorder-projects.dto';
 import { UpdateProjectDto } from '../projects/dto/update-project.dto';
 import { ProjectAccessService } from '../projects/project-access.service';
 import { ProjectsService } from '../projects/projects.service';
 import { TagsService } from '../tags/tags.service';
+import { CreateTagDto } from '../tags/dto/create-tag.dto';
+import { UpdateTagDto } from '../tags/dto/update-tag.dto';
 import { CreateTaskDto } from '../tasks/dto/create-task.dto';
 import { MoveTaskDto } from '../tasks/dto/move-task.dto';
 import { UpdateTaskDto } from '../tasks/dto/update-task.dto';
 import { TasksService } from '../tasks/tasks.service';
+import { UsersService } from '../users/users.service';
+import { validateDto } from '../../utils/validation/validate-dto';
 import { ProjectsMcpScope } from './projects-mcp.constants';
 import { ProjectsMcpAuthContext } from './interfaces/projects-mcp.interface';
 import { ProjectsMcpOperationsService } from './projects-mcp-operations.service';
@@ -38,6 +45,7 @@ export class ProjectsMcpServerService {
     private columnsService: ColumnsService,
     private tasksService: TasksService,
     private tagsService: TagsService,
+    private usersService: UsersService,
     private operations: ProjectsMcpOperationsService,
     private taskComments: ProjectsMcpTaskCommentsService
   ) {}
@@ -140,6 +148,33 @@ export class ProjectsMcpServerService {
     );
 
     server.registerTool(
+      'users_list',
+      {
+        description:
+          'Получить пользователей доски для выбора участников и исполнителей по имени',
+        inputSchema: {
+          search: z.string().trim().max(200).optional()
+        },
+        annotations: this.readOnlyAnnotations('Пользователи доски')
+      },
+      async ({ search }) => {
+        this.assertScope(auth, ProjectsMcpScope.Read);
+        const users = await this.usersService.getUsersList();
+        const query = search?.toLocaleLowerCase('ru-RU');
+        const result = query
+          ? users.filter(user =>
+              [user.initial, user.login, user.serviceNumber]
+                .filter(Boolean)
+                .some(value =>
+                  String(value).toLocaleLowerCase('ru-RU').includes(query)
+                )
+            )
+          : users;
+        return this.toolResult(result);
+      }
+    );
+
+    server.registerTool(
       'project_members_list',
       {
         description: 'Получить участников проекта',
@@ -197,6 +232,14 @@ export class ProjectsMcpServerService {
       .min(8)
       .max(128)
       .describe('Стабильный уникальный ключ повторного вызова');
+    const title = z.string().trim().min(1).max(255);
+    const names = z.array(title).max(500);
+    const ids = z
+      .array(z.number().int().positive())
+      .max(500)
+      .refine(values => new Set(values).size === values.length, {
+        message: 'ID не должны повторяться'
+      });
 
     server.registerTool(
       'projects_create',
@@ -209,7 +252,8 @@ export class ProjectsMcpServerService {
             .trim()
             .regex(/^[A-Za-z]{3,10}$/),
           description: z.string().max(10000).optional(),
-          membersIds: z.array(z.number().int().positive()).max(500).optional(),
+          membersIds: ids.optional(),
+          memberNames: names.optional(),
           idempotencyKey
         },
         annotations: this.writeAnnotations('Создать проект')
@@ -219,6 +263,7 @@ export class ProjectsMcpServerService {
         if (input.membersIds?.length) {
           this.assertScope(auth, ProjectsMcpScope.Members);
         }
+        await this.assertNamedUsers(input.membersIds, input.memberNames);
         return this.toolResult(
           await this.operations.run(
             auth,
@@ -226,13 +271,14 @@ export class ProjectsMcpServerService {
             input.idempotencyKey,
             input,
             async () => {
+              const dto = await validateDto(CreateProjectDto, {
+                title: input.title,
+                prefix: input.prefix,
+                description: input.description,
+                membersIds: input.membersIds
+              });
               const project = await this.projectsService.create(
-                {
-                  title: input.title,
-                  prefix: input.prefix,
-                  description: input.description,
-                  membersIds: input.membersIds
-                } as CreateProjectDto,
+                dto,
                 auth.user.id
               );
               return { value: this.toPlain(project), projectId: project.id };
@@ -248,6 +294,7 @@ export class ProjectsMcpServerService {
         description: 'Изменить название или описание проекта',
         inputSchema: {
           projectId: z.number().int().positive(),
+          projectTitle: title.describe('Текущее точное название проекта'),
           title: z.string().trim().min(1).max(255).optional(),
           description: z.string().max(10000).optional(),
           idempotencyKey
@@ -256,26 +303,33 @@ export class ProjectsMcpServerService {
       },
       async input => {
         this.assertScope(auth, ProjectsMcpScope.Update);
-        this.assertAnyDefined(input, ['title', 'startDate', 'endDate']);
+        this.assertAnyDefined(input, ['title', 'description']);
         return this.toolResult(
           await this.operations.run(
             auth,
             'projects_update',
             input.idempotencyKey,
             input,
-            async () => ({
-              value: this.toPlain(
-                await this.projectsService.update(
-                  {
-                    id: input.projectId,
-                    title: input.title,
-                    description: input.description
-                  } as UpdateProjectDto,
-                  auth.user.id
-                )
-              ),
-              projectId: input.projectId
-            })
+            async () => {
+              await this.assertProjectTitle(
+                input.projectId,
+                auth.user.id,
+                input.projectTitle
+              );
+              return {
+                value: this.toPlain(
+                  await this.projectsService.update(
+                    await validateDto(UpdateProjectDto, {
+                      id: input.projectId,
+                      title: input.title,
+                      description: input.description
+                    }),
+                    auth.user.id
+                  )
+                ),
+                projectId: input.projectId
+              };
+            }
           )
         );
       }
@@ -287,31 +341,276 @@ export class ProjectsMcpServerService {
         description: 'Полностью заменить список участников проекта',
         inputSchema: {
           projectId: z.number().int().positive(),
-          membersIds: z.array(z.number().int().positive()).max(500),
+          projectTitle: title.describe('Текущее точное название проекта'),
+          membersIds: ids,
+          memberNames: names,
           idempotencyKey
         },
         annotations: this.writeAnnotations('Изменить участников')
       },
       async input => {
         this.assertScope(auth, ProjectsMcpScope.Members);
+        await this.assertNamedUsers(input.membersIds, input.memberNames);
         return this.toolResult(
           await this.operations.run(
             auth,
             'project_members_update',
             input.idempotencyKey,
             input,
-            async () => ({
-              value: this.toPlain(
-                await this.projectsService.update(
-                  {
-                    id: input.projectId,
-                    membersIds: input.membersIds
-                  } as UpdateProjectDto,
-                  auth.user.id
-                )
-              ),
-              projectId: input.projectId
-            })
+            async () => {
+              await this.assertProjectTitle(
+                input.projectId,
+                auth.user.id,
+                input.projectTitle
+              );
+              return {
+                value: this.toPlain(
+                  await this.projectsService.update(
+                    await validateDto(UpdateProjectDto, {
+                      id: input.projectId,
+                      membersIds: input.membersIds
+                    }),
+                    auth.user.id
+                  )
+                ),
+                projectId: input.projectId
+              };
+            }
+          )
+        );
+      }
+    );
+
+    server.registerTool(
+      'projects_favorite_set',
+      {
+        description: 'Добавить проект в избранное или убрать из избранного',
+        inputSchema: {
+          projectId: z.number().int().positive(),
+          projectTitle: title.describe('Точное название проекта'),
+          isFavorite: z.boolean(),
+          idempotencyKey
+        },
+        annotations: this.writeAnnotations('Изменить избранное')
+      },
+      async input => {
+        this.assertScope(auth, ProjectsMcpScope.Update);
+        return this.toolResult(
+          await this.operations.run(
+            auth,
+            'projects_favorite_set',
+            input.idempotencyKey,
+            input,
+            async () => {
+              const projects = await this.projectsService.getAll(auth.user.id);
+              const project = projects.find(
+                item => item.id === input.projectId
+              );
+              this.assertEntityTitle(
+                project?.title,
+                input.projectTitle,
+                'проекта'
+              );
+              const current = Boolean((project as any)?.favorites?.length);
+              const value =
+                current === input.isFavorite
+                  ? { isFavorite: current }
+                  : await this.projectsService.toggleFavorite(
+                      input.projectId,
+                      auth.user.id
+                    );
+              return { value, projectId: input.projectId };
+            }
+          )
+        );
+      }
+    );
+
+    server.registerTool(
+      'projects_reorder',
+      {
+        description: 'Задать полный персональный порядок проектов',
+        inputSchema: {
+          projectIds: ids.min(1),
+          projectTitles: names.min(1),
+          idempotencyKey
+        },
+        annotations: this.writeAnnotations('Изменить порядок проектов')
+      },
+      async input => {
+        this.assertScope(auth, ProjectsMcpScope.Update);
+        return this.toolResult(
+          await this.operations.run(
+            auth,
+            'projects_reorder',
+            input.idempotencyKey,
+            input,
+            async () => {
+              const projects = await this.projectsService.getAll(auth.user.id);
+              this.assertNamedOrder(
+                projects,
+                input.projectIds,
+                input.projectTitles,
+                'проектов'
+              );
+              const dto = await validateDto(ReorderProjectsDto, {
+                ids: input.projectIds
+              });
+              await this.projectsService.reorder(dto.ids, auth.user.id);
+              return {
+                value: { reordered: true, projectTitles: input.projectTitles }
+              };
+            }
+          )
+        );
+      }
+    );
+
+    server.registerTool(
+      'project_tags_create',
+      {
+        description: 'Создать тег в проекте',
+        inputSchema: {
+          projectId: z.number().int().positive(),
+          projectTitle: title.describe('Точное название проекта'),
+          label: title,
+          color: z.string().trim().min(1).max(64),
+          description: z.string().max(10000).optional(),
+          idempotencyKey
+        },
+        annotations: this.writeAnnotations('Создать тег')
+      },
+      async input => {
+        this.assertScope(auth, ProjectsMcpScope.Update);
+        return this.toolResult(
+          await this.operations.run(
+            auth,
+            'project_tags_create',
+            input.idempotencyKey,
+            input,
+            async () => {
+              await this.projectAccess.assertCanManage(
+                input.projectId,
+                auth.user.id
+              );
+              await this.assertProjectTitle(
+                input.projectId,
+                auth.user.id,
+                input.projectTitle
+              );
+              const tag = await this.tagsService.create(
+                input.projectId,
+                await validateDto(CreateTagDto, {
+                  label: input.label,
+                  color: input.color,
+                  description: input.description
+                })
+              );
+              return { value: this.toPlain(tag), projectId: input.projectId };
+            }
+          )
+        );
+      }
+    );
+
+    server.registerTool(
+      'project_tags_update',
+      {
+        description: 'Изменить тег проекта',
+        inputSchema: {
+          projectId: z.number().int().positive(),
+          projectTitle: title.describe('Точное название проекта'),
+          tagId: z.number().int().positive(),
+          tagLabel: title.describe('Текущее точное название тега'),
+          label: title.optional(),
+          color: z.string().trim().min(1).max(64).optional(),
+          description: z.string().max(10000).optional(),
+          idempotencyKey
+        },
+        annotations: this.writeAnnotations('Изменить тег')
+      },
+      async input => {
+        this.assertScope(auth, ProjectsMcpScope.Update);
+        this.assertAnyDefined(input, ['label', 'color', 'description']);
+        return this.toolResult(
+          await this.operations.run(
+            auth,
+            'project_tags_update',
+            input.idempotencyKey,
+            input,
+            async () => {
+              await this.projectAccess.assertCanManage(
+                input.projectId,
+                auth.user.id
+              );
+              await this.assertProjectTitle(
+                input.projectId,
+                auth.user.id,
+                input.projectTitle
+              );
+              await this.assertTagTitle(
+                input.projectId,
+                input.tagId,
+                input.tagLabel
+              );
+              const tag = await this.tagsService.update(
+                input.tagId,
+                await validateDto(UpdateTagDto, {
+                  label: input.label,
+                  color: input.color,
+                  description: input.description
+                })
+              );
+              return { value: this.toPlain(tag), projectId: input.projectId };
+            }
+          )
+        );
+      }
+    );
+
+    server.registerTool(
+      'project_tags_delete',
+      {
+        description: 'Мягко удалить тег проекта с явным подтверждением',
+        inputSchema: {
+          projectId: z.number().int().positive(),
+          projectTitle: title.describe('Точное название проекта'),
+          tagId: z.number().int().positive(),
+          tagLabel: title.describe('Точное название тега'),
+          confirm: z.literal(true),
+          idempotencyKey
+        },
+        annotations: this.destructiveAnnotations('Удалить тег')
+      },
+      async input => {
+        this.assertScope(auth, ProjectsMcpScope.Delete);
+        return this.toolResult(
+          await this.operations.run(
+            auth,
+            'project_tags_delete',
+            input.idempotencyKey,
+            input,
+            async () => {
+              await this.projectAccess.assertCanManage(
+                input.projectId,
+                auth.user.id
+              );
+              await this.assertProjectTitle(
+                input.projectId,
+                auth.user.id,
+                input.projectTitle
+              );
+              await this.assertTagTitle(
+                input.projectId,
+                input.tagId,
+                input.tagLabel
+              );
+              await this.tagsService.delete(input.tagId);
+              return {
+                value: { deleted: true, tagLabel: input.tagLabel },
+                projectId: input.projectId
+              };
+            }
           )
         );
       }
@@ -324,6 +623,7 @@ export class ProjectsMcpServerService {
           'Мягко удалить проект. Требуется явное подтверждение confirm=true',
         inputSchema: {
           projectId: z.number().int().positive(),
+          projectTitle: title.describe('Точное название проекта'),
           confirm: z.literal(true),
           idempotencyKey
         },
@@ -344,6 +644,11 @@ export class ProjectsMcpServerService {
             input.idempotencyKey,
             input,
             async () => {
+              await this.assertProjectTitle(
+                input.projectId,
+                auth.user.id,
+                input.projectTitle
+              );
               await this.projectsService.delete(input.projectId, auth.user.id);
               return {
                 value: { deleted: true, projectId: input.projectId },
@@ -483,6 +788,29 @@ export class ProjectsMcpServerService {
         );
       }
     );
+
+    server.registerTool(
+      'task_history_list',
+      {
+        description: 'Получить историю изменений задачи',
+        inputSchema: {
+          taskId: z.number().int().positive(),
+          limit: z.number().int().positive().max(100).default(50),
+          beforeId: z.number().int().positive().optional()
+        },
+        annotations: this.readOnlyAnnotations('История задачи')
+      },
+      async ({ taskId, limit, beforeId }) => {
+        this.assertScope(auth, ProjectsMcpScope.Read);
+        const query = await validateDto(ActivityHistoryQueryDto, {
+          limit,
+          beforeId
+        });
+        return this.toolResult(
+          await this.tasksService.getHistory(taskId, auth.user.id, query)
+        );
+      }
+    );
   }
 
   private registerBoardAndTaskWriteTools(
@@ -504,13 +832,16 @@ export class ProjectsMcpServerService {
       .refine(values => new Set(values).size === values.length, {
         message: 'ID не должны повторяться'
       });
+    const titles = z.array(title).min(1).max(1000);
     const taskCreateFields = {
       title,
       description: z.string().max(200000).optional(),
       priority: z.enum(['', 'low', 'medium', 'high', 'urgent']).optional(),
       dueDate: date.optional(),
       assigneeIds: z.array(z.number().int().positive()).max(500).optional(),
+      assigneeNames: z.array(title).max(500).optional(),
       tagIds: z.array(z.number().int().positive()).max(500).optional(),
+      tagLabels: z.array(title).max(500).optional(),
       approvalStatus: z.enum(['', 'yes', 'no']).optional()
     };
     const taskUpdateFields = {
@@ -519,7 +850,9 @@ export class ProjectsMcpServerService {
       priority: z.enum(['', 'low', 'medium', 'high', 'urgent']).optional(),
       dueDate: date.optional(),
       assigneeIds: z.array(z.number().int().positive()).max(500).optional(),
+      assigneeNames: z.array(title).max(500).optional(),
       tagIds: z.array(z.number().int().positive()).max(500).optional(),
+      tagLabels: z.array(title).max(500).optional(),
       approvalStatus: z.enum(['', 'yes', 'no']).optional(),
       parentTaskId: z.null().optional()
     };
@@ -530,6 +863,7 @@ export class ProjectsMcpServerService {
         description: 'Создать доску в проекте',
         inputSchema: {
           projectId: z.number().int().positive(),
+          projectTitle: title.describe('Точное название проекта'),
           title,
           startDate: date.optional(),
           endDate: date.optional(),
@@ -546,13 +880,19 @@ export class ProjectsMcpServerService {
             input.idempotencyKey,
             input,
             async () => {
+              await this.assertProjectTitle(
+                input.projectId,
+                auth.user.id,
+                input.projectTitle
+              );
+              const dto = await validateDto(CreateBoardDto, {
+                title: input.title,
+                startDate: input.startDate,
+                endDate: input.endDate
+              });
               const board = await this.boardsService.create(
                 input.projectId,
-                {
-                  title: input.title,
-                  startDate: input.startDate,
-                  endDate: input.endDate
-                } as CreateBoardDto,
+                dto,
                 auth.user.id
               );
               return {
@@ -571,6 +911,7 @@ export class ProjectsMcpServerService {
         description: 'Изменить название или период доски',
         inputSchema: {
           boardId: z.number().int().positive(),
+          boardTitle: title.describe('Текущее точное название доски'),
           title: title.optional(),
           startDate: date.optional(),
           endDate: date.optional(),
@@ -580,6 +921,7 @@ export class ProjectsMcpServerService {
       },
       async input => {
         this.assertScope(auth, ProjectsMcpScope.Update);
+        this.assertAnyDefined(input, ['title', 'startDate', 'endDate']);
         return this.toolResult(
           await this.operations.run(
             auth,
@@ -587,13 +929,18 @@ export class ProjectsMcpServerService {
             input.idempotencyKey,
             input,
             async () => {
+              const current = await this.boardsService.getById(
+                input.boardId,
+                auth.user.id
+              );
+              this.assertEntityTitle(current.title, input.boardTitle, 'доски');
               const board = await this.boardsService.update(
                 input.boardId,
-                {
+                await validateDto(UpdateBoardDto, {
                   title: input.title,
                   startDate: input.startDate,
                   endDate: input.endDate
-                } as UpdateBoardDto,
+                }),
                 auth.user.id
               );
               return {
@@ -612,7 +959,9 @@ export class ProjectsMcpServerService {
         description: 'Задать полный порядок досок проекта',
         inputSchema: {
           projectId: z.number().int().positive(),
+          projectTitle: title.describe('Точное название проекта'),
           boardIds: ids,
+          boardTitles: titles,
           idempotencyKey
         },
         annotations: this.writeAnnotations('Изменить порядок досок')
@@ -626,18 +975,27 @@ export class ProjectsMcpServerService {
             input.idempotencyKey,
             input,
             async () => {
+              await this.assertProjectTitle(
+                input.projectId,
+                auth.user.id,
+                input.projectTitle
+              );
               const boards = await this.boardsService.getByProject(
                 input.projectId,
                 auth.user.id
               );
-              this.assertCompleteOrder(
-                boards.map(board => board.id),
+              this.assertNamedOrder(
+                boards,
                 input.boardIds,
+                input.boardTitles,
                 'досок проекта'
               );
+              const dto = await validateDto(ReorderBoardsDto, {
+                ids: input.boardIds
+              });
               await this.boardsService.reorder(
                 input.projectId,
-                input.boardIds,
+                dto.ids,
                 auth.user.id
               );
               return {
@@ -660,6 +1018,7 @@ export class ProjectsMcpServerService {
         description: 'Мягко удалить доску с явным подтверждением',
         inputSchema: {
           boardId: z.number().int().positive(),
+          boardTitle: title.describe('Точное название доски'),
           confirm: z.literal(true),
           idempotencyKey
         },
@@ -678,6 +1037,7 @@ export class ProjectsMcpServerService {
                 input.boardId,
                 auth.user.id
               );
+              this.assertEntityTitle(board.title, input.boardTitle, 'доски');
               await this.boardsService.delete(input.boardId, auth.user.id);
               return {
                 value: { deleted: true, boardId: input.boardId },
@@ -695,6 +1055,7 @@ export class ProjectsMcpServerService {
         description: 'Создать колонку в доске',
         inputSchema: {
           boardId: z.number().int().positive(),
+          boardTitle: title.describe('Точное название доски'),
           title,
           color: z.string().trim().max(64).optional(),
           idempotencyKey
@@ -715,12 +1076,13 @@ export class ProjectsMcpServerService {
                 input.boardId,
                 auth.user.id
               );
+              this.assertEntityTitle(board.title, input.boardTitle, 'доски');
               const column = await this.columnsService.create(
                 input.boardId,
-                {
+                await validateDto(CreateColumnDto, {
                   title: input.title,
                   color: input.color
-                } as CreateColumnDto,
+                }),
                 auth.user.id
               );
               return {
@@ -739,6 +1101,7 @@ export class ProjectsMcpServerService {
         description: 'Изменить название или цвет колонки',
         inputSchema: {
           columnId: z.number().int().positive(),
+          columnTitle: title.describe('Текущее точное название колонки'),
           title: title.optional(),
           color: z.string().trim().max(64).optional(),
           idempotencyKey
@@ -747,6 +1110,7 @@ export class ProjectsMcpServerService {
       },
       async input => {
         this.assertScope(auth, ProjectsMcpScope.Update);
+        this.assertAnyDefined(input, ['title', 'color']);
         return this.toolResult(
           await this.operations.run(
             auth,
@@ -754,12 +1118,21 @@ export class ProjectsMcpServerService {
             input.idempotencyKey,
             input,
             async () => {
+              const current = await this.columnsService.getById(
+                input.columnId,
+                auth.user.id
+              );
+              this.assertEntityTitle(
+                current.title,
+                input.columnTitle,
+                'колонки'
+              );
               const column = await this.columnsService.update(
                 input.columnId,
-                {
+                await validateDto(UpdateColumnDto, {
                   title: input.title,
                   color: input.color
-                } as UpdateColumnDto,
+                }),
                 auth.user.id
               );
               const board = await this.boardsService.getById(
@@ -782,7 +1155,9 @@ export class ProjectsMcpServerService {
         description: 'Задать полный порядок колонок доски',
         inputSchema: {
           boardId: z.number().int().positive(),
+          boardTitle: title.describe('Точное название доски'),
           columnIds: ids,
+          columnTitles: titles,
           idempotencyKey
         },
         annotations: this.writeAnnotations('Изменить порядок колонок')
@@ -800,18 +1175,23 @@ export class ProjectsMcpServerService {
                 input.boardId,
                 auth.user.id
               );
+              this.assertEntityTitle(board.title, input.boardTitle, 'доски');
               const columns = await this.columnsService.getByBoard(
                 input.boardId,
                 auth.user.id
               );
-              this.assertCompleteOrder(
-                columns.map(column => column.id),
+              this.assertNamedOrder(
+                columns,
                 input.columnIds,
+                input.columnTitles,
                 'колонок доски'
               );
+              const dto = await validateDto(ReorderColumnsDto, {
+                ids: input.columnIds
+              });
               await this.columnsService.reorder(
                 input.boardId,
-                { ids: input.columnIds } as ReorderColumnsDto,
+                dto,
                 auth.user.id
               );
               return {
@@ -834,6 +1214,7 @@ export class ProjectsMcpServerService {
         description: 'Мягко удалить колонку с явным подтверждением',
         inputSchema: {
           columnId: z.number().int().positive(),
+          columnTitle: title.describe('Точное название колонки'),
           confirm: z.literal(true),
           idempotencyKey
         },
@@ -851,6 +1232,11 @@ export class ProjectsMcpServerService {
               const column = await this.columnsService.getById(
                 input.columnId,
                 auth.user.id
+              );
+              this.assertEntityTitle(
+                column.title,
+                input.columnTitle,
+                'колонки'
               );
               const board = await this.boardsService.getById(
                 column.boardId,
@@ -905,9 +1291,10 @@ export class ProjectsMcpServerService {
                 auth.user.id,
                 input.columnTitle
               );
+              await this.assertTaskReferences(projectId, input);
               const task = await this.tasksService.create(
                 input.columnId,
-                this.toCreateTaskDto(input),
+                await validateDto(CreateTaskDto, this.toCreateTaskDto(input)),
                 auth.user.id
               );
               return {
@@ -926,6 +1313,9 @@ export class ProjectsMcpServerService {
         description: 'Создать подзадачу у существующей задачи',
         inputSchema: {
           parentTaskId: z.number().int().positive(),
+          parentTaskTitle: title.describe(
+            'Точное название родительской задачи'
+          ),
           ...taskCreateFields,
           idempotencyKey
         },
@@ -933,11 +1323,6 @@ export class ProjectsMcpServerService {
       },
       async input => {
         this.assertScope(auth, ProjectsMcpScope.Update);
-        if (input.answerCommentId && !input.threadId) {
-          throw new BadRequestException(
-            'answerCommentId требует существующий threadId'
-          );
-        }
         return this.toolResult(
           await this.operations.run(
             auth,
@@ -949,13 +1334,19 @@ export class ProjectsMcpServerService {
                 input.parentTaskId,
                 auth.user.id
               );
+              this.assertEntityTitle(
+                parent.title,
+                input.parentTaskTitle,
+                'родительской задачи'
+              );
               const projectId = await this.getProjectIdForColumn(
                 parent.columnId,
                 auth.user.id
               );
+              await this.assertTaskReferences(projectId, input);
               const task = await this.tasksService.createSubtask(
                 input.parentTaskId,
-                this.toCreateTaskDto(input),
+                await validateDto(CreateTaskDto, this.toCreateTaskDto(input)),
                 auth.user.id
               );
               return {
@@ -975,6 +1366,7 @@ export class ProjectsMcpServerService {
           'Изменить задачу или подзадачу; parentTaskId=null открепляет подзадачу',
         inputSchema: {
           taskId: z.number().int().positive(),
+          taskTitle: title.describe('Текущее точное название задачи'),
           ...taskUpdateFields,
           idempotencyKey
         },
@@ -982,6 +1374,16 @@ export class ProjectsMcpServerService {
       },
       async input => {
         this.assertScope(auth, ProjectsMcpScope.Update);
+        this.assertAnyDefined(input, [
+          'title',
+          'description',
+          'priority',
+          'dueDate',
+          'assigneeIds',
+          'tagIds',
+          'approvalStatus',
+          'parentTaskId'
+        ]);
         return this.toolResult(
           await this.operations.run(
             auth,
@@ -993,13 +1395,15 @@ export class ProjectsMcpServerService {
                 input.taskId,
                 auth.user.id
               );
+              this.assertEntityTitle(current.title, input.taskTitle, 'задачи');
               const projectId = await this.getProjectIdForColumn(
                 current.columnId,
                 auth.user.id
               );
+              await this.assertTaskReferences(projectId, input);
               const task = await this.tasksService.update(
                 input.taskId,
-                this.toUpdateTaskDto(input),
+                await validateDto(UpdateTaskDto, this.toUpdateTaskDto(input)),
                 auth.user.id
               );
               return {
@@ -1019,7 +1423,9 @@ export class ProjectsMcpServerService {
           'Переместить верхнеуровневую задачу вместе с подзадачами в колонку и позицию',
         inputSchema: {
           taskId: z.number().int().positive(),
+          taskTitle: title.describe('Точное название задачи'),
           columnId: z.number().int().positive(),
+          columnTitle: title.describe('Точное название целевой колонки'),
           order: z.number().int().nonnegative(),
           idempotencyKey
         },
@@ -1034,16 +1440,22 @@ export class ProjectsMcpServerService {
             input.idempotencyKey,
             input,
             async () => {
+              const current = await this.tasksService.getById(
+                input.taskId,
+                auth.user.id
+              );
+              this.assertEntityTitle(current.title, input.taskTitle, 'задачи');
               const projectId = await this.getProjectIdForColumn(
                 input.columnId,
-                auth.user.id
+                auth.user.id,
+                input.columnTitle
               );
               const task = await this.tasksService.move(
                 input.taskId,
-                {
+                await validateDto(MoveTaskDto, {
                   columnId: input.columnId,
                   order: input.order
-                } as MoveTaskDto,
+                }),
                 auth.user.id
               );
               return {
@@ -1062,6 +1474,7 @@ export class ProjectsMcpServerService {
         description: 'Мягко удалить задачу или подзадачу с подтверждением',
         inputSchema: {
           taskId: z.number().int().positive(),
+          taskTitle: title.describe('Точное название задачи'),
           confirm: z.literal(true),
           idempotencyKey
         },
@@ -1080,6 +1493,7 @@ export class ProjectsMcpServerService {
                 input.taskId,
                 auth.user.id
               );
+              this.assertEntityTitle(task.title, input.taskTitle, 'задачи');
               const projectId = await this.getProjectIdForColumn(
                 task.columnId,
                 auth.user.id
@@ -1102,6 +1516,7 @@ export class ProjectsMcpServerService {
           'Оставить комментарий к задаче или ответить в существующем thread',
         inputSchema: {
           taskId: z.number().int().positive(),
+          taskTitle: title.describe('Точное название задачи'),
           content: z.string().trim().min(1).max(50000),
           threadId: z.string().trim().min(1).max(128).optional(),
           answerCommentId: z.string().trim().min(1).max(128).optional(),
@@ -1122,6 +1537,7 @@ export class ProjectsMcpServerService {
                 input.taskId,
                 auth.user.id
               );
+              this.assertEntityTitle(task.title, input.taskTitle, 'задачи');
               const projectId = await this.getProjectIdForColumn(
                 task.columnId,
                 auth.user.id
@@ -1143,19 +1559,142 @@ export class ProjectsMcpServerService {
     );
   }
 
+  private async assertProjectTitle(
+    projectId: number,
+    userId: number,
+    expectedTitle: string
+  ): Promise<void> {
+    const project = await this.projectsService.getById(projectId, userId);
+    this.assertEntityTitle(project.title, expectedTitle, 'проекта');
+  }
+
+  private async assertTagTitle(
+    projectId: number,
+    tagId: number,
+    expectedLabel: string
+  ): Promise<void> {
+    const tags = await this.tagsService.getByProject(projectId);
+    const tag = tags.find(item => item.id === tagId);
+    this.assertEntityTitle(tag?.label, expectedLabel, 'тега');
+  }
+
+  private async assertNamedUsers(
+    userIds?: number[],
+    userNames?: string[]
+  ): Promise<void> {
+    if (!userIds && !userNames) return;
+    if (!userIds || !userNames || userIds.length !== userNames.length) {
+      throw new BadRequestException(
+        'Для каждого выбранного пользователя нужно передать его точное имя'
+      );
+    }
+
+    const users = await this.usersService.getUsersList();
+    const usersById = new Map(users.map(user => [user.id, user]));
+    userIds.forEach((userId, index) => {
+      const user = usersById.get(userId);
+      const acceptedNames = [user?.initial, user?.login, user?.serviceNumber]
+        .filter(Boolean)
+        .map(value => this.normalizeName(String(value)));
+      if (!acceptedNames.includes(this.normalizeName(userNames[index]))) {
+        throw new BadRequestException(
+          'Имя выбранного пользователя не соответствует фактическим данным'
+        );
+      }
+    });
+  }
+
+  private async assertTaskReferences(
+    projectId: number,
+    input: {
+      assigneeIds?: number[];
+      assigneeNames?: string[];
+      tagIds?: number[];
+      tagLabels?: string[];
+    }
+  ): Promise<void> {
+    await this.assertNamedUsers(input.assigneeIds, input.assigneeNames);
+    if (!input.tagIds && !input.tagLabels) return;
+    if (
+      !input.tagIds ||
+      !input.tagLabels ||
+      input.tagIds.length !== input.tagLabels.length
+    ) {
+      throw new BadRequestException(
+        'Для каждого выбранного тега нужно передать его точное название'
+      );
+    }
+
+    const tags = await this.tagsService.getByProject(projectId);
+    const tagsById = new Map(tags.map(tag => [tag.id, tag]));
+    input.tagIds.forEach((tagId, index) => {
+      this.assertEntityTitle(
+        tagsById.get(tagId)?.label,
+        input.tagLabels?.[index] || '',
+        'тега'
+      );
+    });
+  }
+
+  private assertNamedOrder(
+    actualEntities: Array<{ id: number; title: string }>,
+    requestedIds: number[],
+    requestedTitles: string[],
+    label: string
+  ): void {
+    this.assertCompleteOrder(
+      actualEntities.map(entity => entity.id),
+      requestedIds,
+      label
+    );
+    if (requestedIds.length !== requestedTitles.length) {
+      throw new BadRequestException(
+        `Для каждой сущности из порядка ${label} нужно передать название`
+      );
+    }
+
+    const entitiesById = new Map(
+      actualEntities.map(entity => [entity.id, entity])
+    );
+    requestedIds.forEach((id, index) => {
+      this.assertEntityTitle(
+        entitiesById.get(id)?.title,
+        requestedTitles[index],
+        label
+      );
+    });
+  }
+
+  private assertEntityTitle(
+    actualTitle: string | undefined,
+    expectedTitle: string,
+    label: string
+  ): void {
+    if (
+      !actualTitle ||
+      this.normalizeName(actualTitle) !== this.normalizeName(expectedTitle)
+    ) {
+      throw new BadRequestException(
+        `Название ${label} не соответствует фактическому названию`
+      );
+    }
+  }
+
+  private normalizeName(value: string): string {
+    return value.trim().replace(/\s+/g, ' ').toLocaleLowerCase('ru-RU');
+  }
+
   private async getProjectIdForColumn(
     columnId: number,
     userId: number,
     expectedColumnTitle?: string
   ): Promise<number> {
     const column = await this.columnsService.getById(columnId, userId);
-    if (
-      expectedColumnTitle &&
-      column.title.trim().toLocaleLowerCase('ru-RU') !==
-        expectedColumnTitle.trim().toLocaleLowerCase('ru-RU')
-    ) {
-      throw new BadRequestException(
-        'Название выбранной колонки не соответствует её фактическому названию'
+    if (expectedColumnTitle) {
+      this.assertEntityTitle(
+        column.title,
+        expectedColumnTitle,
+        'выбранной колонки'
       );
     }
     const board = await this.boardsService.getById(column.boardId, userId);

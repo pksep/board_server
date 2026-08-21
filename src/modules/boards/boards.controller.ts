@@ -13,6 +13,7 @@ import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { BoardsService } from './boards.service';
 import { CreateBoardDto } from './dto/create-board.dto';
 import { UpdateBoardDto } from './dto/update-board.dto';
+import { ReorderBoardsDto } from './dto/reorder-boards.dto';
 import { Board } from './model/board.model';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { IUserDataToken } from '../auth/interfaces/interface';
@@ -66,10 +67,10 @@ export class BoardsController {
   @Patch('projects/:projectId/boards/reorder')
   reorder(
     @Param('projectId') projectId: number,
-    @Body() body: { ids: number[] },
+    @Body() dto: ReorderBoardsDto,
     @CurrentUser() user: IUserDataToken
   ) {
-    return this.boardsService.reorder(+projectId, body.ids, user.id);
+    return this.boardsService.reorder(+projectId, dto.ids, user.id);
   }
 
   @ApiOperation({ summary: 'Удалить доску (soft delete)' })
