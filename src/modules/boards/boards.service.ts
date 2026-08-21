@@ -8,6 +8,17 @@ import { WsGateway } from '../ws/ws.gateway';
 import { ProjectAccessService } from '../projects/project-access.service';
 import { BoardColumn } from '../columns/model/board-column.model';
 import { Task } from '../tasks/model/task.model';
+import { BoardListQueryDto } from './dto/board-list-query.dto';
+
+type BoardWithTasksCount = Board & { tasksCount: number };
+
+interface BoardListPage {
+  items: BoardWithTasksCount[];
+  total: number;
+  limit: number;
+  offset: number;
+  hasMore: boolean;
+}
 
 @Injectable()
 export class BoardsService {
@@ -25,20 +36,39 @@ export class BoardsService {
   async getByProject(
     projectId: number,
     userId: number
-  ): Promise<Array<Board & { tasksCount: number }>> {
+  ): Promise<BoardWithTasksCount[]>;
+  async getByProject(
+    projectId: number,
+    userId: number,
+    query: BoardListQueryDto
+  ): Promise<BoardWithTasksCount[] | BoardListPage>;
+  async getByProject(
+    projectId: number,
+    userId: number,
+    query: BoardListQueryDto = {}
+  ): Promise<BoardWithTasksCount[] | BoardListPage> {
     try {
       await this.projectAccess.assertCanRead(projectId, userId);
+      const isPaginated = query.limit !== undefined;
+      const limit = query.limit ?? 0;
+      const offset = query.offset ?? 0;
+      const total = isPaginated
+        ? await this.boardRepository.count({ where: { projectId } })
+        : 0;
       const boards = await this.boardRepository.findAll({
         where: { projectId },
         include: [{ association: 'columns', attributes: ['id'] }],
         order: [
           ['order', 'ASC'],
           ['createdAt', 'ASC']
-        ]
+        ],
+        ...(isPaginated ? { limit, offset } : {})
       });
 
       if (!boards.length) {
-        return [];
+        return isPaginated
+          ? { items: [], total, limit, offset, hasMore: false }
+          : [];
       }
 
       const boardIds = boards.map(board => board.id);
@@ -82,7 +112,7 @@ export class BoardsService {
         columnIdsByBoardId.set(column.boardId, boardColumnIds);
       });
 
-      return boards.map(board => {
+      const items = boards.map(board => {
         const boardColumnIds = columnIdsByBoardId.get(board.id) || [];
         const tasksCount = boardColumnIds.reduce(
           (total, columnId) =>
@@ -93,8 +123,18 @@ export class BoardsService {
         return {
           ...board.toJSON(),
           tasksCount
-        } as Board & { tasksCount: number };
+        } as BoardWithTasksCount;
       });
+
+      return isPaginated
+        ? {
+            items,
+            total,
+            limit,
+            offset,
+            hasMore: offset + items.length < total
+          }
+        : items;
     } catch (error) {
       if (error instanceof HttpException) throw error;
       this.logger.error('getByProject failed', error);

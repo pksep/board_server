@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Put
 } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
@@ -16,6 +17,7 @@ import { ReorderBoardsDto } from './dto/reorder-boards.dto';
 import { Board } from './model/board.model';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { IUserDataToken } from '../auth/interfaces/interface';
+import { BoardListQueryDto } from './dto/board-list-query.dto';
 
 @ApiTags('Доски')
 @Controller()
@@ -27,9 +29,10 @@ export class BoardsController {
   @Get('projects/:projectId/boards')
   getByProject(
     @Param('projectId') projectId: number,
+    @Query() query: BoardListQueryDto,
     @CurrentUser() user: IUserDataToken
   ) {
-    return this.boardsService.getByProject(+projectId, user.id);
+    return this.boardsService.getByProject(+projectId, user.id, query);
   }
 
   @ApiOperation({ summary: 'Получить доску с колонками' })

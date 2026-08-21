@@ -60,4 +60,50 @@ describe('BoardsService.getByProject', () => {
       })
     );
   });
+
+  it('возвращает страницу досок и признак следующей порции', async () => {
+    const boards = [
+      {
+        id: 2,
+        toJSON: () => ({ id: 2, title: 'Вторая доска' })
+      }
+    ];
+    const boardRepository = {
+      count: jest.fn().mockResolvedValue(3),
+      findAll: jest.fn().mockResolvedValue(boards)
+    };
+    const columnRepository = {
+      findAll: jest.fn().mockResolvedValue([{ id: 20, boardId: 2 }])
+    };
+    const taskRepository = {
+      sequelize: {
+        fn: jest.fn().mockReturnValue('count-expression'),
+        col: jest.fn().mockReturnValue('id-column')
+      },
+      findAll: jest.fn().mockResolvedValue([{ columnId: 20, tasksCount: '4' }])
+    };
+    const projectAccess = {
+      assertCanRead: jest.fn().mockResolvedValue(undefined)
+    };
+    const service = new BoardsService(
+      boardRepository as any,
+      columnRepository as any,
+      taskRepository as any,
+      {} as any,
+      projectAccess as any
+    );
+
+    await expect(
+      service.getByProject(7, 42, { limit: 1, offset: 1 })
+    ).resolves.toEqual({
+      items: [{ id: 2, title: 'Вторая доска', tasksCount: 4 }],
+      total: 3,
+      limit: 1,
+      offset: 1,
+      hasMore: true
+    });
+    expect(boardRepository.findAll).toHaveBeenCalledWith(
+      expect.objectContaining({ limit: 1, offset: 1 })
+    );
+  });
 });
