@@ -243,6 +243,40 @@ describe('ProjectsMcpServerService', () => {
     await server.close();
   });
 
+  it('применяет DTO доски к внутреннему MCP-вызову до записи', async () => {
+    const auth = {
+      user: { id: 7, login: 'DA', serviceNumber: '007' },
+      clientId: 'jest',
+      audience: PROJECTS_MCP_AUDIENCE,
+      scopes: new Set(PROJECTS_MCP_SCOPES),
+      accessToken: 'mcp-token'
+    };
+    const server = service.createServer(auth);
+    const client = new Client({ name: 'jest-client', version: '1.0.0' });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    const result = await client.callTool({
+      name: 'boards_create',
+      arguments: {
+        projectId: 1,
+        projectTitle: 'Board',
+        title: 'Некорректный период',
+        startDate: 'завтра',
+        idempotencyKey: 'board-invalid-date-1'
+      }
+    });
+
+    expect(result.isError).toBe(true);
+    expect(boardsService.create).not.toHaveBeenCalled();
+
+    await client.close();
+    await server.close();
+  });
+
   it('создаёт новый проект через подтверждаемую MCP-операцию', async () => {
     const auth = {
       user: { id: 7, login: 'DA', serviceNumber: '007' },

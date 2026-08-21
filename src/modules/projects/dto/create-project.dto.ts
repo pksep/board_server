@@ -5,13 +5,19 @@ import {
   IsString,
   Matches,
   MinLength,
-  MaxLength
+  MaxLength,
+  IsArray,
+  ArrayMaxSize,
+  ArrayUnique,
+  IsInt,
+  Min
 } from 'class-validator';
 
 export class CreateProjectDto {
   @ApiProperty({ example: 'Мой проект', description: 'Название проекта' })
   @IsString()
   @IsNotEmpty({ message: 'Название проекта обязательно' })
+  @MaxLength(255)
   title: string;
 
   @ApiProperty({
@@ -30,9 +36,15 @@ export class CreateProjectDto {
   @ApiProperty({ example: 'Описание', description: 'Описание проекта' })
   @IsOptional()
   @IsString()
+  @MaxLength(10000)
   description?: string;
 
   @ApiProperty({ example: [1, 2], description: 'ID участников' })
   @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(500)
+  @ArrayUnique()
+  @IsInt({ each: true })
+  @Min(1, { each: true })
   membersIds?: number[];
 }

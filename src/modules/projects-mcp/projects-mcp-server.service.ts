@@ -10,6 +10,7 @@ import {
 import * as z from 'zod/v4';
 import { BoardsService } from '../boards/boards.service';
 import { CreateBoardDto } from '../boards/dto/create-board.dto';
+import { ReorderBoardsDto } from '../boards/dto/reorder-boards.dto';
 import { UpdateBoardDto } from '../boards/dto/update-board.dto';
 import { ColumnsService } from '../columns/columns.service';
 import { CreateColumnDto } from '../columns/dto/create-column.dto';
@@ -17,6 +18,7 @@ import { ReorderColumnsDto } from '../columns/dto/reorder-columns.dto';
 import { UpdateColumnDto } from '../columns/dto/update-column.dto';
 import { ActivityHistoryQueryDto } from '../activity-events/dto/activity-history-query.dto';
 import { CreateProjectDto } from '../projects/dto/create-project.dto';
+import { ReorderProjectsDto } from '../projects/dto/reorder-projects.dto';
 import { UpdateProjectDto } from '../projects/dto/update-project.dto';
 import { ProjectAccessService } from '../projects/project-access.service';
 import { ProjectsService } from '../projects/projects.service';
@@ -28,6 +30,7 @@ import { MoveTaskDto } from '../tasks/dto/move-task.dto';
 import { UpdateTaskDto } from '../tasks/dto/update-task.dto';
 import { TasksService } from '../tasks/tasks.service';
 import { UsersService } from '../users/users.service';
+import { validateDto } from '../../utils/validation/validate-dto';
 import { ProjectsMcpScope } from './projects-mcp.constants';
 import { ProjectsMcpAuthContext } from './interfaces/projects-mcp.interface';
 import { ProjectsMcpOperationsService } from './projects-mcp-operations.service';
@@ -268,13 +271,14 @@ export class ProjectsMcpServerService {
             input.idempotencyKey,
             input,
             async () => {
+              const dto = await validateDto(CreateProjectDto, {
+                title: input.title,
+                prefix: input.prefix,
+                description: input.description,
+                membersIds: input.membersIds
+              });
               const project = await this.projectsService.create(
-                {
-                  title: input.title,
-                  prefix: input.prefix,
-                  description: input.description,
-                  membersIds: input.membersIds
-                } as CreateProjectDto,
+                dto,
                 auth.user.id
               );
               return { value: this.toPlain(project), projectId: project.id };
@@ -315,11 +319,11 @@ export class ProjectsMcpServerService {
               return {
                 value: this.toPlain(
                   await this.projectsService.update(
-                    {
+                    await validateDto(UpdateProjectDto, {
                       id: input.projectId,
                       title: input.title,
                       description: input.description
-                    } as UpdateProjectDto,
+                    }),
                     auth.user.id
                   )
                 ),
@@ -362,10 +366,10 @@ export class ProjectsMcpServerService {
               return {
                 value: this.toPlain(
                   await this.projectsService.update(
-                    {
+                    await validateDto(UpdateProjectDto, {
                       id: input.projectId,
                       membersIds: input.membersIds
-                    } as UpdateProjectDto,
+                    }),
                     auth.user.id
                   )
                 ),
@@ -449,10 +453,10 @@ export class ProjectsMcpServerService {
                 input.projectTitles,
                 'проектов'
               );
-              await this.projectsService.reorder(
-                input.projectIds,
-                auth.user.id
-              );
+              const dto = await validateDto(ReorderProjectsDto, {
+                ids: input.projectIds
+              });
+              await this.projectsService.reorder(dto.ids, auth.user.id);
               return {
                 value: { reordered: true, projectTitles: input.projectTitles }
               };
@@ -494,11 +498,14 @@ export class ProjectsMcpServerService {
                 auth.user.id,
                 input.projectTitle
               );
-              const tag = await this.tagsService.create(input.projectId, {
-                label: input.label,
-                color: input.color,
-                description: input.description
-              } as CreateTagDto);
+              const tag = await this.tagsService.create(
+                input.projectId,
+                await validateDto(CreateTagDto, {
+                  label: input.label,
+                  color: input.color,
+                  description: input.description
+                })
+              );
               return { value: this.toPlain(tag), projectId: input.projectId };
             }
           )
@@ -546,11 +553,14 @@ export class ProjectsMcpServerService {
                 input.tagId,
                 input.tagLabel
               );
-              const tag = await this.tagsService.update(input.tagId, {
-                label: input.label,
-                color: input.color,
-                description: input.description
-              } as UpdateTagDto);
+              const tag = await this.tagsService.update(
+                input.tagId,
+                await validateDto(UpdateTagDto, {
+                  label: input.label,
+                  color: input.color,
+                  description: input.description
+                })
+              );
               return { value: this.toPlain(tag), projectId: input.projectId };
             }
           )
@@ -792,11 +802,12 @@ export class ProjectsMcpServerService {
       },
       async ({ taskId, limit, beforeId }) => {
         this.assertScope(auth, ProjectsMcpScope.Read);
+        const query = await validateDto(ActivityHistoryQueryDto, {
+          limit,
+          beforeId
+        });
         return this.toolResult(
-          await this.tasksService.getHistory(taskId, auth.user.id, {
-            limit,
-            beforeId
-          } as ActivityHistoryQueryDto)
+          await this.tasksService.getHistory(taskId, auth.user.id, query)
         );
       }
     );
@@ -874,13 +885,14 @@ export class ProjectsMcpServerService {
                 auth.user.id,
                 input.projectTitle
               );
+              const dto = await validateDto(CreateBoardDto, {
+                title: input.title,
+                startDate: input.startDate,
+                endDate: input.endDate
+              });
               const board = await this.boardsService.create(
                 input.projectId,
-                {
-                  title: input.title,
-                  startDate: input.startDate,
-                  endDate: input.endDate
-                } as CreateBoardDto,
+                dto,
                 auth.user.id
               );
               return {
@@ -924,11 +936,11 @@ export class ProjectsMcpServerService {
               this.assertEntityTitle(current.title, input.boardTitle, 'доски');
               const board = await this.boardsService.update(
                 input.boardId,
-                {
+                await validateDto(UpdateBoardDto, {
                   title: input.title,
                   startDate: input.startDate,
                   endDate: input.endDate
-                } as UpdateBoardDto,
+                }),
                 auth.user.id
               );
               return {
@@ -978,9 +990,12 @@ export class ProjectsMcpServerService {
                 input.boardTitles,
                 'досок проекта'
               );
+              const dto = await validateDto(ReorderBoardsDto, {
+                ids: input.boardIds
+              });
               await this.boardsService.reorder(
                 input.projectId,
-                input.boardIds,
+                dto.ids,
                 auth.user.id
               );
               return {
@@ -1064,10 +1079,10 @@ export class ProjectsMcpServerService {
               this.assertEntityTitle(board.title, input.boardTitle, 'доски');
               const column = await this.columnsService.create(
                 input.boardId,
-                {
+                await validateDto(CreateColumnDto, {
                   title: input.title,
                   color: input.color
-                } as CreateColumnDto,
+                }),
                 auth.user.id
               );
               return {
@@ -1114,10 +1129,10 @@ export class ProjectsMcpServerService {
               );
               const column = await this.columnsService.update(
                 input.columnId,
-                {
+                await validateDto(UpdateColumnDto, {
                   title: input.title,
                   color: input.color
-                } as UpdateColumnDto,
+                }),
                 auth.user.id
               );
               const board = await this.boardsService.getById(
@@ -1171,9 +1186,12 @@ export class ProjectsMcpServerService {
                 input.columnTitles,
                 'колонок доски'
               );
+              const dto = await validateDto(ReorderColumnsDto, {
+                ids: input.columnIds
+              });
               await this.columnsService.reorder(
                 input.boardId,
-                { ids: input.columnIds } as ReorderColumnsDto,
+                dto,
                 auth.user.id
               );
               return {
@@ -1276,7 +1294,7 @@ export class ProjectsMcpServerService {
               await this.assertTaskReferences(projectId, input);
               const task = await this.tasksService.create(
                 input.columnId,
-                this.toCreateTaskDto(input),
+                await validateDto(CreateTaskDto, this.toCreateTaskDto(input)),
                 auth.user.id
               );
               return {
@@ -1328,7 +1346,7 @@ export class ProjectsMcpServerService {
               await this.assertTaskReferences(projectId, input);
               const task = await this.tasksService.createSubtask(
                 input.parentTaskId,
-                this.toCreateTaskDto(input),
+                await validateDto(CreateTaskDto, this.toCreateTaskDto(input)),
                 auth.user.id
               );
               return {
@@ -1385,7 +1403,7 @@ export class ProjectsMcpServerService {
               await this.assertTaskReferences(projectId, input);
               const task = await this.tasksService.update(
                 input.taskId,
-                this.toUpdateTaskDto(input),
+                await validateDto(UpdateTaskDto, this.toUpdateTaskDto(input)),
                 auth.user.id
               );
               return {
@@ -1434,10 +1452,10 @@ export class ProjectsMcpServerService {
               );
               const task = await this.tasksService.move(
                 input.taskId,
-                {
+                await validateDto(MoveTaskDto, {
                   columnId: input.columnId,
                   order: input.order
-                } as MoveTaskDto,
+                }),
                 auth.user.id
               );
               return {
