@@ -349,13 +349,20 @@ export class TasksService {
     try {
       await this.assertColumnAccess(columnId, userId);
       const search = query.search?.trim();
-      const rootTaskIds = search
+      const searchRootTaskIds = search
         ? await this.findMatchingRootTaskIds(columnId, search)
         : null;
+      const filteredRootTaskIds = this.hasStructuredTaskFilters(query)
+        ? await this.findFilteredRootTaskIds(columnId, query)
+        : null;
+      const rootTaskIds = this.intersectOptionalIdLists(
+        searchRootTaskIds,
+        filteredRootTaskIds
+      );
       const where = {
         columnId,
         parentTaskId: null,
-        ...(rootTaskIds ? { id: { [Op.in]: rootTaskIds } } : {})
+        ...(rootTaskIds !== null ? { id: { [Op.in]: rootTaskIds } } : {})
       };
       const isPaginated = query.limit !== undefined;
       const limit = query.limit ?? 0;
@@ -427,6 +434,99 @@ export class TasksService {
 
     return [
       ...new Set(matches.map(task => Number(task.parentTaskId || task.id)))
+    ];
+  }
+
+  /** Проверяет, есть ли в запросе фильтры по атрибутам задачи. */
+  private hasStructuredTaskFilters(query: TaskListQueryDto): boolean {
+    return Boolean(
+      query.assigneeIds?.length ||
+      query.priorities?.length ||
+      query.tagIds?.length
+    );
+  }
+
+  /** Пересекает два необязательных списка, не превращая отсутствие фильтра в пустой результат. */
+  private intersectOptionalIdLists(
+    left: number[] | null,
+    right: number[] | null
+  ): number[] | null {
+    if (left === null) return right;
+    if (right === null) return left;
+
+    const rightIds = new Set(right);
+    return left.filter(id => rightIds.has(id));
+  }
+
+  /** Пересекает идентификаторы задач, совпавших с разными группами фильтров. */
+  private intersectTaskIdSets(
+    current: Set<number>,
+    next: Set<number>
+  ): Set<number> {
+    return new Set([...current].filter(id => next.has(id)));
+  }
+
+  /**
+   * Находит корневые карточки, внутри которых задача или разрешённая подзадача
+   * одновременно совпала со всеми выбранными группами фильтров.
+   */
+  private async findFilteredRootTaskIds(
+    columnId: number,
+    query: TaskListQueryDto
+  ): Promise<number[]> {
+    const candidates = await this.taskRepository.findAll({
+      where: {
+        columnId,
+        ...(query.includeSubtasks ? {} : { parentTaskId: null }),
+        ...(query.priorities?.length
+          ? { priority: { [Op.in]: query.priorities } }
+          : {})
+      },
+      attributes: ['id', 'parentTaskId'],
+      raw: true
+    });
+    const candidatesById = new Map(
+      candidates.map(task => [Number(task.id), task])
+    );
+    let matchingTaskIds = new Set(candidatesById.keys());
+
+    if (query.assigneeIds?.length && matchingTaskIds.size) {
+      const assignments = await this.assigneeRepository.findAll({
+        where: {
+          taskId: { [Op.in]: [...matchingTaskIds] },
+          userId: { [Op.in]: query.assigneeIds }
+        },
+        attributes: ['taskId'],
+        raw: true
+      });
+      matchingTaskIds = this.intersectTaskIdSets(
+        matchingTaskIds,
+        new Set(assignments.map(assignment => Number(assignment.taskId)))
+      );
+    }
+
+    if (query.tagIds?.length && matchingTaskIds.size) {
+      const taskTags = await this.taskTagRepository.findAll({
+        where: {
+          taskId: { [Op.in]: [...matchingTaskIds] },
+          projectTagId: { [Op.in]: query.tagIds }
+        },
+        attributes: ['taskId'],
+        raw: true
+      });
+      matchingTaskIds = this.intersectTaskIdSets(
+        matchingTaskIds,
+        new Set(taskTags.map(taskTag => Number(taskTag.taskId)))
+      );
+    }
+
+    return [
+      ...new Set(
+        [...matchingTaskIds].map(taskId => {
+          const task = candidatesById.get(taskId);
+          return Number(task?.parentTaskId || taskId);
+        })
+      )
     ];
   }
 
