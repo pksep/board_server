@@ -485,6 +485,60 @@ export class TasksService {
   }
 
   /**
+   * Загружает корневые задачи запрошенной колонки и, при необходимости,
+   * всех их потомков независимо от колонки внутри доски.
+   */
+  private async findFilterCandidates(
+    columnId: number,
+    query: TaskListQueryDto
+  ): Promise<Task[]> {
+    const filterPrioritiesInDatabase = Boolean(
+      !query.includeSubtasks && query.priorities?.length
+    );
+    const attributes = [
+      'id',
+      'parentTaskId',
+      ...(query.includeSubtasks ? ['priority'] : [])
+    ];
+    const roots = await this.taskRepository.findAll({
+      where: {
+        columnId,
+        parentTaskId: null,
+        ...(filterPrioritiesInDatabase
+          ? { priority: { [Op.in]: query.priorities } }
+          : {})
+      },
+      attributes,
+      raw: true
+    });
+
+    if (!query.includeSubtasks || !roots.length) return roots;
+
+    const candidates = [...roots];
+    const visitedTaskIds = new Set(roots.map(task => Number(task.id)));
+    let parentTaskIds = [...visitedTaskIds];
+
+    while (parentTaskIds.length) {
+      const children = await this.taskRepository.findAll({
+        where: { parentTaskId: { [Op.in]: parentTaskIds } },
+        attributes,
+        raw: true
+      });
+      const newChildren = children.filter(
+        task => !visitedTaskIds.has(Number(task.id))
+      );
+
+      if (!newChildren.length) break;
+
+      candidates.push(...newChildren);
+      newChildren.forEach(task => visitedTaskIds.add(Number(task.id)));
+      parentTaskIds = newChildren.map(task => Number(task.id));
+    }
+
+    return candidates;
+  }
+
+  /**
    * Находит корневые карточки, внутри которых задача или разрешённая подзадача
    * одновременно совпала со всеми выбранными группами фильтров.
    */
@@ -492,24 +546,7 @@ export class TasksService {
     columnId: number,
     query: TaskListQueryDto
   ): Promise<number[]> {
-    const filterPrioritiesInMemory = Boolean(
-      query.includeSubtasks && query.priorities?.length
-    );
-    const candidates = await this.taskRepository.findAll({
-      where: {
-        columnId,
-        ...(query.includeSubtasks ? {} : { parentTaskId: null }),
-        ...(query.priorities?.length && !filterPrioritiesInMemory
-          ? { priority: { [Op.in]: query.priorities } }
-          : {})
-      },
-      attributes: [
-        'id',
-        'parentTaskId',
-        ...(filterPrioritiesInMemory ? ['priority'] : [])
-      ],
-      raw: true
-    });
+    const candidates = await this.findFilterCandidates(columnId, query);
     const candidatesById = new Map(
       candidates.map(task => [Number(task.id), task])
     );
@@ -517,7 +554,8 @@ export class TasksService {
       candidates
         .filter(
           task =>
-            !filterPrioritiesInMemory ||
+            !query.includeSubtasks ||
+            !query.priorities?.length ||
             query.priorities.includes(task.priority)
         )
         .map(task => Number(task.id))
