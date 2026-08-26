@@ -16,6 +16,8 @@ import { Board } from '../boards/model/board.model';
 import { ProjectAccessService } from '../projects/project-access.service';
 
 const BOARD_SOCKET_PATH = process.env.BOARD_SOCKET_PATH || '/api/socket.io';
+const BOARD_TOKEN_COOKIE = 'board_token';
+const ERP_TOKEN_COOKIE = 'access_token';
 
 @Injectable()
 @WebSocketGateway({
@@ -40,12 +42,30 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   // === Подключение / Отключение ===
 
+  /** Проверяет собственный токен доски и сохраняет ERP-токен как fallback. */
+  private verifySocketUser(cookies: Record<string, string>) {
+    const tokens = [
+      cookies[BOARD_TOKEN_COOKIE],
+      cookies[ERP_TOKEN_COOKIE]
+    ].filter(Boolean);
+
+    for (const token of tokens) {
+      try {
+        const user = this.jwtService.verify(token);
+        if (Number(user?.id) > 0) return user;
+      } catch {
+        // Истёкший токен не мешает проверить следующий совместимый вариант.
+      }
+    }
+
+    return null;
+  }
+
   handleConnection(client: Socket) {
     try {
       const cookies = cookie.parse(client.handshake.headers.cookie || '');
-      const token = cookies['access_token'];
-      if (token) {
-        const user = this.jwtService.verify(token);
+      const user = this.verifySocketUser(cookies);
+      if (user) {
         (client as any).user = user;
         this.logger.log(`Client connected: ${client.id} (user: ${user.id})`);
       } else if (process.env.NODE_ENV !== 'production') {
