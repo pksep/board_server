@@ -466,6 +466,24 @@ export class TasksService {
     return new Set([...current].filter(id => next.has(id)));
   }
 
+  /** Поднимается по цепочке родителей и возвращает ID корневой карточки. */
+  private findRootTaskId(taskId: number, tasksById: Map<number, Task>): number {
+    const visitedTaskIds = new Set<number>();
+    let currentTaskId = taskId;
+
+    while (!visitedTaskIds.has(currentTaskId)) {
+      visitedTaskIds.add(currentTaskId);
+      const parentTaskId = Number(
+        tasksById.get(currentTaskId)?.parentTaskId || 0
+      );
+
+      if (!parentTaskId) return currentTaskId;
+      currentTaskId = parentTaskId;
+    }
+
+    return taskId;
+  }
+
   /**
    * Находит корневые карточки, внутри которых задача или разрешённая подзадача
    * одновременно совпала со всеми выбранными группами фильтров.
@@ -474,21 +492,36 @@ export class TasksService {
     columnId: number,
     query: TaskListQueryDto
   ): Promise<number[]> {
+    const filterPrioritiesInMemory = Boolean(
+      query.includeSubtasks && query.priorities?.length
+    );
     const candidates = await this.taskRepository.findAll({
       where: {
         columnId,
         ...(query.includeSubtasks ? {} : { parentTaskId: null }),
-        ...(query.priorities?.length
+        ...(query.priorities?.length && !filterPrioritiesInMemory
           ? { priority: { [Op.in]: query.priorities } }
           : {})
       },
-      attributes: ['id', 'parentTaskId'],
+      attributes: [
+        'id',
+        'parentTaskId',
+        ...(filterPrioritiesInMemory ? ['priority'] : [])
+      ],
       raw: true
     });
     const candidatesById = new Map(
       candidates.map(task => [Number(task.id), task])
     );
-    let matchingTaskIds = new Set(candidatesById.keys());
+    let matchingTaskIds = new Set(
+      candidates
+        .filter(
+          task =>
+            !filterPrioritiesInMemory ||
+            query.priorities.includes(task.priority)
+        )
+        .map(task => Number(task.id))
+    );
 
     if (query.assigneeIds?.length && matchingTaskIds.size) {
       const assignments = await this.assigneeRepository.findAll({
@@ -522,10 +555,9 @@ export class TasksService {
 
     return [
       ...new Set(
-        [...matchingTaskIds].map(taskId => {
-          const task = candidatesById.get(taskId);
-          return Number(task?.parentTaskId || taskId);
-        })
+        [...matchingTaskIds].map(taskId =>
+          this.findRootTaskId(taskId, candidatesById)
+        )
       )
     ];
   }

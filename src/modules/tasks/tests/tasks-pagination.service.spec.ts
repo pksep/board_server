@@ -96,8 +96,8 @@ describe('TasksService paginated column loading', () => {
       findAll: jest
         .fn()
         .mockResolvedValueOnce([
-          { id: 11, parentTaskId: 10 },
-          { id: 12, parentTaskId: null }
+          { id: 11, parentTaskId: 10, priority: 'high' },
+          { id: 12, parentTaskId: null, priority: 'high' }
         ])
         .mockResolvedValueOnce([root])
     };
@@ -131,10 +131,9 @@ describe('TasksService paginated column loading', () => {
     });
     expect(taskRepository.findAll).toHaveBeenNthCalledWith(1, {
       where: {
-        columnId: 10,
-        priority: { [Op.in]: ['high'] }
+        columnId: 10
       },
-      attributes: ['id', 'parentTaskId'],
+      attributes: ['id', 'parentTaskId', 'priority'],
       raw: true
     });
     expect(assigneeRepository.findAll).toHaveBeenCalledWith({
@@ -149,6 +148,56 @@ describe('TasksService paginated column loading', () => {
       where: {
         taskId: { [Op.in]: [11, 12] },
         projectTagId: { [Op.in]: [3] }
+      },
+      attributes: ['taskId'],
+      raw: true
+    });
+    expect(taskRepository.count).toHaveBeenCalledWith({
+      where: {
+        columnId: 10,
+        parentTaskId: null,
+        id: { [Op.in]: [10] }
+      }
+    });
+  });
+
+  it('возвращает корневую карточку при совпадении вложенной подзадачи', async () => {
+    const root = { id: 10, columnId: 10, order: 0 };
+    const taskRepository = {
+      count: jest.fn().mockResolvedValue(1),
+      findAll: jest
+        .fn()
+        .mockResolvedValueOnce([
+          { id: 10, parentTaskId: null, priority: 'low' },
+          { id: 11, parentTaskId: 10, priority: 'medium' },
+          { id: 12, parentTaskId: 11, priority: 'high' }
+        ])
+        .mockResolvedValueOnce([root])
+    };
+    const assigneeRepository = {
+      findAll: jest.fn().mockResolvedValue([{ taskId: 12 }])
+    };
+    const service = createService(taskRepository, assigneeRepository);
+
+    await expect(
+      service.getByColumn(10, 7, {
+        limit: 5,
+        offset: 0,
+        assigneeIds: [7],
+        priorities: ['high'],
+        includeSubtasks: true
+      })
+    ).resolves.toEqual({
+      items: [root],
+      total: 1,
+      limit: 5,
+      offset: 0,
+      hasMore: false
+    });
+    expect(assigneeRepository.findAll).toHaveBeenCalledWith({
+      where: {
+        taskId: { [Op.in]: [12] },
+        userId: { [Op.in]: [7] }
       },
       attributes: ['taskId'],
       raw: true
