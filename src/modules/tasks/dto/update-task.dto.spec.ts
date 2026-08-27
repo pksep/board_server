@@ -10,8 +10,16 @@ describe('UpdateTaskDto parentTaskId validation', () => {
     expect(errors).toHaveLength(0);
   });
 
-  it('rejects assigning a parent through the update endpoint', async () => {
+  it('accepts assigning a parent through the update endpoint', async () => {
     const dto = Object.assign(new UpdateTaskDto(), { parentTaskId: 42 });
+
+    const errors = await validate(dto);
+
+    expect(errors).toHaveLength(0);
+  });
+
+  it('rejects a non-positive parent task ID', async () => {
+    const dto = Object.assign(new UpdateTaskDto(), { parentTaskId: 0 });
 
     const errors = await validate(dto);
 
@@ -20,7 +28,7 @@ describe('UpdateTaskDto parentTaskId validation', () => {
         expect.objectContaining({
           property: 'parentTaskId',
           constraints: expect.objectContaining({
-            equals: expect.any(String)
+            min: expect.any(String)
           })
         })
       ])

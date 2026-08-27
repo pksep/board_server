@@ -57,9 +57,13 @@ export class TasksService {
   ) {}
 
   /** Получить boardId по columnId */
-  private async getBoardIdByColumnId(columnId: number): Promise<number> {
+  private async getBoardIdByColumnId(
+    columnId: number,
+    transaction?: Transaction
+  ): Promise<number> {
     const col = await this.columnRepository.findByPk(columnId, {
-      attributes: ['boardId']
+      attributes: ['boardId'],
+      ...(transaction ? { transaction } : {})
     });
     return col?.boardId;
   }
@@ -941,29 +945,11 @@ export class TasksService {
             : await this.getTagIds(id, transaction)
       };
 
-      if (dto.parentTaskId === null && task.parentTaskId) {
-        // Откреплённая подзадача становится верхнеуровневой рядом с родителем.
-        const parentTask = await this.taskRepository.findByPk(
-          task.parentTaskId,
-          {
-            transaction,
-            lock: transaction.LOCK.UPDATE
-          }
-        );
-        if (!parentTask) {
-          throw new HttpException(
-            'Родительская задача не найдена',
-            HttpStatus.NOT_FOUND
-          );
-        }
-
-        // Общий helper нормализует order остальных верхнеуровневых задач.
-        await this.placeTaskInColumn(
-          task,
-          parentTask.columnId,
-          parentTask.order + 1,
-          transaction
-        );
+      if (
+        dto.parentTaskId !== undefined &&
+        dto.parentTaskId !== task.parentTaskId
+      ) {
+        await this.prepareParentTaskChange(task, dto.parentTaskId, transaction);
       }
 
       if (dto.title !== undefined) task.title = dto.title;
@@ -1098,6 +1084,101 @@ export class TasksService {
         HttpStatus.INTERNAL_SERVER_ERROR
       );
     }
+  }
+
+  /**
+   * Проверяет смену родителя и подготавливает порядок корневых карточек.
+   * Переносить разрешено только листовую задачу внутри текущей доски.
+   */
+  private async prepareParentTaskChange(
+    task: Task,
+    parentTaskId: number | null,
+    transaction: Transaction
+  ): Promise<void> {
+    const childTask = await this.taskRepository.findOne({
+      where: { parentTaskId: task.id },
+      attributes: ['id'],
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+    if (childTask) {
+      throw new HttpException(
+        'Нельзя изменить родителя задачи, у которой есть подзадачи',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    if (parentTaskId === null) {
+      if (!task.parentTaskId) return;
+
+      // Откреплённая подзадача становится верхнеуровневой рядом с родителем.
+      const currentParent = await this.taskRepository.findByPk(
+        task.parentTaskId,
+        {
+          transaction,
+          lock: transaction.LOCK.UPDATE
+        }
+      );
+      if (!currentParent) {
+        throw new HttpException(
+          'Родительская задача не найдена',
+          HttpStatus.NOT_FOUND
+        );
+      }
+
+      await this.placeTaskInColumn(
+        task,
+        currentParent.columnId,
+        currentParent.order + 1,
+        transaction
+      );
+      return;
+    }
+
+    if (parentTaskId === task.id) {
+      throw new HttpException(
+        'Задача не может быть родительской для самой себя',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    const nextParent = await this.taskRepository.findByPk(parentTaskId, {
+      transaction,
+      lock: transaction.LOCK.UPDATE
+    });
+    if (!nextParent) {
+      throw new HttpException(
+        'Родительская задача не найдена',
+        HttpStatus.NOT_FOUND
+      );
+    }
+    if (nextParent.parentTaskId) {
+      throw new HttpException(
+        'Родительской может быть только верхнеуровневая задача',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    const [taskBoardId, parentBoardId] = await Promise.all([
+      this.getBoardIdByColumnId(task.columnId, transaction),
+      this.getBoardIdByColumnId(nextParent.columnId, transaction)
+    ]);
+    if (!taskBoardId || !parentBoardId || taskBoardId !== parentBoardId) {
+      throw new HttpException(
+        'Родительская задача должна находиться на той же доске',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    if (!task.parentTaskId) {
+      // Карточка исчезает из корневого списка, поэтому закрываем разрыв в order.
+      await this.normalizeColumnWithoutTask(
+        task.columnId,
+        task.id,
+        transaction
+      );
+    }
+    task.order = 0;
   }
 
   private async getTaskHierarchy(

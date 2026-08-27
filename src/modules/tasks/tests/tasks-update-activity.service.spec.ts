@@ -38,6 +38,7 @@ describe('TasksService.update activity', () => {
       findByPk: jest.fn(async (id: number) =>
         id === parentTask.id ? parentTask : task
       ),
+      findOne: jest.fn().mockResolvedValue(null),
       findAll: jest
         .fn()
         .mockResolvedValue([
