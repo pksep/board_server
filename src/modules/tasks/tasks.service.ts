@@ -1273,8 +1273,9 @@ export class TasksService {
 
   /**
    * Перемещает задачу в колонку.
-   * Родительская задача переносит всю иерархию, а подзадача может независимо
-   * менять колонку только внутри доски своего родителя.
+   * Внутри текущей доски задача и её подзадачи меняют колонки независимо.
+   * При переносе родительской задачи на другую доску вместе с ней переносится
+   * вся иерархия, а отдельно подзадачу на другую доску переносить нельзя.
    */
   async move(id: number, dto: MoveTaskDto, userId: number): Promise<Task> {
     const transaction = await this.sequelize.transaction();
@@ -1297,9 +1298,10 @@ export class TasksService {
         );
       }
 
-      const hierarchy = isSubtask
-        ? [task]
-        : await this.getTaskHierarchy(task, transaction);
+      const hierarchy =
+        !isSubtask && isCrossBoard
+          ? await this.getTaskHierarchy(task, transaction)
+          : [task];
       const taskIds = hierarchy.map(item => item.id);
       const beforeMove = new Map(
         hierarchy.map(item => [
