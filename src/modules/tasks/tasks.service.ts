@@ -1455,6 +1455,7 @@ export class TasksService {
       } else {
         this.wsGateway.emitTaskMoved(target.board.id, {
           taskId: id,
+          taskIds,
           fromColumnId,
           toColumnId: dto.columnId,
           order

@@ -307,6 +307,7 @@ describe('TasksService.move', () => {
     expect(activityEvents.create).toHaveBeenCalledTimes(1);
     expect(wsGateway.emitTaskMoved).toHaveBeenCalledWith(20, {
       taskId: root.id,
+      taskIds: [root.id],
       fromColumnId: 10,
       toColumnId: 30,
       order: 0
@@ -336,6 +337,7 @@ describe('TasksService.move', () => {
     expect(fixture.transaction.rollback).not.toHaveBeenCalled();
     expect(fixture.wsGateway.emitTaskMoved).toHaveBeenCalledWith(20, {
       taskId: 2,
+      taskIds: [fixture.subtask.id],
       fromColumnId: 10,
       toColumnId: 30,
       order: 0
