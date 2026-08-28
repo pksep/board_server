@@ -218,6 +218,105 @@ describe('TasksService.move', () => {
     expect(result).toBe(responseTask);
   });
 
+  it('не меняет статусы подзадач при смене статуса родительской задачи', async () => {
+    const transaction = {
+      LOCK: { UPDATE: 'UPDATE' },
+      commit: jest.fn(),
+      rollback: jest.fn()
+    };
+    const root = {
+      id: 1,
+      taskNumber: 5,
+      columnId: 10,
+      parentTaskId: null,
+      order: 0,
+      save: jest.fn().mockResolvedValue(undefined),
+      update: jest.fn()
+    };
+    const child = {
+      id: 2,
+      taskNumber: 6,
+      columnId: 10,
+      parentTaskId: 1,
+      order: 0,
+      save: jest.fn().mockResolvedValue(undefined)
+    };
+    const responseTask = { ...root, subtasks: [child] };
+    const taskRepository = {
+      findByPk: jest.fn(async (_id: number, options: any) =>
+        options?.include ? responseTask : root
+      ),
+      findAll: jest.fn(async () => [])
+    };
+    const columnRepository = {
+      findByPk: jest.fn(async (id: number) => ({ id, boardId: 20 }))
+    };
+    const boardRepository = {
+      findByPk: jest.fn(async (id: number) => ({ id, projectId: 1 }))
+    };
+    const wsGateway = {
+      emitTaskRelocated: jest.fn(),
+      emitTaskMoved: jest.fn()
+    };
+    const activityEvents = {
+      buildChanges: jest.fn(fields =>
+        Object.entries(fields)
+          .filter(
+            ([, value]: any) =>
+              JSON.stringify(value.before) !== JSON.stringify(value.after)
+          )
+          .map(([field, value]: any) => ({
+            field,
+            before: value.before,
+            after: value.after
+          }))
+      ),
+      create: jest.fn()
+    };
+    const service = new TasksService(
+      taskRepository as any,
+      { findAll: jest.fn() } as any,
+      { destroy: jest.fn() } as any,
+      {} as any,
+      {} as any,
+      columnRepository as any,
+      boardRepository as any,
+      {
+        transaction: jest.fn().mockResolvedValue(transaction),
+        query: jest.fn()
+      } as any,
+      wsGateway as any,
+      {} as any,
+      {
+        assertCanRead: jest.fn(),
+        assertAssigneesBelongToProject: jest.fn()
+      } as any,
+      activityEvents as any
+    );
+
+    await service.move(root.id, { columnId: 30, order: 0 }, 7);
+
+    expect(root.columnId).toBe(30);
+    expect(child.columnId).toBe(10);
+    expect(child.save).not.toHaveBeenCalled();
+    expect(taskRepository.findAll).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ parentTaskId: [root.id] })
+      })
+    );
+    expect(activityEvents.create).toHaveBeenCalledTimes(1);
+    expect(wsGateway.emitTaskMoved).toHaveBeenCalledWith(20, {
+      taskId: root.id,
+      taskIds: [root.id],
+      fromColumnId: 10,
+      toColumnId: 30,
+      order: 0
+    });
+    expect(wsGateway.emitTaskRelocated).not.toHaveBeenCalled();
+    expect(transaction.commit).toHaveBeenCalledTimes(1);
+    expect(transaction.rollback).not.toHaveBeenCalled();
+  });
+
   it('перемещает только подзадачу между колонками текущей доски', async () => {
     const fixture = createSubtaskMoveFixture();
 
@@ -238,6 +337,7 @@ describe('TasksService.move', () => {
     expect(fixture.transaction.rollback).not.toHaveBeenCalled();
     expect(fixture.wsGateway.emitTaskMoved).toHaveBeenCalledWith(20, {
       taskId: 2,
+      taskIds: [fixture.subtask.id],
       fromColumnId: 10,
       toColumnId: 30,
       order: 0

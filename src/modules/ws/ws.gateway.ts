@@ -203,6 +203,7 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     boardId: number,
     data: {
       taskId: number;
+      taskIds: number[];
       fromColumnId: number;
       toColumnId: number;
       order: number;
