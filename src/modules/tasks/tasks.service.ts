@@ -28,7 +28,7 @@ import { ActivityHistoryQueryDto } from '../activity-events/dto/activity-history
 import type { Request } from 'express';
 import { TaskListQueryDto } from './dto/task-list-query.dto';
 
-interface TaskListPage {
+export interface TaskListPage {
   items: Task[];
   total: number;
   limit: number;

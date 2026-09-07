@@ -2,6 +2,9 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/sequelize';
 import { RabbitSubscribe } from '@golevelup/nestjs-rabbitmq';
 import { User } from './model/users.model';
+import { Sequelize } from 'sequelize-typescript';
+import { UsersService } from './users.service';
+import { Public } from '../auth/public.decorator';
 
 const { ERP, wildcard } = require('@pksep/contracts');
 
@@ -48,7 +51,9 @@ export class UserSyncConsumer {
   private readonly logger = new Logger(UserSyncConsumer.name);
 
   constructor(
-    @InjectModel(User) private readonly userRepository: typeof User
+    @InjectModel(User) private readonly userRepository: typeof User,
+    private readonly sequelize: Sequelize,
+    private readonly usersService: UsersService
   ) {}
 
   private buildUserData(
@@ -82,10 +87,12 @@ export class UserSyncConsumer {
    * Подписка на все user.* события из exchange ERP.
    * Routing key определяет тип события.
    */
+  // Событие приходит по авторизованному соединению RabbitMQ, без HTTP-cookie.
+  @Public()
   @RabbitSubscribe({
     exchange: ERP,
     routingKey: wildcard('user'), // 'user.*'
-    queue: 'board-service.user-events'
+    queue: process.env.BOARD_USER_EVENTS_QUEUE || 'board-service.user-events'
   })
   async handleUserEvent(
     event:
@@ -95,7 +102,9 @@ export class UserSyncConsumer {
       | EntityBanEvent,
     amqpMsg: { fields: { routingKey: string } }
   ): Promise<void> {
-    const routingKey = amqpMsg?.fields?.routingKey || '';
+    // ERP публикует NestJS-конверт { pattern, data }; старые события приходят напрямую.
+    const routingKey = amqpMsg?.fields?.routingKey || event?.pattern || '';
+    event = event?.data ?? event;
     const eventType = routingKey.split('.').pop(); // create | change | delete | ban
 
     this.logger.log(`Received user event: ${routingKey}`);
@@ -124,6 +133,7 @@ export class UserSyncConsumer {
         `Failed to process user event ${routingKey}: ${message}`,
         stack
       );
+      throw error;
     }
   }
 
@@ -164,7 +174,9 @@ export class UserSyncConsumer {
    * user.change — обновить изменённые поля
    */
   private async handleChange(event: EntityChangeEvent): Promise<void> {
-    const { id, changeFields } = event.entity;
+    const { id } = event.entity;
+    const changeFields =
+      event.entity.changedFields ?? event.entity.changeFields ?? [];
     const erpId = String(id);
 
     const user = await this.userRepository.findOne({ where: { erpId } });
@@ -201,7 +213,9 @@ export class UserSyncConsumer {
     }
 
     if (changed) {
-      await user.save();
+      await this.sequelize.transaction(async transaction => {
+        await this.usersService.saveUserAvailability(user, transaction);
+      });
       this.logger.log(
         `Updated user erpId=${erpId}: ${changeFields.map(f => f.fieldName).join(', ')}`
       );
@@ -221,7 +235,9 @@ export class UserSyncConsumer {
     }
 
     user.ban = true;
-    await user.save();
+    await this.sequelize.transaction(async transaction => {
+      await this.usersService.saveUserAvailability(user, transaction);
+    });
     this.logger.log(`Soft-deleted (banned) user erpId=${erpId}`);
   }
 
@@ -237,8 +253,14 @@ export class UserSyncConsumer {
       return;
     }
 
-    user.ban = event.entity.banned;
-    await user.save();
+    const banned =
+      getBoolean(event.entity.banned) ?? getBoolean(event.entity.ban);
+    if (banned === null)
+      throw new Error('User ban event must contain a boolean state');
+    user.ban = banned;
+    await this.sequelize.transaction(async transaction => {
+      await this.usersService.saveUserAvailability(user, transaction);
+    });
     this.logger.log(`User erpId=${erpId} ban=${event.entity.banned}`);
   }
 }

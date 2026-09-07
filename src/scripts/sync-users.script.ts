@@ -140,8 +140,19 @@ async function main() {
         changed = true;
       }
 
-      if (changed) {
-        if (!dryRun) await user.save();
+      if (changed || user.ban) {
+        if (!dryRun) {
+          await userRepo.sequelize.transaction(async transaction => {
+            await user.save({ transaction });
+            // Повторная сверка исправляет назначения и для уже архивных сотрудников.
+            if (user.ban) {
+              await userRepo.sequelize.query(
+                'DELETE FROM "task_assignees" WHERE "user_id" = :userId',
+                { replacements: { userId: user.id }, transaction }
+              );
+            }
+          });
+        }
         updated++;
         logger.log(
           `  UPDATED: [${erpId}] ${erp.initial || erp.login} (${serviceNumber})`
