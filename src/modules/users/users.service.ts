@@ -18,12 +18,16 @@ import { LoggerService } from '../logger/logger.service';
 
 import { CheckTabelUniqueDto } from './dto/tabel-unique.dto';
 import { IPaginationReturnData } from 'src/core/interface/pagination';
+import { TaskAssignee } from '../tasks/model/task-assignee.model';
+import { WsGateway } from '../ws/ws.gateway';
 
 @Injectable()
 export class UsersService {
   constructor(
     private logger: LoggerService,
     @InjectModel(User) private userRepository: typeof User,
+    @InjectModel(TaskAssignee) private assigneeRepository: typeof TaskAssignee,
+    private wsGateway: WsGateway,
 
     private sequelize: Sequelize,
     @Inject('CACHE_MANAGER') private cacheManager: Cache
@@ -384,7 +388,7 @@ export class UsersService {
 
       user.ban = !user.ban;
 
-      await user.save({ transaction });
+      await this.saveUserAvailability(user, transaction);
 
       await transaction.commit();
 
@@ -419,5 +423,24 @@ export class UsersService {
         HttpStatus.NOT_FOUND
       );
     }
+  }
+
+  /** Сохраняет блокировку и снимает назначения в одной транзакции. */
+  async saveUserAvailability(
+    user: User,
+    transaction: Transaction
+  ): Promise<void> {
+    await user.save({ transaction });
+    if (user.ban) {
+      // Архивирование не удаляет автора и историю задач, только назначения.
+      await this.assigneeRepository.destroy({
+        where: { userId: user.id },
+        transaction
+      });
+    }
+    transaction.afterCommit(() => {
+      // Клиенты меняют выбор исполнителей только после подтверждения базы.
+      this.wsGateway.emitUserAvailabilityChanged(user.id, user.ban);
+    });
   }
 }

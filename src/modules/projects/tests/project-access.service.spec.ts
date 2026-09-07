@@ -84,7 +84,21 @@ describe('ProjectAccessService', () => {
       service.assertAssigneesBelongToProject(10, [2, 99], transaction)
     ).rejects.toMatchObject({
       status: HttpStatus.BAD_REQUEST,
-      message: 'Исполнителями могут быть только участники проекта'
+      message: 'Исполнителями могут быть только активные участники проекта'
     });
+  });
+
+  it('excludes archived members from assignment validation', async () => {
+    memberRepository.findAll.mockResolvedValue([]);
+    await expect(
+      service.assertAssigneesBelongToProject(10, [2], transaction)
+    ).rejects.toMatchObject({ status: HttpStatus.BAD_REQUEST });
+    expect(memberRepository.findAll).toHaveBeenCalledWith(
+      expect.objectContaining({
+        include: [
+          expect.objectContaining({ where: { ban: false }, required: true })
+        ]
+      })
+    );
   });
 });

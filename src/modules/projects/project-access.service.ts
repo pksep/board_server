@@ -3,6 +3,7 @@ import { InjectModel } from '@nestjs/sequelize';
 import { Op, Transaction } from 'sequelize';
 import { Project } from './model/project.model';
 import { ProjectMember } from './model/project-member.model';
+import { User } from '../users/model/users.model';
 
 @Injectable()
 export class ProjectAccessService {
@@ -80,6 +81,11 @@ export class ProjectAccessService {
 
     const members = await this.memberRepository.findAll({
       attributes: ['userId'],
+      include: [
+        { model: User, attributes: [], where: { ban: false }, required: true }
+      ],
+      // Блокировка не позволяет архивированию пересечься с новым назначением.
+      lock: transaction ? Transaction.LOCK.SHARE : undefined,
       where: {
         projectId,
         userId: { [Op.in]: normalizedUserIds }
@@ -93,7 +99,7 @@ export class ProjectAccessService {
 
     if (hasExternalAssignee) {
       throw new HttpException(
-        'Исполнителями могут быть только участники проекта',
+        'Исполнителями могут быть только активные участники проекта',
         HttpStatus.BAD_REQUEST
       );
     }

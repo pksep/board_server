@@ -12,7 +12,7 @@ import { BoardListQueryDto } from './dto/board-list-query.dto';
 
 type BoardWithTasksCount = Board & { tasksCount: number };
 
-interface BoardListPage {
+export interface BoardListPage {
   items: BoardWithTasksCount[];
   total: number;
   limit: number;

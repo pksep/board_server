@@ -186,6 +186,11 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   // === Методы эмита (вызываются из сервисов) ===
 
+  /** Обновляет доступность исполнителя во всех открытых досках. */
+  emitUserAvailabilityChanged(id: number, ban: boolean): void {
+    this.server.emit('user:availability', { id, ban });
+  }
+
   /** Задачи */
   emitTaskCreated(boardId: number, task: any) {
     this.server.to(`board:${boardId}`).emit('task:created', task);
