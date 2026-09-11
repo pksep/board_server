@@ -24,6 +24,7 @@ const createContext = (options: TestContextOptions = {}) => {
     columnId: 10,
     parentTaskId: null as number | null,
     order: 2,
+    changed: jest.fn(),
     save: jest.fn().mockResolvedValue(undefined)
   };
   const parentTask = {

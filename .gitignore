@@ -66,3 +66,4 @@ source/
 # compose data
 .compose-data
 .qodo
+.test-artifacts/

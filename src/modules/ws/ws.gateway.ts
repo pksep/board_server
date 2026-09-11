@@ -120,7 +120,7 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     const room = `board:${data.boardId}`;
-    client.join(room);
+    await client.join(room);
     this.logger.log(`${client.id} joined ${room}`);
     return { event: 'board:joined', data: { boardId: data.boardId } };
   }
@@ -163,7 +163,7 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     const room = `project:${data.projectId}`;
-    client.join(room);
+    await client.join(room);
     this.logger.log(`${client.id} joined ${room}`);
     return { event: 'project:joined', data: { projectId: data.projectId } };
   }

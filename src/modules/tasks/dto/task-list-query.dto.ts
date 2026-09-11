@@ -115,4 +115,13 @@ export class TaskListQueryDto {
   @Transform(({ value }) => parseQueryBoolean(value))
   @IsBoolean()
   includeSubtasks?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'При включённых подзадачах выдавать карточки по их собственной колонке, независимо от родителя'
+  })
+  @IsOptional()
+  @Transform(({ value }) => parseQueryBoolean(value))
+  @IsBoolean()
+  flatSubtasks?: boolean;
 }

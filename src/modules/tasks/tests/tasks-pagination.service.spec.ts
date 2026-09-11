@@ -273,6 +273,104 @@ describe('TasksService paginated column loading', () => {
     });
   });
 
+  it('пагинирует подзадачи в их колонке независимо от наличия загруженного родителя', async () => {
+    const child = { id: 11, parentTaskId: 99, columnId: 10, order: 0 };
+    const taskRepository = {
+      count: jest.fn().mockResolvedValueOnce(7).mockResolvedValueOnce(0),
+      findAll: jest.fn().mockResolvedValue([child])
+    };
+    const service = createService(taskRepository);
+    await expect(
+      service.getByColumn(10, 7, {
+        limit: 1,
+        offset: 3,
+        includeSubtasks: true,
+        flatSubtasks: true
+      })
+    ).resolves.toEqual({
+      items: [child],
+      total: 7,
+      rootTotal: 0,
+      limit: 1,
+      offset: 3,
+      hasMore: true
+    });
+    expect(taskRepository.count).toHaveBeenCalledWith({
+      where: { columnId: 10 }
+    });
+    expect(taskRepository.findAll).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { columnId: 10 },
+        limit: 1,
+        offset: 3
+      })
+    );
+  });
+
+  it('в плоском режиме пересекает поиск и фильтры на самой подзадаче', async () => {
+    const child = { id: 11, parentTaskId: 99, columnId: 10, priority: 'high' };
+    const taskRepository = {
+      count: jest.fn().mockResolvedValueOnce(1).mockResolvedValueOnce(0),
+      findAll: jest
+        .fn()
+        .mockResolvedValueOnce([child])
+        .mockResolvedValueOnce([
+          child,
+          { id: 12, parentTaskId: null, priority: 'high' }
+        ])
+        .mockResolvedValueOnce([child])
+    };
+    const service = createService(
+      taskRepository,
+      {
+        findAll: jest.fn().mockResolvedValue([{ taskId: 11 }, { taskId: 12 }])
+      },
+      { findAll: jest.fn().mockResolvedValue([{ taskId: 11 }]) }
+    );
+    await expect(
+      service.getByColumn(10, 7, {
+        limit: 5,
+        includeSubtasks: true,
+        flatSubtasks: true,
+        search: 'макет',
+        priorities: ['high'],
+        assigneeIds: [7],
+        tagIds: [3]
+      })
+    ).resolves.toEqual({
+      items: [child],
+      total: 1,
+      rootTotal: 0,
+      limit: 5,
+      offset: 0,
+      hasMore: false
+    });
+    expect(taskRepository.count).toHaveBeenCalledWith({
+      where: { columnId: 10, id: { [Op.in]: [11] } }
+    });
+    expect(taskRepository.findAll).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: { columnId: 10, priority: { [Op.in]: ['high'] } }
+      })
+    );
+  });
+
+  it('не включает плоский режим без явно включённого показа подзадач', async () => {
+    const taskRepository = {
+      count: jest.fn().mockResolvedValue(0),
+      findAll: jest.fn().mockResolvedValue([])
+    };
+    await createService(taskRepository).getByColumn(10, 7, {
+      limit: 5,
+      flatSubtasks: true,
+      includeSubtasks: false
+    });
+    expect(taskRepository.count).toHaveBeenCalledWith({
+      where: { columnId: 10, parentTaskId: null }
+    });
+  });
+
   it('не учитывает подзадачи, когда их показ выключен', async () => {
     const taskRepository = {
       count: jest.fn().mockResolvedValue(0),

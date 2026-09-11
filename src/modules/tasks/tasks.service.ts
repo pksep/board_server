@@ -31,6 +31,7 @@ import { TaskListQueryDto } from './dto/task-list-query.dto';
 export interface TaskListPage {
   items: Task[];
   total: number;
+  rootTotal?: number;
   limit: number;
   offset: number;
   hasMore: boolean;
@@ -121,9 +122,13 @@ export class TasksService {
   private async assertTaskAccess(
     taskId: number,
     userId: number,
-    transaction?: Transaction
+    transaction?: Transaction,
+    lockForUpdate = false
   ): Promise<Task> {
-    const task = await this.taskRepository.findByPk(taskId, { transaction });
+    const task = await this.taskRepository.findByPk(taskId, {
+      transaction,
+      ...(transaction && lockForUpdate ? { lock: transaction.LOCK.UPDATE } : {})
+    });
     if (!task) {
       throw new HttpException('Задача не найдена', HttpStatus.NOT_FOUND);
     }
@@ -291,7 +296,8 @@ export class TasksService {
           'dueDate',
           'parentTaskId',
           'columnId',
-          'order'
+          'order',
+          'updatedAt'
         ],
         include: [
           {
@@ -352,9 +358,12 @@ export class TasksService {
   ): Promise<Task[] | TaskListPage> {
     try {
       await this.assertColumnAccess(columnId, userId);
+      // Старые клиенты сохраняют группировку по корням; новый канбан запрашивает сами карточки.
+      const flatSubtasks = Boolean(query.includeSubtasks && query.flatSubtasks);
+      query = { ...query, flatSubtasks };
       const search = query.search?.trim();
       const searchRootTaskIds = search
-        ? await this.findMatchingRootTaskIds(columnId, search)
+        ? await this.findMatchingRootTaskIds(columnId, search, flatSubtasks)
         : null;
       const filteredRootTaskIds = this.hasStructuredTaskFilters(query)
         ? await this.findFilteredRootTaskIds(columnId, query)
@@ -365,7 +374,7 @@ export class TasksService {
       );
       const where = {
         columnId,
-        parentTaskId: null,
+        ...(flatSubtasks ? {} : { parentTaskId: null }),
         ...(rootTaskIds !== null ? { id: { [Op.in]: rootTaskIds } } : {})
       };
       const isPaginated = query.limit !== undefined;
@@ -383,7 +392,7 @@ export class TasksService {
         });
       }
 
-      const [total, items] = await Promise.all([
+      const [total, items, rootTotal] = await Promise.all([
         this.taskRepository.count({ where }),
         this.taskRepository.findAll({
           where,
@@ -394,12 +403,18 @@ export class TasksService {
           ],
           limit,
           offset
-        })
+        }),
+        flatSubtasks
+          ? this.taskRepository.count({
+              where: { ...where, parentTaskId: null }
+            })
+          : Promise.resolve(undefined)
       ]);
 
       return {
         items,
         total,
+        ...(flatSubtasks ? { rootTotal } : {}),
         limit,
         offset,
         hasMore: offset + items.length < total
@@ -420,7 +435,8 @@ export class TasksService {
    */
   private async findMatchingRootTaskIds(
     columnId: number,
-    search: string
+    search: string,
+    flatSubtasks = false
   ): Promise<number[]> {
     const trailingNumber = search.match(/(\d+)$/)?.[1];
     const matches = await this.taskRepository.findAll({
@@ -437,7 +453,11 @@ export class TasksService {
     });
 
     return [
-      ...new Set(matches.map(task => Number(task.parentTaskId || task.id)))
+      ...new Set(
+        matches.map(task =>
+          Number(flatSubtasks ? task.id : task.parentTaskId || task.id)
+        )
+      )
     ];
   }
 
@@ -497,7 +517,7 @@ export class TasksService {
     query: TaskListQueryDto
   ): Promise<Task[]> {
     const filterPrioritiesInDatabase = Boolean(
-      !query.includeSubtasks && query.priorities?.length
+      (!query.includeSubtasks || query.flatSubtasks) && query.priorities?.length
     );
     const attributes = [
       'id',
@@ -507,7 +527,7 @@ export class TasksService {
     const roots = await this.taskRepository.findAll({
       where: {
         columnId,
-        parentTaskId: null,
+        ...(query.flatSubtasks ? {} : { parentTaskId: null }),
         ...(filterPrioritiesInDatabase
           ? { priority: { [Op.in]: query.priorities } }
           : {})
@@ -516,7 +536,8 @@ export class TasksService {
       raw: true
     });
 
-    if (!query.includeSubtasks || !roots.length) return roots;
+    if (query.flatSubtasks || !query.includeSubtasks || !roots.length)
+      return roots;
 
     const candidates = [...roots];
     const visitedTaskIds = new Set(roots.map(task => Number(task.id)));
@@ -594,6 +615,9 @@ export class TasksService {
         new Set(taskTags.map(taskTag => Number(taskTag.taskId)))
       );
     }
+
+    // Подзадача остаётся в своей колонке, даже если родитель не загружен или отфильтрован.
+    if (query.flatSubtasks) return [...matchingTaskIds];
 
     return [
       ...new Set(
@@ -914,7 +938,7 @@ export class TasksService {
   async update(id: number, dto: UpdateTaskDto, userId: number): Promise<Task> {
     const transaction = await this.sequelize.transaction();
     try {
-      const task = await this.assertTaskAccess(id, userId, transaction);
+      const task = await this.assertTaskAccess(id, userId, transaction, true);
       const projectId = await this.getProjectIdByColumnId(
         task.columnId,
         transaction
@@ -960,6 +984,8 @@ export class TasksService {
         task.approvalStatus = dto.approvalStatus;
       if (dto.parentTaskId !== undefined) task.parentTaskId = dto.parentTaskId;
 
+      // Версия снимка меняется также при правках только исполнителей или тегов.
+      task.changed('updatedAt', true);
       await task.save({ transaction });
 
       // Обновляем исполнителей
