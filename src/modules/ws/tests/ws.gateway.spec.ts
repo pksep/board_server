@@ -71,4 +71,55 @@ describe('WsGateway connection authentication', () => {
     expect(client.user).toBeUndefined();
     expect(client.disconnect).toHaveBeenCalledWith(true);
   });
+
+  it('не подписывает пользователя без доступа на общую комнату доски', async () => {
+    const access = {
+      assertCanRead: jest.fn().mockRejectedValue(new Error('denied'))
+    };
+    const gateway = new WsGateway(
+      {} as any,
+      { findByPk: jest.fn().mockResolvedValue({ projectId: 3 }) } as any,
+      access as any
+    );
+    const client = { user: { id: 7 }, join: jest.fn() } as any;
+    await expect(
+      gateway.handleJoinBoard(client, { boardId: 2 })
+    ).resolves.toEqual({
+      event: 'error',
+      data: { message: 'Доска не найдена' }
+    });
+    expect(client.join).not.toHaveBeenCalled();
+  });
+
+  it('подтверждает подписку только после фактического присоединения к комнате', async () => {
+    let joined!: () => void;
+    const gate = new Promise<void>(resolve => {
+      joined = resolve;
+    });
+    const gateway = new WsGateway(
+      {} as any,
+      { findByPk: jest.fn().mockResolvedValue({ projectId: 3 }) } as any,
+      { assertCanRead: jest.fn().mockResolvedValue(undefined) } as any
+    );
+    const client = {
+      id: 'socket-1',
+      user: { id: 7 },
+      join: jest.fn().mockReturnValue(gate)
+    } as any;
+    let acknowledged = false;
+    const result = gateway
+      .handleJoinBoard(client, { boardId: 2 })
+      .then(value => {
+        acknowledged = true;
+        return value;
+      });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(client.join).toHaveBeenCalledWith('board:2');
+    expect(acknowledged).toBe(false);
+    joined();
+    await expect(result).resolves.toEqual({
+      event: 'board:joined',
+      data: { boardId: 2 }
+    });
+  });
 });

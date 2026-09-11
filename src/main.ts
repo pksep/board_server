@@ -13,6 +13,7 @@ import { getConnectionToken } from '@nestjs/sequelize';
 import { LoggerService } from './modules/logger/logger.service';
 import { AllExceptionsFilter } from './modules/logger/filters/all-exceptions.filter';
 import { json, urlencoded } from 'express';
+import { RedisIoAdapter } from './modules/ws/redis-io.adapter';
 
 (async () => {
   const app = await NestFactory.create(AppModule, {
@@ -21,6 +22,14 @@ import { json, urlencoded } from 'express';
   });
 
   const configF = configFactory();
+  const websocketAdapter = new RedisIoAdapter(app);
+  // Redis Pub/Sub общ для всех его DB, поэтому имя канала также изолирует локальные базы.
+  const socketChannel =
+    process.env.BOARD_SOCKET_REDIS_KEY ||
+    `board-socket:${new URL(configF.database.url).host}${new URL(configF.database.url).pathname}:${new URL(configF.redisUrl).pathname}`;
+  await websocketAdapter.connectToRedis(configF.redisUrl, socketChannel);
+  app.useWebSocketAdapter(websocketAdapter);
+  app.enableShutdownHooks();
 
   // Допустимые домены
   const allowedOrigins =

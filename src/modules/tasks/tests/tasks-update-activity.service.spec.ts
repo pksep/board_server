@@ -19,6 +19,7 @@ describe('TasksService.update activity', () => {
       columnId: 10,
       parentTaskId: 8,
       order: 0,
+      changed: jest.fn(),
       save: jest.fn().mockResolvedValue(undefined)
     };
     const parentTask = {
