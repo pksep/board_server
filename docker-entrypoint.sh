@@ -1,15 +1,14 @@
 #!/bin/sh
 set -e
 
-if [ "$RUN_DB_SETUP" = "true" ]; then
-    echo "⚠️  RUN_DB_SETUP is true. Running database setup..."
-    bun bin/deploy/delete-create-db.mjs
-else
-    echo "Skipping database setup (RUN_DB_SETUP is not true)."
-fi
- 
-echo "Running migrations..."
-bun run migrate:up
+VAULT_ENV_FILE="${VAULT_ENV_FILE:-/vault/secrets/runtime.env}"
 
-echo "Starting PM2..."
+if [ -f "$VAULT_ENV_FILE" ]; then
+    echo "Loading runtime environment from Vault..."
+    set -a
+    . "$VAULT_ENV_FILE"
+    set +a
+fi
+
+echo "Starting application..."
 exec "$@"

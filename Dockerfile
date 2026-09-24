@@ -44,7 +44,12 @@ COPY package.json /app/board_server/package.json
 COPY env/${ENV_FILE} /app/board_server/env/.production.env
 COPY migrations /app/board_server/migrations
 COPY seeders /app/board_server/seeders
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
+    && chmod +x /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 5000
 
+ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["node", "dist/main.js"]
