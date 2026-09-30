@@ -1,4 +1,5 @@
 import {
+  ConflictException,
   Injectable,
   ServiceUnavailableException,
   UnauthorizedException
@@ -73,7 +74,9 @@ export class AccessTokenService {
       ConfigConstains.authServiceUrl
     );
     if (!baseUrl) {
-      throw new ServiceUnavailableException('AUTH_SERVICE_URL is not configured');
+      throw new ServiceUnavailableException(
+        'AUTH_SERVICE_URL is not configured'
+      );
     }
 
     let response: AxiosResponse<ICentralIntrospectionResponse>;
@@ -88,7 +91,9 @@ export class AccessTokenService {
     }
 
     if (response.status !== 200) {
-      throw new ServiceUnavailableException('Auth service rejected introspection');
+      throw new ServiceUnavailableException(
+        'Auth service rejected introspection'
+      );
     }
     if (response.data?.active === false) {
       throw new UnauthorizedException('Invalid or expired token');
@@ -160,7 +165,8 @@ export class AccessTokenService {
     const roleName =
       typeof role === 'string'
         ? role
-        : role && typeof role === 'object' &&
+        : role &&
+            typeof role === 'object' &&
             typeof (role as Record<string, unknown>).name === 'string'
           ? String((role as Record<string, unknown>).name)
           : undefined;
@@ -189,20 +195,22 @@ export class AccessTokenService {
       ban: external.ban ?? false,
       role: external.role || '-'
     };
-    // До введения erpId пользователи Board связывались по табельному номеру.
-    // Оба варианта ищем одним запросом, но не присваиваем чужой ненулевой erpId.
+    // Существующая запись может хранить прежний ERP ID, но тот же табельный
+    // номер. Сверяем обе уникальные идентичности одним запросом.
     const candidates = await this.userRepository.findAll({
       where: {
-        [Op.or]: [
-          { erpId },
-          { erpId: null, serviceNumber: values.serviceNumber }
-        ]
+        [Op.or]: [{ erpId }, { serviceNumber: values.serviceNumber }]
       },
       limit: 2
     });
-    const existing =
-      candidates.find(user => user.erpId === erpId) ||
-      candidates.find(user => !user.erpId);
+    const byErpId = candidates.find(user => user.erpId === erpId);
+    const byServiceNumber = candidates.find(
+      user => user.serviceNumber === values.serviceNumber
+    );
+    if (byErpId && byServiceNumber && byErpId.id !== byServiceNumber.id) {
+      throw new ConflictException('Conflicting Board user identities');
+    }
+    const existing = byErpId || byServiceNumber;
 
     if (existing) {
       const updates = { erpId, ...values };

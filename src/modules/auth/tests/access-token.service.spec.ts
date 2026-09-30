@@ -1,5 +1,6 @@
 import axios from 'axios';
 import {
+  ConflictException,
   ServiceUnavailableException,
   UnauthorizedException
 } from '@nestjs/common';
@@ -66,10 +67,7 @@ describe('AccessTokenService', () => {
     );
     expect(repository.findAll).toHaveBeenCalledWith({
       where: {
-        [Op.or]: [
-          { erpId: '42' },
-          { erpId: null, serviceNumber: '0042' }
-        ]
+        [Op.or]: [{ erpId: '42' }, { serviceNumber: '0042' }]
       },
       limit: 2
     });
@@ -89,7 +87,9 @@ describe('AccessTokenService', () => {
   });
 
   it('не переходит на ERP при недоступности SEP Auth', async () => {
-    const post = jest.spyOn(axios, 'post').mockRejectedValue(new Error('offline'));
+    const post = jest
+      .spyOn(axios, 'post')
+      .mockRejectedValue(new Error('offline'));
 
     await expect(service.authenticate(centralToken)).rejects.toThrow(
       ServiceUnavailableException
@@ -176,10 +176,10 @@ describe('AccessTokenService', () => {
     expect(repository.create).not.toHaveBeenCalled();
   });
 
-  it('предпочитает совпадение erpId при двух найденных кандидатах', async () => {
+  it('не объединяет разные записи при конфликте двух идентификаторов', async () => {
     repository.findAll.mockResolvedValue([
-      { ...boardUser, erpId: null, update: jest.fn() },
-      boardUser
+      { ...boardUser, id: 18, erpId: 'old', update: jest.fn() },
+      { ...boardUser, serviceNumber: 'old-number', update: jest.fn() }
     ]);
     jest.spyOn(axios, 'post').mockResolvedValue({
       status: 200,
@@ -189,7 +189,36 @@ describe('AccessTokenService', () => {
       }
     } as never);
 
-    await expect(service.authenticate(centralToken)).resolves.toBe(boardUser);
+    await expect(service.authenticate(centralToken)).rejects.toThrow(
+      ConflictException
+    );
     expect(repository.create).not.toHaveBeenCalled();
+  });
+
+  it('перепривязывает прежний erpId у пользователя с тем же табельным номером', async () => {
+    const user = {
+      ...boardUser,
+      erpId: 'old-erp-id',
+      update: jest.fn()
+    };
+    repository.findAll.mockResolvedValue([user]);
+    jest.spyOn(axios, 'post').mockResolvedValue({
+      status: 200,
+      data: {
+        active: true,
+        user: {
+          id: 42,
+          login: 'ivanov',
+          initial: 'Иванов И.И.',
+          tabel: '0042',
+          role: { name: 'Engineer' }
+        }
+      }
+    } as never);
+
+    await expect(service.authenticate(centralToken)).resolves.toBe(user);
+    expect(user.update).toHaveBeenCalledWith(
+      expect.objectContaining({ erpId: '42' })
+    );
   });
 });
