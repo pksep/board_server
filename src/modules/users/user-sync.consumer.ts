@@ -1,18 +1,25 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/sequelize';
-import { RabbitSubscribe } from '@golevelup/nestjs-rabbitmq';
+import {
+  MessageHandlerErrorBehavior,
+  RabbitSubscribe
+} from '@golevelup/nestjs-rabbitmq';
 import { User } from './model/users.model';
 import { Sequelize } from 'sequelize-typescript';
+import { Op, UniqueConstraintError } from 'sequelize';
 import { UsersService } from './users.service';
 import { Public } from '../auth/public.decorator';
+import type {
+  IBoardUserSyncData,
+  IErpUserCreateEvent,
+  IErpUserCreatePayload
+} from './interfaces/erp-user-create-event.interface';
 
 const { ERP, wildcard } = require('@pksep/contracts');
 
-type UserCreateEvent = any;
 type EntityChangeEvent = any;
 type EntityDeleteEvent = any;
 type EntityBanEvent = any;
-type UserPayload = any;
 type SyncableUserField =
   | 'initial'
   | 'login'
@@ -56,9 +63,7 @@ export class UserSyncConsumer {
     private readonly usersService: UsersService
   ) {}
 
-  private buildUserData(
-    payload: UserPayload
-  ): Partial<Record<SyncableUserField, string | boolean | null>> {
+  private buildUserData(payload: IErpUserCreatePayload): IBoardUserSyncData {
     const initial =
       getString(payload.initials) ||
       getString(payload.initial) ||
@@ -92,11 +97,14 @@ export class UserSyncConsumer {
   @RabbitSubscribe({
     exchange: ERP,
     routingKey: wildcard('user'), // 'user.*'
-    queue: process.env.BOARD_USER_EVENTS_QUEUE || 'board-service.user-events'
+    queue: process.env.BOARD_USER_EVENTS_QUEUE || 'board-service.user-events',
+    // Ошибочное событие не должно бесконечно блокировать очередь. Для
+    // сохранения таких сообщений на очередь нужно назначить DLX policy.
+    errorBehavior: MessageHandlerErrorBehavior.NACK
   })
   async handleUserEvent(
     event:
-      | UserCreateEvent
+      | IErpUserCreateEvent
       | EntityChangeEvent
       | EntityDeleteEvent
       | EntityBanEvent,
@@ -112,7 +120,7 @@ export class UserSyncConsumer {
     try {
       switch (eventType) {
         case 'create':
-          await this.handleCreate(event as UserCreateEvent);
+          await this.handleCreate(event as IErpUserCreateEvent);
           break;
         case 'change':
           await this.handleChange(event as EntityChangeEvent);
@@ -140,34 +148,92 @@ export class UserSyncConsumer {
   /**
    * user.create — создать пользователя в локальной БД
    */
-  private async handleCreate(event: UserCreateEvent): Promise<void> {
-    const payload = event.entity as UserPayload;
-    const erpId = String(payload.id);
-    const userData = this.buildUserData(payload);
-
-    // Проверяем: может уже есть
-    const existing = await this.userRepository.findOne({
-      where: { erpId }
-    });
-
-    if (existing) {
-      this.logger.log(
-        `User with erpId=${erpId} already exists, skipping create`
-      );
-      return;
+  private async handleCreate(event: IErpUserCreateEvent): Promise<void> {
+    const payload = event?.entity;
+    if (
+      !payload ||
+      (typeof payload.id !== 'number' && typeof payload.id !== 'string') ||
+      !String(payload.id).trim()
+    ) {
+      throw new Error('User create event must contain an ERP user id');
     }
+    const erpId = String(payload.id).trim();
+    const userData = this.buildUserData(payload);
+    const serviceNumber = userData.serviceNumber || erpId;
 
-    await this.userRepository.create({
-      erpId,
-      initial: userData.initial || 'User',
-      login: userData.login || `user-${erpId}`,
-      serviceNumber: userData.serviceNumber || erpId,
-      image: userData.image ?? null,
-      ban: typeof userData.ban === 'boolean' ? userData.ban : false,
-      role: userData.role || '-'
-    } as any);
+    // SELECT + INSERT могут столкнуться при параллельной доставке. Повторно
+    // читаем уже созданную строку в новой транзакции, но не зацикливаемся.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await this.sequelize.transaction(async transaction => {
+          const candidates = await this.userRepository.findAll({
+            where: {
+              [Op.or]: [{ erpId }, { serviceNumber }]
+            },
+            order: [['id', 'ASC']],
+            limit: 2,
+            lock: transaction.LOCK.UPDATE,
+            transaction
+          });
+          const byErpId = candidates.find(user => user.erpId === erpId);
+          const byServiceNumber = candidates.find(
+            user => user.serviceNumber === serviceNumber
+          );
 
-    this.logger.log(`Created user from ERP: erpId=${erpId}`);
+          if (byErpId && byServiceNumber && byErpId.id !== byServiceNumber.id) {
+            throw new Error(
+              `Conflicting Board users for erpId=${erpId} and serviceNumber=${serviceNumber}`
+            );
+          }
+
+          const user = byErpId || byServiceNumber;
+          if (!user) {
+            await this.userRepository.create(
+              {
+                erpId,
+                initial: userData.initial || 'User',
+                login: userData.login || `user-${erpId}`,
+                serviceNumber,
+                image: userData.image ?? null,
+                ban: userData.ban ?? false,
+                role: userData.role || '-'
+              } as User,
+              { transaction }
+            );
+            this.logger.log(`Created user from ERP: erpId=${erpId}`);
+            return;
+          }
+
+          const updates = { erpId, ...userData, serviceNumber };
+          const changed = (
+            Object.keys(updates) as (keyof typeof updates)[]
+          ).some(key => user[key] !== updates[key]);
+          if (!changed) return;
+
+          const wasBanned = user.ban;
+          if (user.erpId && user.erpId !== erpId) {
+            this.logger.warn(
+              `Relinking Board user id=${user.id} from erpId=${user.erpId} to ${erpId} by serviceNumber=${serviceNumber}`
+            );
+          }
+          Object.assign(user, updates);
+          if (user.ban || wasBanned !== user.ban) {
+            await this.usersService.saveUserAvailability(user, transaction);
+          } else {
+            await user.save({ transaction });
+          }
+          this.logger.log(`Updated user from ERP: erpId=${erpId}`);
+        });
+        return;
+      } catch (error) {
+        if (!(error instanceof UniqueConstraintError) || attempt === 1) {
+          throw error;
+        }
+        this.logger.warn(
+          `Concurrent user.create conflict for erpId=${erpId}; retrying once`
+        );
+      }
+    }
   }
 
   /**

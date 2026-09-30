@@ -5,10 +5,11 @@ import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { ConfigModule } from '@nestjs/config';
 import { User } from '../users/model/users.model';
+import { AccessTokenService } from './access-token.service';
 
 @Module({
   controllers: [AuthController],
-  providers: [AuthService],
+  providers: [AuthService, AccessTokenService],
   imports: [
     JwtModule.register({
       // Board-сервер использует СВОЙ ключ для board_token
@@ -18,6 +19,6 @@ import { User } from '../users/model/users.model';
     SequelizeModule.forFeature([User]),
     ConfigModule
   ],
-  exports: [AuthService, JwtModule]
+  exports: [AuthService, AccessTokenService, JwtModule]
 })
 export class AuthModule {}

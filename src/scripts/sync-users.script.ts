@@ -97,25 +97,57 @@ async function main() {
   // Подключение к БД
   const app = await NestFactory.createApplicationContext(SyncModule);
   const userRepo = app.get('UserRepository') as typeof User;
+  const boardUsers = await userRepo.findAll();
+  const byErpId = new Map(
+    boardUsers.filter(user => user.erpId).map(user => [user.erpId, user])
+  );
+  const byServiceNumber = new Map(
+    boardUsers.map(user => [user.serviceNumber, user])
+  );
+  const erpServiceNumbers = new Map<string, string>();
+  const ambiguousServiceNumbers = new Set<string>();
+  for (const erp of erpUsers) {
+    const serviceNumber = erp.tabel || String(erp.id);
+    const previousId = erpServiceNumbers.get(serviceNumber);
+    if (previousId && previousId !== String(erp.id)) {
+      ambiguousServiceNumbers.add(serviceNumber);
+    }
+    erpServiceNumbers.set(serviceNumber, String(erp.id));
+  }
 
   let created = 0;
   let updated = 0;
   let skipped = 0;
+  let conflicts = 0;
 
   for (const erp of erpUsers) {
     const erpId = String(erp.id);
     const serviceNumber = erp.tabel || erpId;
 
-    // Ищем по erpId или по serviceNumber
-    let user = await userRepo.findOne({ where: { erpId } });
-    if (!user) {
-      user = await userRepo.findOne({ where: { serviceNumber } });
+    if (ambiguousServiceNumbers.has(serviceNumber)) {
+      logger.error(
+        `CONFLICT: несколько ERP ID с табельным номером ${serviceNumber}`
+      );
+      conflicts++;
+      continue;
     }
+    const userById = byErpId.get(erpId);
+    const userByNumber = byServiceNumber.get(serviceNumber);
+    if (userById && userByNumber && userById.id !== userByNumber.id) {
+      logger.error(
+        `CONFLICT: erpId=${erpId} и serviceNumber=${serviceNumber} принадлежат разным Board ID`
+      );
+      conflicts++;
+      continue;
+    }
+    const user = userById || userByNumber;
 
     if (user) {
       // Обновляем
       let changed = false;
-      if (!user.erpId) {
+      const oldErpId = user.erpId;
+      const oldServiceNumber = user.serviceNumber;
+      if (user.erpId !== erpId) {
         user.erpId = erpId;
         changed = true;
       }
@@ -154,6 +186,14 @@ async function main() {
           });
         }
         updated++;
+        if (!dryRun) {
+          if (oldErpId) byErpId.delete(oldErpId);
+          byErpId.set(erpId, user);
+          if (oldServiceNumber !== serviceNumber) {
+            byServiceNumber.delete(oldServiceNumber);
+            byServiceNumber.set(serviceNumber, user);
+          }
+        }
         logger.log(
           `  UPDATED: [${erpId}] ${erp.initial || erp.login} (${serviceNumber})`
         );
@@ -163,7 +203,7 @@ async function main() {
     } else {
       // Создаём
       if (!dryRun) {
-        await userRepo.create({
+        const createdUser = await userRepo.create({
           erpId,
           initial: erp.initial || erp.login || '',
           login: erp.login || '',
@@ -171,6 +211,8 @@ async function main() {
           image: erp.image || null,
           ban: erp.ban || false
         } as any);
+        byErpId.set(erpId, createdUser);
+        byServiceNumber.set(serviceNumber, createdUser);
       }
       created++;
       logger.log(
@@ -184,11 +226,12 @@ async function main() {
   logger.log(`  Создано:    ${created}`);
   logger.log(`  Обновлено:  ${updated}`);
   logger.log(`  Без изменений: ${skipped}`);
+  logger.log(`  Конфликты:  ${conflicts}`);
   logger.log('═══════════════════════════════════════');
   if (dryRun) logger.warn('DRY RUN — ничего не записано в БД');
 
   await app.close();
-  process.exit(0);
+  process.exit(conflicts > 0 ? 1 : 0);
 }
 
 main().catch(err => {
