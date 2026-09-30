@@ -14,6 +14,8 @@ import * as cookie from 'cookie';
 import { InjectModel } from '@nestjs/sequelize';
 import { Board } from '../boards/model/board.model';
 import { ProjectAccessService } from '../projects/project-access.service';
+import { AccessTokenService } from '../auth/access-token.service';
+import type { IBoardSocket } from './interfaces/board-socket.interface';
 
 const BOARD_SOCKET_PATH = process.env.BOARD_SOCKET_PATH || '/api/socket.io';
 const BOARD_TOKEN_COOKIE = 'board_token';
@@ -34,7 +36,8 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   constructor(
     private jwtService: JwtService,
     @InjectModel(Board) private boardRepository: typeof Board,
-    private projectAccess: ProjectAccessService
+    private projectAccess: ProjectAccessService,
+    private accessTokenService: AccessTokenService
   ) {}
 
   @WebSocketServer()
@@ -61,16 +64,31 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     return null;
   }
 
-  handleConnection(client: Socket) {
+  async handleConnection(client: Socket): Promise<void> {
+    const boardClient = client as IBoardSocket;
     try {
       const cookies = cookie.parse(client.handshake.headers.cookie || '');
+
+      if (this.accessTokenService.isEnabled()) {
+        const accessToken = cookies[ERP_TOKEN_COOKIE];
+        if (!accessToken) {
+          this.logger.warn(`Client ${client.id} rejected: no access_token`);
+          client.disconnect(true);
+          return;
+        }
+        const user = await this.accessTokenService.authenticate(accessToken);
+        boardClient.user = this.accessTokenService.toUserPayload(user);
+        this.logger.log(`Client connected: ${client.id} (user: ${user.id})`);
+        return;
+      }
+
       const user = this.verifySocketUser(cookies);
       if (user) {
-        (client as any).user = user;
+        boardClient.user = user;
         this.logger.log(`Client connected: ${client.id} (user: ${user.id})`);
       } else if (process.env.NODE_ENV !== 'production') {
         // В dev-режиме подключение без токена допустимо
-        (client as any).user = { id: 1, login: 'admin', serviceNumber: '001' };
+        boardClient.user = { id: 1, login: 'admin', serviceNumber: '001' };
         this.logger.log(`Client connected: ${client.id} (dev fallback)`);
       } else {
         this.logger.warn(`Client ${client.id} rejected: no token`);
@@ -78,10 +96,13 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
     } catch (error) {
       this.logger.warn(`Client ${client.id} rejected: invalid token`);
-      if (process.env.NODE_ENV === 'production') {
+      if (
+        this.accessTokenService.isEnabled() ||
+        process.env.NODE_ENV === 'production'
+      ) {
         client.disconnect(true);
       } else {
-        (client as any).user = { id: 1, login: 'admin', serviceNumber: '001' };
+        boardClient.user = { id: 1, login: 'admin', serviceNumber: '001' };
         this.logger.log(
           `Client connected: ${client.id} (dev fallback after error)`
         );
@@ -100,6 +121,10 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { boardId: number }
   ) {
+    // handleConnection асинхронный: событие может прийти до проверки токена.
+    if (!(client as IBoardSocket).user?.id) {
+      return { event: 'error', data: { message: 'Не авторизован' } };
+    }
     if (!data?.boardId || typeof data.boardId !== 'number') {
       return {
         event: 'error',
@@ -113,7 +138,7 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     try {
       await this.projectAccess.assertCanRead(
         board.projectId,
-        Number((client as any).user?.id)
+        Number((client as IBoardSocket).user?.id)
       );
     } catch {
       return { event: 'error', data: { message: 'Доска не найдена' } };
@@ -147,6 +172,9 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { projectId: number }
   ) {
+    if (!(client as IBoardSocket).user?.id) {
+      return { event: 'error', data: { message: 'Не авторизован' } };
+    }
     if (!data?.projectId || typeof data.projectId !== 'number') {
       return {
         event: 'error',
@@ -156,7 +184,7 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     try {
       await this.projectAccess.assertCanRead(
         data.projectId,
-        Number((client as any).user?.id)
+        Number((client as IBoardSocket).user?.id)
       );
     } catch {
       return { event: 'error', data: { message: 'Проект не найден' } };

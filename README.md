@@ -11,6 +11,33 @@
 
 `board-server` is a NestJS service for board management: projects, boards, columns, tasks, subtasks, users, websocket events, and ERP synchronization.
 
+## Авторизация через SEP Auth
+
+После развёртывания SEP Auth с audience `board` задайте на сервере доски
+`AUTH_SERVICE_URL=http://sep-auth:8080` (если оба сервиса в одном Kubernetes
+namespace). Для другого namespace используйте
+`http://sep-auth.<auth-namespace>.svc.cluster.local:8080`. Локально из Docker
+значением может быть `http://host.docker.internal:8085`. Перезапустите Board
+после изменения env. `ERP_API_URL` остаётся нужен для проверки старых ERP-токенов,
+а `PRIVATE_KEY` — для режима без `AUTH_SERVICE_URL`.
+
+В этом режиме HTTP API и WebSocket `/board` берут `access_token` из cookie ERP.
+HTTP API также принимает Bearer-токен. Новые RS256-токены проверяются напрямую
+через SEP Auth `/auth/introspect` с audience `board`; старые ERP-токены — через
+ERP `/api/auth/check`. Пользователь сопоставляется с локальной записью Board по
+`erpId` (или по табельному номеру, если `erpId` ещё не заполнен) и обновляется
+только при изменении полей. SSE-маршруты также требуют общий токен. `board_token` больше не
+выдаётся и не используется как обход общей сессии; если такая cookie есть,
+HTTP-ответ удаляет её. Токены, выданные до добавления audience `board`, нужно
+обновить через refresh или новый вход.
+
+Порядок включения: обновить и проверить `/ready` Go-сервиса, затем развернуть
+Board с `AUTH_SERVICE_URL`, выполнить login/refresh в ERP и проверить REST API,
+WebSocket, logout и блокировку пользователя. Уже открытый WebSocket повторно
+проверяется только после переподключения. Без `AUTH_SERVICE_URL` прежний режим
+с локальным `board_token` сохраняется; если убрать переменную для отката,
+пользователям может потребоваться повторный вход.
+
 ## Installation
 
 ```bash
