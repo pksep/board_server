@@ -21,6 +21,8 @@ describe('TasksService.createSubtask activity', () => {
       priority: '',
       approvalStatus: '',
       dueDate: null,
+      startDate: new Date('2026-09-29T00:00:00.000Z'),
+      customAttributeValues: {},
       columnId: 5,
       parentTaskId: 10
     };
@@ -38,12 +40,22 @@ describe('TasksService.createSubtask activity', () => {
     const project = {
       id: 30,
       taskCounter: 4,
+      taskAttributeDefinitions: [
+        { id: 'approved', name: 'Подтверждено', type: 'boolean' },
+        { id: 'reviewers', name: 'Проверяющие', type: 'participants' },
+        { id: 'review-date', name: 'Дата проверки', type: 'date' },
+        { id: 'note', name: 'Примечание', type: 'text' },
+        { id: 'estimate', name: 'Оценка', type: 'number' }
+      ],
       save: jest.fn().mockResolvedValue(undefined)
     };
     const projectRepository = {
       findByPk: jest.fn().mockResolvedValue(project)
     };
-    const projectAccess = { assertCanRead: jest.fn() };
+    const projectAccess = {
+      assertCanRead: jest.fn(),
+      assertAssigneesBelongToProject: jest.fn()
+    };
     const activityEvents = {
       buildChanges: jest.fn().mockReturnValue([
         {
@@ -74,10 +86,36 @@ describe('TasksService.createSubtask activity', () => {
     );
     jest.spyOn(service, 'getById').mockResolvedValue(subtask as any);
 
-    await service.createSubtask(10, { title: subtask.title }, 7);
+    await service.createSubtask(
+      10,
+      {
+        title: subtask.title,
+        startDate: '2026-09-29T00:00:00.000Z',
+        customAttributeValues: {
+          approved: true,
+          reviewers: [7, 8],
+          'review-date': '2026-10-01',
+          note: 'Нужна повторная проверка',
+          estimate: 12
+        }
+      },
+      7
+    );
 
     expect(subtask.taskNumber).toBe(6);
     expect(project.taskCounter).toBe(6);
+    expect(subtask.customAttributeValues).toEqual({
+      approved: true,
+      reviewers: [7, 8],
+      'review-date': '2026-10-01T00:00:00.000Z',
+      note: 'Нужна повторная проверка',
+      estimate: 12
+    });
+    expect(projectAccess.assertAssigneesBelongToProject).toHaveBeenCalledWith(
+      30,
+      [7, 8],
+      transaction
+    );
     expect(projectRepository.findByPk).toHaveBeenCalledWith(30, {
       transaction,
       lock: 'UPDATE'

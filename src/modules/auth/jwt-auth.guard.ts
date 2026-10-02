@@ -12,6 +12,11 @@ import { ConfigService } from '@nestjs/config';
 import { IS_PUBLIC_KEY } from './public.decorator';
 import { User } from '../users/model/users.model';
 import { ConfigConstains } from 'src/configs/env.config';
+import { IUserDataToken } from './interfaces/interface';
+import {
+  getErpSessionHash,
+  isCurrentBoardSession
+} from './utils/board-session';
 
 const { Reqi } = require('@pksep/reqi');
 
@@ -44,7 +49,7 @@ export class TokenAuth implements CanActivate {
     private configService: ConfigService
   ) {}
 
-  async canActivate(context: ExecutionContext) {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     // @Public() — пропускаем
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
       context.getHandler(),
@@ -68,23 +73,27 @@ export class TokenAuth implements CanActivate {
 
     const isLocalhost =
       this.isDev && ['localhost', '127.0.0.1'].includes(req.hostname);
+    const boardToken = req.cookies?.[BOARD_TOKEN_COOKIE];
+    const erpToken = req.cookies?.[ERP_TOKEN_COOKIE];
+    // Неверная/удалённая сессия не должна превращаться в вход dev-администратора.
+    const allowDevFallback = isLocalhost && !boardToken && !erpToken;
 
     try {
       // ──────────────────────────────────────────────
-      // 1. Есть board_token → верифицируем ЛОКАЛЬНО
+      // 1. При неизменной ERP-сессии board_token проверяется локально.
       // ──────────────────────────────────────────────
-      const boardToken = req.cookies?.[BOARD_TOKEN_COOKIE];
-
       if (boardToken) {
         try {
-          const decoded = this.jwtService.verify(boardToken);
-          const user = await this.userRepository.findOne({
-            where: { id: decoded.id }
-          });
+          const decoded = this.jwtService.verify<object>(boardToken);
+          if (isCurrentBoardSession(decoded, erpToken)) {
+            const user = await this.userRepository.findOne({
+              where: { id: decoded.id }
+            });
 
-          if (user && !user.ban) {
-            req.user = this.toUserPayload(user);
-            return true;
+            if (user && !user.ban) {
+              req.user = this.toUserPayload(user);
+              return true;
+            }
           }
         } catch {
           // board_token невалиден или истёк — пробуем ERP токен
@@ -95,16 +104,18 @@ export class TokenAuth implements CanActivate {
       // ──────────────────────────────────────────────
       // 2. Есть access_token (ERP) → обмен через ERP
       // ──────────────────────────────────────────────
-      const erpToken = req.cookies?.[ERP_TOKEN_COOKIE];
-
       if (erpToken) {
         const user = await this.exchangeErpToken(erpToken);
 
-        if (user) {
+        if (user && !user.ban) {
           // Выдаём СВОЙ board_token
-          const newBoardToken = this.jwtService.sign(this.toUserPayload(user), {
-            expiresIn: '24h'
-          });
+          const newBoardToken = this.jwtService.sign(
+            {
+              ...this.toUserPayload(user),
+              erpTokenHash: getErpSessionHash(erpToken)
+            },
+            { expiresIn: '24h' }
+          );
 
           res.cookie(BOARD_TOKEN_COOKIE, newBoardToken, {
             httpOnly: true,
@@ -121,7 +132,7 @@ export class TokenAuth implements CanActivate {
       // ──────────────────────────────────────────────
       // 3. Нет токенов → dev fallback или 401
       // ──────────────────────────────────────────────
-      if (isLocalhost) {
+      if (allowDevFallback) {
         req.user = await this.getDevFallbackUser();
         return true;
       }
@@ -135,7 +146,7 @@ export class TokenAuth implements CanActivate {
         `Auth error: ${error instanceof Error ? error.message : String(error)}`
       );
 
-      if (isLocalhost) {
+      if (allowDevFallback) {
         req.user = await this.getDevFallbackUser();
         return true;
       }
@@ -180,9 +191,45 @@ export class TokenAuth implements CanActivate {
 
       const erpUser = result.user;
       const erpId = String(erpUser.id);
+      const verifiedServiceNumber = erpUser.tabel || erpUser.serviceNumber;
+      const serviceNumber = verifiedServiceNumber || erpId;
 
       // Ищем или создаём пользователя
       let user = await this.userRepository.findOne({ where: { erpId } });
+
+      // Как в sync:users, сохраняем ID старой записи с тем же проверенным табелем.
+      // Вычисленный из ERP ID номер не доказывает принадлежность старого аккаунта.
+      if (!user && verifiedServiceNumber) {
+        const legacyUser = await this.userRepository.findOne({
+          where: { serviceNumber }
+        });
+
+        if (legacyUser) {
+          if (
+            (legacyUser.erpId !== null && legacyUser.erpId !== erpId) ||
+            legacyUser.ban ||
+            erpUser.ban
+          ) {
+            return null;
+          }
+
+          // Условная запись не позволяет двум ERP-аккаунтам перехватить один ID.
+          await this.userRepository.update(
+            { erpId },
+            {
+              where: {
+                id: legacyUser.id,
+                erpId: null,
+                serviceNumber,
+                ban: false
+              }
+            }
+          );
+          user = await this.userRepository.findOne({ where: { erpId } });
+
+          if (!user || user.id !== legacyUser.id) return null;
+        }
+      }
 
       if (user) {
         // Обновляем синхронизируемые поля
@@ -190,7 +237,7 @@ export class TokenAuth implements CanActivate {
         const updates: Record<string, any> = {
           initial: erpUser.initial || erpUser.login,
           login: erpUser.login,
-          serviceNumber: erpUser.tabel || erpUser.serviceNumber || erpId,
+          serviceNumber,
           image: erpUser.image || null,
           ban: erpUser.ban ?? false,
           role: erpUser.role || '-'
@@ -209,7 +256,7 @@ export class TokenAuth implements CanActivate {
           erpId,
           initial: erpUser.initial || erpUser.login || 'User',
           login: erpUser.login || `user-${erpId}`,
-          serviceNumber: erpUser.tabel || erpUser.serviceNumber || erpId,
+          serviceNumber,
           image: erpUser.image || null,
           ban: erpUser.ban ?? false,
           role: erpUser.role || '-'
@@ -230,7 +277,7 @@ export class TokenAuth implements CanActivate {
   }
 
   /** Формат req.user */
-  private toUserPayload(user: User) {
+  private toUserPayload(user: User): IUserDataToken {
     return {
       id: user.id,
       erpId: user.erpId,
@@ -242,7 +289,7 @@ export class TokenAuth implements CanActivate {
   }
 
   /** Dev-fallback пользователь */
-  private async getDevFallbackUser() {
+  private async getDevFallbackUser(): Promise<IUserDataToken> {
     const user = await this.userRepository.findOne({ where: { id: 1 } });
     if (user) return this.toUserPayload(user);
     return { id: 1, login: 'admin', serviceNumber: '001' };

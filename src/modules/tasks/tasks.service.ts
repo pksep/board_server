@@ -17,7 +17,13 @@ import { ProjectTag } from '../tags/model/project-tag.model';
 import { WsGateway } from '../ws/ws.gateway';
 import { S3Service } from '../s3/s3.service';
 import { v4 as uuidv4 } from 'uuid';
-import { Op, QueryTypes, Transaction } from 'sequelize';
+import {
+  Op,
+  QueryTypes,
+  Transaction,
+  FindOptions,
+  IncludeOptions
+} from 'sequelize';
 import { ProjectAccessService } from '../projects/project-access.service';
 import { ActivityEventsService } from '../activity-events/activity-events.service';
 import {
@@ -27,6 +33,11 @@ import {
 import { ActivityHistoryQueryDto } from '../activity-events/dto/activity-history-query.dto';
 import type { Request } from 'express';
 import { TaskListQueryDto } from './dto/task-list-query.dto';
+import {
+  TaskAttributeType,
+  TTaskAttributeValues
+} from '../projects/interfaces/task-attribute.interface';
+import { CreateTaskTimeEntryDto } from './dto/create-task-time-entry.dto';
 
 export interface TaskListPage {
   items: Task[];
@@ -35,6 +46,39 @@ export interface TaskListPage {
   limit: number;
   offset: number;
   hasMore: boolean;
+}
+
+interface TaskTimeEntryRecord {
+  actorId: number;
+  actorImage: string | null;
+  actorInitial: string | null;
+  actorLogin: string;
+  comment: string | null;
+  createdAt: Date | string;
+  durationMinutes: number;
+  id: number;
+  taskId: number;
+  userId: number;
+}
+
+export interface TaskTimeEntry {
+  actor: {
+    id: number;
+    image: string | null;
+    initial: string | null;
+    login: string;
+  };
+  comment: string | null;
+  createdAt: Date | string;
+  durationMinutes: number;
+  id: number;
+  taskId: number;
+  userId: number;
+}
+
+export interface TaskTimeEntryPage {
+  items: TaskTimeEntry[];
+  nextCursor: number | null;
 }
 
 @Injectable()
@@ -75,7 +119,7 @@ export class TasksService {
     transaction?: Transaction
   ): Promise<number> {
     const column = await this.columnRepository.findByPk(columnId, {
-      include: [{ model: Board, attributes: ['projectId'] }],
+      include: [{ association: 'board', attributes: ['projectId'] }],
       ...(transaction ? { transaction } : {})
     });
     if (!column) {
@@ -84,9 +128,124 @@ export class TasksService {
     return column.board.projectId;
   }
 
+  /** Проверяет динамические значения задачи по актуальным настройкам проекта. */
+  private async normalizeCustomAttributeValues(
+    projectId: number,
+    values: TTaskAttributeValues = {},
+    transaction?: Transaction
+  ): Promise<TTaskAttributeValues> {
+    const project = await this.projectRepository.findByPk(projectId, {
+      attributes: ['taskAttributeDefinitions'],
+      transaction
+    });
+    if (!project) {
+      throw new HttpException('Проект не найден', HttpStatus.NOT_FOUND);
+    }
+
+    const definitions = new Map(
+      (project.taskAttributeDefinitions || []).map(definition => [
+        definition.id,
+        definition
+      ])
+    );
+    const normalized: TTaskAttributeValues = {};
+    const participantIds = new Set<number>();
+
+    for (const [attributeId, value] of Object.entries(values)) {
+      const definition = definitions.get(attributeId);
+      if (!definition) {
+        throw new HttpException(
+          `Атрибут задачи «${attributeId}» отсутствует в проекте`,
+          HttpStatus.BAD_REQUEST
+        );
+      }
+
+      if (value === null || value === '') {
+        normalized[attributeId] = null;
+        continue;
+      }
+
+      switch (definition.type) {
+        case TaskAttributeType.Boolean:
+          if (typeof value !== 'boolean') {
+            throw new HttpException(
+              `Атрибут «${definition.name}» должен быть булевым`,
+              HttpStatus.BAD_REQUEST
+            );
+          }
+          normalized[attributeId] = value;
+          break;
+        case TaskAttributeType.Participants: {
+          if (!Array.isArray(value)) {
+            throw new HttpException(
+              `Атрибут «${definition.name}» должен содержать список участников`,
+              HttpStatus.BAD_REQUEST
+            );
+          }
+          const ids = [...new Set(value.map(id => Number(id)))];
+          if (ids.some(id => !Number.isInteger(id) || id <= 0)) {
+            throw new HttpException(
+              `Атрибут «${definition.name}» содержит некорректного участника`,
+              HttpStatus.BAD_REQUEST
+            );
+          }
+          ids.forEach(id => participantIds.add(id));
+          normalized[attributeId] = ids;
+          break;
+        }
+        case TaskAttributeType.Date: {
+          if (typeof value !== 'string') {
+            throw new HttpException(
+              `Атрибут «${definition.name}» должен содержать дату`,
+              HttpStatus.BAD_REQUEST
+            );
+          }
+          const date = new Date(value);
+          if (Number.isNaN(date.getTime())) {
+            throw new HttpException(
+              `Атрибут «${definition.name}» содержит некорректную дату`,
+              HttpStatus.BAD_REQUEST
+            );
+          }
+          normalized[attributeId] = date.toISOString();
+          break;
+        }
+        case TaskAttributeType.Text:
+          if (typeof value !== 'string' || value.length > 5000) {
+            throw new HttpException(
+              `Атрибут «${definition.name}» должен содержать текст до 5000 символов`,
+              HttpStatus.BAD_REQUEST
+            );
+          }
+          normalized[attributeId] = value;
+          break;
+        case TaskAttributeType.Number:
+          if (typeof value !== 'number' || !Number.isFinite(value)) {
+            throw new HttpException(
+              `Атрибут «${definition.name}» должен содержать число`,
+              HttpStatus.BAD_REQUEST
+            );
+          }
+          normalized[attributeId] = value;
+          break;
+      }
+    }
+
+    if (participantIds.size) {
+      await this.projectAccess.assertAssigneesBelongToProject(
+        projectId,
+        [...participantIds],
+        transaction
+      );
+    }
+
+    return normalized;
+  }
+
   private async getColumnLocation(
     columnId: number,
-    transaction?: Transaction
+    transaction?: Transaction,
+    includeArchived = false
   ): Promise<{ column: BoardColumn; board: Board; projectId: number }> {
     const column = await this.columnRepository.findByPk(columnId, {
       transaction
@@ -96,7 +255,8 @@ export class TasksService {
     }
 
     const board = await this.boardRepository.findByPk(column.boardId, {
-      transaction
+      transaction,
+      ...(includeArchived ? { paranoid: false } : {})
     });
     if (!board) {
       throw new HttpException('Доска не найдена', HttpStatus.NOT_FOUND);
@@ -108,9 +268,14 @@ export class TasksService {
   private async assertColumnAccess(
     columnId: number,
     userId: number,
-    transaction?: Transaction
-  ) {
-    const location = await this.getColumnLocation(columnId, transaction);
+    transaction?: Transaction,
+    includeArchived = false
+  ): Promise<{ column: BoardColumn; board: Board; projectId: number }> {
+    const location = await this.getColumnLocation(
+      columnId,
+      transaction,
+      includeArchived
+    );
     await this.projectAccess.assertCanRead(
       location.projectId,
       userId,
@@ -123,16 +288,23 @@ export class TasksService {
     taskId: number,
     userId: number,
     transaction?: Transaction,
-    lockForUpdate = false
+    lockForUpdate = false,
+    includeArchived = false
   ): Promise<Task> {
     const task = await this.taskRepository.findByPk(taskId, {
       transaction,
+      ...(includeArchived ? { paranoid: false } : {}),
       ...(transaction && lockForUpdate ? { lock: transaction.LOCK.UPDATE } : {})
     });
     if (!task) {
       throw new HttpException('Задача не найдена', HttpStatus.NOT_FOUND);
     }
-    await this.assertColumnAccess(task.columnId, userId, transaction);
+    await this.assertColumnAccess(
+      task.columnId,
+      userId,
+      transaction,
+      includeArchived
+    );
     return task;
   }
 
@@ -250,6 +422,11 @@ export class TasksService {
       priority: { before: null, after: task.priority },
       approvalStatus: { before: null, after: task.approvalStatus },
       dueDate: { before: null, after: this.normalizeDate(task.dueDate) },
+      startDate: { before: null, after: this.normalizeDate(task.startDate) },
+      customAttributeValues: {
+        before: null,
+        after: task.customAttributeValues
+      },
       columnId: { before: null, after: task.columnId },
       parentTaskId: { before: null, after: task.parentTaskId },
       assigneeIds: { before: [], after: this.normalizeIds(assigneeIds) },
@@ -257,34 +434,59 @@ export class TasksService {
     });
   }
 
-  /** Общие include для задачи */
-  private taskIncludes() {
+  /** Отделяет архивные записи от активных до поиска и пагинации. */
+  private archiveTaskOptions(
+    archive?: 'active' | 'archived',
+    archivedBoard = false
+  ): Pick<FindOptions<Task>, 'where' | 'paranoid'> {
+    // У старых архивных досок задачи могли остаться без собственной метки архива.
+    if (archivedBoard) return { paranoid: false };
+
+    return archive === 'archived'
+      ? { paranoid: false, where: { deletedAt: { [Op.ne]: null } } }
+      : {};
+  }
+
+  /** Общие связи сохраняются и у архивных задач; сам архив не удаляет файлы или участников. */
+  private taskIncludes(
+    archive?: 'active' | 'archived',
+    archivedBoard = false
+  ): IncludeOptions[] {
     return [
       {
         model: TaskAssignee,
+        as: 'assignees',
         separate: true,
         include: [
-          { model: User, attributes: ['id', 'login', 'initial', 'image'] }
+          {
+            model: User,
+            as: 'user',
+            attributes: ['id', 'login', 'initial', 'image']
+          }
         ]
       },
       {
         model: TaskTag,
+        as: 'tags',
         separate: true,
         include: [
           {
             model: ProjectTag,
+            as: 'projectTag',
             attributes: ['id', 'label', 'color', 'description']
           }
         ]
       },
       {
         model: TaskAttachment,
+        as: 'attachments',
         separate: true,
         attributes: ['id', 'fileName', 'objectName', 'mimeType', 'size']
       },
       {
         model: Task,
         as: 'subtasks',
+        ...this.archiveTaskOptions(archive, archivedBoard),
         separate: true,
         attributes: [
           'id',
@@ -294,22 +496,37 @@ export class TasksService {
           'priority',
           'approvalStatus',
           'dueDate',
+          'startDate',
+          'customAttributeValues',
           'parentTaskId',
           'columnId',
           'order',
+          'deletedAt',
           'updatedAt'
         ],
         include: [
           {
             model: TaskAssignee,
+            as: 'assignees',
             separate: true,
-            include: [{ model: User, attributes: ['id', 'login', 'initial'] }]
+            include: [
+              {
+                model: User,
+                as: 'user',
+                attributes: ['id', 'login', 'initial']
+              }
+            ]
           },
           {
             model: TaskTag,
+            as: 'tags',
             separate: true,
             include: [
-              { model: ProjectTag, attributes: ['id', 'label', 'color'] }
+              {
+                model: ProjectTag,
+                as: 'projectTag',
+                attributes: ['id', 'label', 'color']
+              }
             ]
           }
         ]
@@ -357,22 +574,40 @@ export class TasksService {
     query: TaskListQueryDto = {}
   ): Promise<Task[] | TaskListPage> {
     try {
-      await this.assertColumnAccess(columnId, userId);
+      const location =
+        query.archive === 'archived'
+          ? await this.assertColumnAccess(columnId, userId, undefined, true)
+          : await this.assertColumnAccess(columnId, userId);
+      const archivedBoard = Boolean(location?.board?.deletedAt);
+      this.validateTaskDateFilters(query);
+      const archiveOptions = this.archiveTaskOptions(
+        query.archive,
+        archivedBoard
+      );
       // Старые клиенты сохраняют группировку по корням; новый канбан запрашивает сами карточки.
-      const flatSubtasks = Boolean(query.includeSubtasks && query.flatSubtasks);
+      const flatSubtasks =
+        query.archive === 'archived' ||
+        Boolean(query.includeSubtasks && query.flatSubtasks);
       query = { ...query, flatSubtasks };
       const search = query.search?.trim();
       const searchRootTaskIds = search
-        ? await this.findMatchingRootTaskIds(columnId, search, flatSubtasks)
+        ? await this.findMatchingRootTaskIds(
+            columnId,
+            search,
+            flatSubtasks,
+            query.archive,
+            archivedBoard
+          )
         : null;
       const filteredRootTaskIds = this.hasStructuredTaskFilters(query)
-        ? await this.findFilteredRootTaskIds(columnId, query)
+        ? await this.findFilteredRootTaskIds(columnId, query, archivedBoard)
         : null;
       const rootTaskIds = this.intersectOptionalIdLists(
         searchRootTaskIds,
         filteredRootTaskIds
       );
       const where = {
+        ...archiveOptions.where,
         columnId,
         ...(flatSubtasks ? {} : { parentTaskId: null }),
         ...(rootTaskIds !== null ? { id: { [Op.in]: rootTaskIds } } : {})
@@ -383,8 +618,9 @@ export class TasksService {
 
       if (!isPaginated) {
         return await this.taskRepository.findAll({
+          ...archiveOptions,
           where,
-          include: this.taskIncludes(),
+          include: this.taskIncludes(query.archive, archivedBoard),
           order: [
             ['order', 'ASC'],
             ['id', 'ASC']
@@ -393,10 +629,11 @@ export class TasksService {
       }
 
       const [total, items, rootTotal] = await Promise.all([
-        this.taskRepository.count({ where }),
+        this.taskRepository.count({ ...archiveOptions, where }),
         this.taskRepository.findAll({
+          ...archiveOptions,
           where,
-          include: this.taskIncludes(),
+          include: this.taskIncludes(query.archive, archivedBoard),
           order: [
             ['order', 'ASC'],
             ['id', 'ASC']
@@ -406,6 +643,7 @@ export class TasksService {
         }),
         flatSubtasks
           ? this.taskRepository.count({
+              ...archiveOptions,
               where: { ...where, parentTaskId: null }
             })
           : Promise.resolve(undefined)
@@ -436,11 +674,15 @@ export class TasksService {
   private async findMatchingRootTaskIds(
     columnId: number,
     search: string,
-    flatSubtasks = false
+    flatSubtasks = false,
+    archive?: 'active' | 'archived',
+    archivedBoard = false
   ): Promise<number[]> {
     const trailingNumber = search.match(/(\d+)$/)?.[1];
     const matches = await this.taskRepository.findAll({
+      ...this.archiveTaskOptions(archive, archivedBoard),
       where: {
+        ...this.archiveTaskOptions(archive, archivedBoard).where,
         columnId,
         [Op.or]: [
           { title: { [Op.iLike]: `%${search}%` } },
@@ -465,8 +707,45 @@ export class TasksService {
   private hasStructuredTaskFilters(query: TaskListQueryDto): boolean {
     return Boolean(
       query.assigneeIds?.length ||
+      query.creatorIds?.length ||
       query.priorities?.length ||
-      query.tagIds?.length
+      query.tagIds?.length ||
+      query.startDateFrom ||
+      query.startDateTo ||
+      query.dueDateFrom ||
+      query.dueDateTo
+    );
+  }
+
+  /** Не допускает обратный период после проверки доступа к проекту. */
+  private validateTaskDateFilters(query: TaskListQueryDto): void {
+    for (const [from, to] of [
+      [query.startDateFrom, query.startDateTo],
+      [query.dueDateFrom, query.dueDateTo]
+    ]) {
+      if (from && to && Date.parse(from) > Date.parse(to)) {
+        throw new HttpException(
+          'Начало периода не может быть позже окончания',
+          HttpStatus.BAD_REQUEST
+        );
+      }
+    }
+  }
+
+  /** Сравнивает дату с включительными границами; пустая дата не совпадает с выбранным периодом. */
+  private matchesTaskDateRange(
+    date: Date | null | undefined,
+    from?: string,
+    to?: string
+  ): boolean {
+    if (!from && !to) return true;
+    if (!date || Number.isNaN(date.getTime())) return false;
+
+    const timestamp = date.getTime();
+
+    return (
+      (!from || timestamp >= Date.parse(from)) &&
+      (!to || timestamp <= Date.parse(to))
     );
   }
 
@@ -514,7 +793,8 @@ export class TasksService {
    */
   private async findFilterCandidates(
     columnId: number,
-    query: TaskListQueryDto
+    query: TaskListQueryDto,
+    archivedBoard = false
   ): Promise<Task[]> {
     const filterPrioritiesInDatabase = Boolean(
       (!query.includeSubtasks || query.flatSubtasks) && query.priorities?.length
@@ -522,10 +802,15 @@ export class TasksService {
     const attributes = [
       'id',
       'parentTaskId',
+      ...(query.creatorIds?.length ? ['createdById'] : []),
+      ...(query.startDateFrom || query.startDateTo ? ['startDate'] : []),
+      ...(query.dueDateFrom || query.dueDateTo ? ['dueDate'] : []),
       ...(query.includeSubtasks ? ['priority'] : [])
     ];
     const roots = await this.taskRepository.findAll({
+      ...this.archiveTaskOptions(query.archive, archivedBoard),
       where: {
+        ...this.archiveTaskOptions(query.archive, archivedBoard).where,
         columnId,
         ...(query.flatSubtasks ? {} : { parentTaskId: null }),
         ...(filterPrioritiesInDatabase
@@ -569,9 +854,14 @@ export class TasksService {
    */
   private async findFilteredRootTaskIds(
     columnId: number,
-    query: TaskListQueryDto
+    query: TaskListQueryDto,
+    archivedBoard = false
   ): Promise<number[]> {
-    const candidates = await this.findFilterCandidates(columnId, query);
+    const candidates = await this.findFilterCandidates(
+      columnId,
+      query,
+      archivedBoard
+    );
     const candidatesById = new Map(
       candidates.map(task => [Number(task.id), task])
     );
@@ -579,9 +869,21 @@ export class TasksService {
       candidates
         .filter(
           task =>
-            !query.includeSubtasks ||
-            !query.priorities?.length ||
-            query.priorities.includes(task.priority)
+            (!query.creatorIds?.length ||
+              query.creatorIds.includes(Number(task.createdById))) &&
+            (!query.includeSubtasks ||
+              !query.priorities?.length ||
+              query.priorities.includes(task.priority)) &&
+            this.matchesTaskDateRange(
+              task.startDate,
+              query.startDateFrom,
+              query.startDateTo
+            ) &&
+            this.matchesTaskDateRange(
+              task.dueDate,
+              query.dueDateFrom,
+              query.dueDateTo
+            )
         )
         .map(task => Number(task.id))
     );
@@ -633,12 +935,28 @@ export class TasksService {
    */
   async getById(id: number, userId: number): Promise<Task> {
     try {
-      await this.assertTaskAccess(id, userId);
+      const accessibleTask = await this.assertTaskAccess(
+        id,
+        userId,
+        undefined,
+        false,
+        true
+      );
+      const location = await this.getColumnLocation(
+        accessibleTask.columnId,
+        undefined,
+        true
+      );
       const task = await this.taskRepository.findByPk(id, {
+        paranoid: false,
         include: [
-          ...this.taskIncludes(),
+          ...this.taskIncludes(
+            accessibleTask.deletedAt ? 'archived' : 'active',
+            Boolean(location.board.deletedAt)
+          ),
           {
             model: BoardColumn,
+            as: 'column',
             attributes: ['id', 'boardId']
           }
         ]
@@ -658,8 +976,18 @@ export class TasksService {
   }
 
   async getHistory(id: number, userId: number, query: ActivityHistoryQueryDto) {
-    const task = await this.assertTaskAccess(id, userId);
-    const projectId = await this.getProjectIdByColumnId(task.columnId);
+    const task = await this.assertTaskAccess(
+      id,
+      userId,
+      undefined,
+      false,
+      true
+    );
+    const { projectId } = await this.getColumnLocation(
+      task.columnId,
+      undefined,
+      true
+    );
 
     return this.activityEvents.findByEntity({
       projectId,
@@ -668,6 +996,141 @@ export class TasksService {
       limit: query.limit,
       beforeId: query.beforeId
     });
+  }
+
+  /** Приводит строку SQL к контракту API учёта времени. */
+  private mapTaskTimeEntry(record: TaskTimeEntryRecord): TaskTimeEntry {
+    return {
+      id: Number(record.id),
+      taskId: Number(record.taskId),
+      userId: Number(record.userId),
+      durationMinutes: Number(record.durationMinutes),
+      comment: record.comment,
+      createdAt: record.createdAt,
+      actor: {
+        id: Number(record.actorId),
+        image: record.actorImage,
+        initial: record.actorInitial,
+        login: record.actorLogin
+      }
+    };
+  }
+
+  /** Возвращает записи фактического времени задачи от новых к старым. */
+  async getTimeEntries(
+    id: number,
+    userId: number,
+    query: ActivityHistoryQueryDto
+  ): Promise<TaskTimeEntryPage> {
+    await this.assertTaskAccess(id, userId, undefined, false, true);
+    const pageSize = Math.min(Math.max(query.limit || 50, 1), 100);
+    const records = await this.sequelize.query<TaskTimeEntryRecord>(
+      `
+        SELECT
+          entry.id,
+          entry.task_id AS "taskId",
+          entry.user_id AS "userId",
+          entry.duration_minutes AS "durationMinutes",
+          entry.comment,
+          entry."createdAt",
+          actor.id AS "actorId",
+          actor.login AS "actorLogin",
+          actor.initial AS "actorInitial",
+          actor.image AS "actorImage"
+        FROM task_time_entries entry
+        INNER JOIN users actor ON actor.id = entry.user_id
+        WHERE entry.task_id = :taskId
+          ${query.beforeId ? 'AND entry.id < :beforeId' : ''}
+        ORDER BY entry.id DESC
+        LIMIT :limit
+      `,
+      {
+        replacements: {
+          taskId: id,
+          beforeId: query.beforeId,
+          limit: pageSize + 1
+        },
+        type: QueryTypes.SELECT
+      }
+    );
+    const hasNextPage = records.length > pageSize;
+    const pageRecords = hasNextPage ? records.slice(0, pageSize) : records;
+
+    return {
+      items: pageRecords.map(record => this.mapTaskTimeEntry(record)),
+      nextCursor: hasNextPage
+        ? Number(pageRecords[pageRecords.length - 1].id)
+        : null
+    };
+  }
+
+  /** Создаёт запись времени от имени текущего пользователя. */
+  async createTimeEntry(
+    id: number,
+    dto: CreateTaskTimeEntryDto,
+    userId: number
+  ): Promise<TaskTimeEntry> {
+    const transaction = await this.sequelize.transaction();
+
+    try {
+      await this.assertTaskAccess(id, userId, transaction);
+      const comment = dto.comment?.trim() || null;
+      const [record] = await this.sequelize.query<TaskTimeEntryRecord>(
+        `
+          WITH inserted AS (
+            INSERT INTO task_time_entries (
+              task_id,
+              user_id,
+              duration_minutes,
+              comment,
+              "createdAt"
+            )
+            VALUES (:taskId, :userId, :durationMinutes, :comment, CURRENT_TIMESTAMP)
+            RETURNING id, task_id, user_id, duration_minutes, comment, "createdAt"
+          )
+          SELECT
+            inserted.id,
+            inserted.task_id AS "taskId",
+            inserted.user_id AS "userId",
+            inserted.duration_minutes AS "durationMinutes",
+            inserted.comment,
+            inserted."createdAt",
+            actor.id AS "actorId",
+            actor.login AS "actorLogin",
+            actor.initial AS "actorInitial",
+            actor.image AS "actorImage"
+          FROM inserted
+          INNER JOIN users actor ON actor.id = inserted.user_id
+        `,
+        {
+          replacements: {
+            taskId: id,
+            userId,
+            durationMinutes: dto.durationMinutes,
+            comment
+          },
+          transaction,
+          type: QueryTypes.SELECT
+        }
+      );
+      if (!record) {
+        throw new HttpException(
+          'Не удалось добавить время выполнения',
+          HttpStatus.INTERNAL_SERVER_ERROR
+        );
+      }
+
+      await transaction.commit();
+      return this.mapTaskTimeEntry(record);
+    } catch (error) {
+      await transaction.rollback();
+      if (error instanceof HttpException) throw error;
+      this.logger.error('createTimeEntry failed', error);
+      throw new HttpException(
+        'Ошибка при добавлении времени выполнения',
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
   }
 
   /**
@@ -692,6 +1155,11 @@ export class TasksService {
           transaction
         );
       }
+      const customAttributeValues = await this.normalizeCustomAttributeValues(
+        projectId,
+        dto.customAttributeValues,
+        transaction
+      );
 
       const taskCounter = await this.allocateTaskNumbers(
         projectId,
@@ -718,7 +1186,9 @@ export class TasksService {
           description: dto.description || '',
           priority: dto.priority || '',
           approvalStatus: dto.approvalStatus || '',
-          dueDate: dto.dueDate || null,
+          dueDate: dto.dueDate || dto.startDate || new Date(),
+          startDate: dto.startDate || new Date(),
+          customAttributeValues,
           columnId,
           order: 0,
           createdById: userId
@@ -736,7 +1206,6 @@ export class TasksService {
           { transaction }
         );
       }
-
       // Добавляем теги
       if (dto.tagIds?.length) {
         await this.taskTagRepository.bulkCreate(
@@ -814,6 +1283,11 @@ export class TasksService {
           transaction
         );
       }
+      const customAttributeValues = await this.normalizeCustomAttributeValues(
+        projectId,
+        dto.customAttributeValues,
+        transaction
+      );
 
       const taskCounter = await this.allocateTaskNumbers(
         projectId,
@@ -827,7 +1301,10 @@ export class TasksService {
           title: dto.title,
           description: dto.description || '',
           priority: dto.priority || '',
-          dueDate: dto.dueDate || null,
+          approvalStatus: dto.approvalStatus || '',
+          dueDate: dto.dueDate || dto.startDate || new Date(),
+          startDate: dto.startDate || new Date(),
+          customAttributeValues,
           columnId: parent.columnId,
           parentTaskId: parentId,
           order: 0,
@@ -916,10 +1393,28 @@ export class TasksService {
    */
   async getSubtasks(parentId: number, userId: number): Promise<Task[]> {
     try {
-      await this.assertTaskAccess(parentId, userId);
+      const parent = await this.assertTaskAccess(
+        parentId,
+        userId,
+        undefined,
+        false,
+        true
+      );
+      const { board } = await this.getColumnLocation(
+        parent.columnId,
+        undefined,
+        true
+      );
+      const archive =
+        parent.deletedAt || board.deletedAt ? 'archived' : 'active';
+
       return await this.taskRepository.findAll({
-        where: { parentTaskId: parentId },
-        include: this.taskIncludes(),
+        ...this.archiveTaskOptions(archive, Boolean(board.deletedAt)),
+        where: {
+          ...this.archiveTaskOptions(archive, Boolean(board.deletedAt)).where,
+          parentTaskId: parentId
+        },
+        include: this.taskIncludes(archive, Boolean(board.deletedAt)),
         order: [['createdAt', 'ASC']]
       });
     } catch (error) {
@@ -950,11 +1445,21 @@ export class TasksService {
           transaction
         );
       }
+      const customAttributeValues =
+        dto.customAttributeValues === undefined
+          ? undefined
+          : await this.normalizeCustomAttributeValues(
+              projectId,
+              dto.customAttributeValues,
+              transaction
+            );
       const before = {
         title: task.title,
         description: task.description,
         priority: task.priority,
         dueDate: this.normalizeDate(task.dueDate),
+        startDate: this.normalizeDate(task.startDate),
+        customAttributeValues: task.customAttributeValues,
         approvalStatus: task.approvalStatus,
         columnId: task.columnId,
         order: task.order,
@@ -980,6 +1485,10 @@ export class TasksService {
       if (dto.description !== undefined) task.description = dto.description;
       if (dto.priority !== undefined) task.priority = dto.priority;
       if (dto.dueDate !== undefined) task.dueDate = dto.dueDate as any;
+      if (dto.startDate !== undefined) task.startDate = dto.startDate as any;
+      if (customAttributeValues !== undefined) {
+        task.customAttributeValues = customAttributeValues;
+      }
       if (dto.approvalStatus !== undefined)
         task.approvalStatus = dto.approvalStatus;
       if (dto.parentTaskId !== undefined) task.parentTaskId = dto.parentTaskId;
@@ -1040,6 +1549,18 @@ export class TasksService {
         changedFields.dueDate = {
           before: before.dueDate,
           after: this.normalizeDate(task.dueDate)
+        };
+      }
+      if (dto.startDate !== undefined) {
+        changedFields.startDate = {
+          before: before.startDate,
+          after: this.normalizeDate(task.startDate)
+        };
+      }
+      if (customAttributeValues !== undefined) {
+        changedFields.customAttributeValues = {
+          before: before.customAttributeValues,
+          after: task.customAttributeValues
         };
       }
       if (dto.approvalStatus !== undefined) {
@@ -1209,13 +1730,15 @@ export class TasksService {
 
   private async getTaskHierarchy(
     root: Task,
-    transaction: Transaction
+    transaction: Transaction,
+    includeArchived = false
   ): Promise<Task[]> {
     const hierarchy: Task[] = [root];
     let parentIds = [root.id];
 
     while (parentIds.length) {
       const children = await this.taskRepository.findAll({
+        ...(includeArchived ? { paranoid: false } : {}),
         where: { parentTaskId: parentIds },
         order: [
           ['parentTaskId', 'ASC'],
@@ -1390,6 +1913,8 @@ export class TasksService {
 
         hierarchy.forEach((item, index) => {
           item.taskNumber = firstTaskNumber + index;
+          // Определения кастомных полей принадлежат исходному проекту.
+          item.customAttributeValues = {};
         });
 
         await this.taskTagRepository.destroy({
@@ -1515,7 +2040,12 @@ export class TasksService {
       );
 
       const boardId = await this.getBoardIdByColumnId(task.columnId);
-      await task.destroy({ transaction });
+      const hierarchy = await this.getTaskHierarchy(task, transaction);
+      // Дочерние задачи тоже остаются в архиве, а не теряются из-за скрытого родителя.
+      await this.taskRepository.destroy({
+        where: { id: { [Op.in]: hierarchy.map(item => item.id) } },
+        transaction
+      });
       await this.activityEvents.create(
         {
           projectId,
@@ -1547,6 +2077,67 @@ export class TasksService {
         HttpStatus.INTERNAL_SERVER_ERROR
       );
     }
+  }
+
+  /** Восстанавливает задачу и её подзадачи в исходных колонках активной доски. */
+  async restore(id: number, userId: number): Promise<Task> {
+    const boardId = await this.sequelize.transaction(async transaction => {
+      const task = await this.assertTaskAccess(
+        id,
+        userId,
+        transaction,
+        true,
+        true
+      );
+      const { board } = await this.getColumnLocation(
+        task.columnId,
+        transaction,
+        true
+      );
+      if (board.deletedAt)
+        throw new HttpException(
+          'Сначала верните доску из архива',
+          HttpStatus.BAD_REQUEST
+        );
+      if (!task.deletedAt) return null;
+
+      if (task.parentTaskId) {
+        const parent = await this.taskRepository.findByPk(task.parentTaskId, {
+          transaction,
+          paranoid: false
+        });
+        if (parent?.deletedAt)
+          throw new HttpException(
+            'Сначала верните родительскую задачу из архива',
+            HttpStatus.BAD_REQUEST
+          );
+      }
+      const hierarchy = await this.getTaskHierarchy(task, transaction, true);
+      await this.taskRepository.restore({
+        where: { id: { [Op.in]: hierarchy.map(item => item.id) } },
+        transaction
+      });
+      await this.activityEvents.create(
+        {
+          projectId: board.projectId,
+          entityType: ActivityEntityType.Task,
+          entityId: String(id),
+          actionType: ActivityActionType.Updated,
+          actorUserId: userId,
+          changes: this.activityEvents.buildChanges({
+            archived: { before: true, after: false }
+          }),
+          metadata: { taskNumber: task.taskNumber }
+        },
+        { transaction }
+      );
+
+      return board.id;
+    });
+    const restoredTask = await this.getById(id, userId);
+    if (boardId !== null) this.wsGateway.emitTaskCreated(boardId, restoredTask);
+
+    return restoredTask;
   }
 
   /**

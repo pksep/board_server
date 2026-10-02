@@ -148,6 +148,9 @@ export class ProjectsService {
           title: dto.title,
           prefix: dto.prefix.toUpperCase(),
           description: dto.description || '',
+          taskAttributeDefinitions: this.normalizeTaskAttributeDefinitions(
+            dto.taskAttributeDefinitions
+          ),
           createdById: userId
         } as any,
         { transaction }
@@ -199,6 +202,10 @@ export class ProjectsService {
 
       if (dto.title !== undefined) project.title = dto.title;
       if (dto.description !== undefined) project.description = dto.description;
+      if (dto.taskAttributeDefinitions !== undefined) {
+        project.taskAttributeDefinitions =
+          this.normalizeTaskAttributeDefinitions(dto.taskAttributeDefinitions);
+      }
 
       await project.save({ transaction });
 
@@ -363,6 +370,30 @@ export class ProjectsService {
       where: { prefix: prefix.toUpperCase() }
     });
     return { available: !existing };
+  }
+
+  /** Нормализует определения и запрещает дубли ID или названий внутри проекта. */
+  private normalizeTaskAttributeDefinitions(
+    definitions: CreateProjectDto['taskAttributeDefinitions'] = []
+  ): NonNullable<CreateProjectDto['taskAttributeDefinitions']> {
+    const normalized = definitions.map(definition => ({
+      id: definition.id,
+      name: definition.name.trim(),
+      type: definition.type
+    }));
+    const ids = new Set(normalized.map(definition => definition.id));
+    const names = new Set(
+      normalized.map(definition => definition.name.toLocaleLowerCase('ru'))
+    );
+
+    if (ids.size !== normalized.length || names.size !== normalized.length) {
+      throw new HttpException(
+        'Названия и идентификаторы атрибутов проекта не должны повторяться',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    return normalized;
   }
 
   /** Одним запросом рассчитывает следующую позицию проекта для всех участников. */

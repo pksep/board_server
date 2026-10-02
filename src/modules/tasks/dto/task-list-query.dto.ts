@@ -4,6 +4,7 @@ import {
   ArrayMaxSize,
   IsArray,
   IsBoolean,
+  IsDateString,
   IsIn,
   IsInt,
   IsOptional,
@@ -38,6 +39,11 @@ function parseQueryBoolean(value: unknown): unknown {
 }
 
 export class TaskListQueryDto {
+  @ApiPropertyOptional({ enum: ['active', 'archived'], default: 'active' })
+  @IsOptional()
+  @IsIn(['active', 'archived'])
+  archive?: 'active' | 'archived';
+
   @ApiPropertyOptional({
     example: 5,
     minimum: 1,
@@ -85,6 +91,18 @@ export class TaskListQueryDto {
   assigneeIds?: number[];
 
   @ApiPropertyOptional({
+    example: '7,15',
+    description: 'Идентификаторы создателей; внутри группы применяется OR'
+  })
+  @IsOptional()
+  @Transform(({ value }) => parseNumberQueryList(value))
+  @IsArray()
+  @ArrayMaxSize(100)
+  @IsInt({ each: true })
+  @Min(1, { each: true })
+  creatorIds?: number[];
+
+  @ApiPropertyOptional({
     example: 'high,urgent',
     description: 'Приоритеты; внутри группы применяется OR'
   })
@@ -106,6 +124,34 @@ export class TaskListQueryDto {
   @IsInt({ each: true })
   @Min(1, { each: true })
   tagIds?: number[];
+
+  @ApiPropertyOptional({
+    description: 'Дата начала работ: от указанного момента включительно'
+  })
+  @IsOptional()
+  @IsDateString({ strict: true })
+  startDateFrom?: string;
+
+  @ApiPropertyOptional({
+    description: 'Дата начала работ: до указанного момента включительно'
+  })
+  @IsOptional()
+  @IsDateString({ strict: true })
+  startDateTo?: string;
+
+  @ApiPropertyOptional({
+    description: 'Дата исполнения: от указанного момента включительно'
+  })
+  @IsOptional()
+  @IsDateString({ strict: true })
+  dueDateFrom?: string;
+
+  @ApiPropertyOptional({
+    description: 'Дата исполнения: до указанного момента включительно'
+  })
+  @IsOptional()
+  @IsDateString({ strict: true })
+  dueDateTo?: string;
 
   @ApiPropertyOptional({
     example: true,

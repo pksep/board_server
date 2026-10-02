@@ -9,6 +9,7 @@ import {
   HasMany
 } from 'sequelize-typescript';
 import { User } from 'src/modules/users/model/users.model';
+import { TTaskAttributeValues } from 'src/modules/projects/interfaces/task-attribute.interface';
 
 // Lazy requires для решения circular dependency (SWC live bindings)
 const lazyBoardColumn = () =>
@@ -65,9 +66,27 @@ export class Task extends Model<Task> {
   })
   approvalStatus: string;
 
-  @ApiProperty({ description: 'Дедлайн' })
+  @ApiProperty({ description: 'Дата исполнения' })
   @Column({ type: DataType.DATE, allowNull: true, field: 'due_date' })
   dueDate: Date;
+
+  @ApiProperty({ description: 'Дата начала работ' })
+  @Column({
+    type: DataType.DATE,
+    allowNull: false,
+    defaultValue: DataType.NOW,
+    field: 'start_date'
+  })
+  startDate: Date;
+
+  @ApiProperty({ description: 'Значения пользовательских атрибутов задачи' })
+  @Column({
+    type: DataType.JSONB,
+    allowNull: false,
+    defaultValue: {},
+    field: 'custom_attribute_values'
+  })
+  customAttributeValues: TTaskAttributeValues;
 
   @ApiProperty({ example: 1, description: 'ID колонки' })
   @ForeignKey(lazyBoardColumn)

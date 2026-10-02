@@ -1,4 +1,5 @@
 import { WsGateway } from '../ws.gateway';
+import { getErpSessionHash } from '../../auth/utils/board-session';
 
 describe('WsGateway connection authentication', () => {
   const originalNodeEnv = process.env.NODE_ENV;
@@ -27,8 +28,13 @@ describe('WsGateway connection authentication', () => {
     process.env.NODE_ENV = originalNodeEnv;
   });
 
-  it('предпочитает собственный board_token при наличии двух cookie', () => {
-    const verify = jest.fn().mockReturnValue({ id: 7, login: 'reader' });
+  it('принимает board_token, привязанный к текущей ERP-сессии', () => {
+    const user = {
+      id: 7,
+      login: 'reader',
+      erpTokenHash: getErpSessionHash('erp-token')
+    };
+    const verify = jest.fn().mockReturnValue(user);
     const gateway = createGateway(verify);
     const client = createClient(
       'access_token=erp-token; board_token=board-token'
@@ -38,11 +44,11 @@ describe('WsGateway connection authentication', () => {
 
     expect(verify).toHaveBeenCalledTimes(1);
     expect(verify).toHaveBeenCalledWith('board-token');
-    expect(client.user).toEqual({ id: 7, login: 'reader' });
+    expect(client.user).toEqual(user);
     expect(client.disconnect).not.toHaveBeenCalled();
   });
 
-  it('проверяет access_token после невалидного board_token', () => {
+  it('не использует ERP ID как ID доски после невалидного board_token', () => {
     const verify = jest.fn((token: string) => {
       if (token === 'board-token') throw new Error('expired');
       return { id: 8, login: 'editor' };
@@ -54,8 +60,47 @@ describe('WsGateway connection authentication', () => {
 
     gateway.handleConnection(client);
 
-    expect(verify.mock.calls).toEqual([['board-token'], ['erp-token']]);
-    expect(client.user).toEqual({ id: 8, login: 'editor' });
+    expect(verify.mock.calls).toEqual([['board-token']]);
+    expect(client.user).toBeUndefined();
+    expect(client.disconnect).toHaveBeenCalledWith(true);
+  });
+
+  it.each(['erp-B', undefined])(
+    'отклоняет канал старого аккаунта при ERP-cookie %p',
+    erpToken => {
+      const verify = jest
+        .fn()
+        .mockReturnValue({ id: 7, erpTokenHash: getErpSessionHash('erp-A') });
+      const gateway = createGateway(verify);
+      const client = createClient(
+        `board_token=board-A${erpToken ? `; access_token=${erpToken}` : ''}`
+      );
+
+      gateway.handleConnection(client);
+
+      expect(client.user).toBeUndefined();
+      expect(client.disconnect).toHaveBeenCalledWith(true);
+    }
+  );
+
+  it('не подменяет неверную сессию dev-пользователем', () => {
+    process.env.NODE_ENV = 'development';
+    const gateway = createGateway(jest.fn().mockReturnValue({ id: 7 }));
+    const client = createClient('board_token=old-token; access_token=erp-B');
+
+    gateway.handleConnection(client);
+
+    expect(client.user).toBeUndefined();
+    expect(client.disconnect).toHaveBeenCalledWith(true);
+  });
+
+  it('сохраняет локальный dev-вход без обеих cookie', () => {
+    process.env.NODE_ENV = 'development';
+    const client = createClient('');
+
+    createGateway(jest.fn()).handleConnection(client);
+
+    expect(client.user.id).toBe(1);
     expect(client.disconnect).not.toHaveBeenCalled();
   });
 

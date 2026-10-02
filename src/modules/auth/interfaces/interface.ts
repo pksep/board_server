@@ -6,3 +6,8 @@ export interface IUserDataToken {
   initial?: string;
   role?: string;
 }
+
+/** Сессия доски действительна только вместе с ERP-сессией, из которой выдана. */
+export interface IBoardSessionToken extends IUserDataToken {
+  erpTokenHash: string;
+}

@@ -52,11 +52,18 @@ export class BoardsService {
       const isPaginated = query.limit !== undefined;
       const limit = query.limit ?? 0;
       const offset = query.offset ?? 0;
+      const archiveOptions =
+        query.archive === 'archived'
+          ? {
+              paranoid: false,
+              where: { projectId, deletedAt: { [Op.ne]: null } }
+            }
+          : { where: { projectId } };
       const total = isPaginated
-        ? await this.boardRepository.count({ where: { projectId } })
+        ? await this.boardRepository.count(archiveOptions)
         : 0;
       const boards = await this.boardRepository.findAll({
-        where: { projectId },
+        ...archiveOptions,
         include: [{ association: 'columns', attributes: ['id'] }],
         order: [
           ['order', 'ASC'],
@@ -82,6 +89,7 @@ export class BoardsService {
 
       if (columnIds.length) {
         const taskCounts = await this.taskRepository.findAll({
+          ...(query.archive === 'archived' ? { paranoid: false } : {}),
           attributes: [
             'columnId',
             [
@@ -147,13 +155,16 @@ export class BoardsService {
 
   async getById(id: number, userId: number): Promise<Board> {
     try {
-      const plainBoard = await this.boardRepository.findByPk(id);
+      const plainBoard = await this.boardRepository.findByPk(id, {
+        paranoid: false
+      });
       if (!plainBoard) {
         throw new HttpException('Доска не найдена', HttpStatus.NOT_FOUND);
       }
       await this.projectAccess.assertCanRead(plainBoard.projectId, userId);
 
       const board = await this.boardRepository.findByPk(id, {
+        paranoid: false,
         include: [
           {
             association: 'columns',
@@ -183,18 +194,65 @@ export class BoardsService {
   ): Promise<Board> {
     try {
       await this.projectAccess.assertCanRead(projectId, userId);
-      const maxOrder = await this.boardRepository.max<number, Board>('order', {
-        where: { projectId }
-      });
 
-      const board = await this.boardRepository.create({
-        projectId,
-        title: dto.title,
-        startDate: dto.startDate || null,
-        endDate: dto.endDate || null,
-        order: (maxOrder || 0) + 1
-      } as any);
-      return board;
+      return await this.boardRepository.sequelize.transaction(
+        async transaction => {
+          let sourceColumns: BoardColumn[] = [];
+
+          if (dto.sourceBoardId) {
+            const sourceBoard = await this.boardRepository.findOne({
+              attributes: ['id'],
+              where: { id: dto.sourceBoardId, projectId },
+              transaction
+            });
+
+            if (!sourceBoard) {
+              throw new HttpException(
+                'Исходная доска не принадлежит проекту',
+                HttpStatus.BAD_REQUEST
+              );
+            }
+
+            sourceColumns = await this.columnRepository.findAll({
+              where: { boardId: sourceBoard.id },
+              order: [['order', 'ASC']],
+              transaction
+            });
+          }
+
+          const maxOrder = await this.boardRepository.max<number, Board>(
+            'order',
+            {
+              where: { projectId },
+              transaction
+            }
+          );
+          const board = await this.boardRepository.create(
+            {
+              projectId,
+              title: dto.title,
+              startDate: dto.startDate || null,
+              endDate: dto.endDate || null,
+              order: (maxOrder || 0) + 1
+            } as any,
+            { transaction }
+          );
+
+          if (sourceColumns.length) {
+            await this.columnRepository.bulkCreate(
+              sourceColumns.map(column => ({
+                boardId: board.id,
+                title: column.title,
+                color: column.color,
+                order: column.order
+              })),
+              { transaction }
+            );
+          }
+
+          return board;
+        }
+      );
     } catch (error) {
       if (error instanceof HttpException) throw error;
       this.logger.error('create board failed', error);
@@ -259,12 +317,30 @@ export class BoardsService {
 
   async delete(id: number, userId: number): Promise<void> {
     try {
-      const board = await this.boardRepository.findByPk(id);
-      if (!board) {
-        throw new HttpException('Доска не найдена', HttpStatus.NOT_FOUND);
-      }
-      await this.projectAccess.assertCanRead(board.projectId, userId);
-      await board.destroy();
+      // Одна транзакция сохраняет задачи, их колонки и саму доску как единый архив.
+      await this.boardRepository.sequelize.transaction(async transaction => {
+        const board = await this.boardRepository.findByPk(id, {
+          transaction,
+          lock: transaction.LOCK.UPDATE
+        });
+        if (!board)
+          throw new HttpException('Доска не найдена', HttpStatus.NOT_FOUND);
+        await this.projectAccess.assertCanRead(
+          board.projectId,
+          userId,
+          transaction
+        );
+        const columns = await this.columnRepository.findAll({
+          where: { boardId: id },
+          attributes: ['id'],
+          transaction
+        });
+        await this.taskRepository.destroy({
+          where: { columnId: { [Op.in]: columns.map(column => column.id) } },
+          transaction
+        });
+        await board.destroy({ transaction });
+      });
     } catch (error) {
       if (error instanceof HttpException) throw error;
       this.logger.error('delete board failed', error);
@@ -273,5 +349,42 @@ export class BoardsService {
         HttpStatus.INTERNAL_SERVER_ERROR
       );
     }
+  }
+
+  /** Возвращает доску и все её задачи, не меняя их исходное расположение. */
+  async restore(id: number, userId: number): Promise<Board> {
+    const board = await this.boardRepository.sequelize.transaction(
+      async transaction => {
+        const archivedBoard = await this.boardRepository.findByPk(id, {
+          paranoid: false,
+          transaction,
+          lock: transaction.LOCK.UPDATE
+        });
+        if (!archivedBoard)
+          throw new HttpException('Доска не найдена', HttpStatus.NOT_FOUND);
+        await this.projectAccess.assertCanRead(
+          archivedBoard.projectId,
+          userId,
+          transaction
+        );
+        if (!archivedBoard.deletedAt) return archivedBoard;
+
+        const columns = await this.columnRepository.findAll({
+          where: { boardId: id },
+          attributes: ['id'],
+          transaction
+        });
+        // Восстановление повторного запроса безопасно и сохраняет идентификаторы записей.
+        await archivedBoard.restore({ transaction });
+        await this.taskRepository.restore({
+          where: { columnId: { [Op.in]: columns.map(column => column.id) } },
+          transaction
+        });
+
+        return archivedBoard;
+      }
+    );
+
+    return board;
   }
 }
