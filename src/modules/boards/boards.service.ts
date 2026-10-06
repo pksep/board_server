@@ -244,6 +244,7 @@ export class BoardsService {
                 boardId: board.id,
                 title: column.title,
                 color: column.color,
+                status: column.status ?? null,
                 order: column.order
               })),
               { transaction }

@@ -4,6 +4,7 @@ import { Op, Transaction } from 'sequelize';
 import { BoardsService } from './boards.service';
 import { Board } from './model/board.model';
 import { BoardColumn } from '../columns/model/board-column.model';
+import { ColumnStatus } from '../columns/interfaces/column-status.interface';
 import { ProjectAccessService } from '../projects/project-access.service';
 import { Task } from '../tasks/model/task.model';
 import { WsGateway } from '../ws/ws.gateway';
@@ -116,12 +117,19 @@ describe('BoardsService.getByProject', () => {
 });
 
 describe('BoardsService.create', () => {
-  it('копирует названия, цвета и порядок столбцов текущей доски', async () => {
+  it('копирует названия, цвета, статусы и порядок столбцов текущей доски', async () => {
     const transaction = {} as Transaction;
     const sourceBoard = { id: 10 };
     const createdBoard = { id: 20, title: 'Новая доска' };
     const sourceColumns = [
-      { id: 1, boardId: 10, title: 'Очередь', color: '#111111', order: 0 },
+      {
+        id: 1,
+        boardId: 10,
+        title: 'Очередь',
+        color: '#111111',
+        status: ColumnStatus.Queued,
+        order: 0
+      },
       { id: 2, boardId: 10, title: 'Готово', color: '#22aa22', order: 1 }
     ];
     const boardRepository = {
@@ -172,8 +180,20 @@ describe('BoardsService.create', () => {
     });
     expect(columnRepository.bulkCreate).toHaveBeenCalledWith(
       [
-        { boardId: 20, title: 'Очередь', color: '#111111', order: 0 },
-        { boardId: 20, title: 'Готово', color: '#22aa22', order: 1 }
+        {
+          boardId: 20,
+          title: 'Очередь',
+          color: '#111111',
+          status: ColumnStatus.Queued,
+          order: 0
+        },
+        {
+          boardId: 20,
+          title: 'Готово',
+          color: '#22aa22',
+          status: null,
+          order: 1
+        }
       ],
       { transaction }
     );
