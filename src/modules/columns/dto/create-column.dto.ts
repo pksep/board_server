@@ -1,5 +1,12 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
+import {
+  IsEnum,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  MaxLength
+} from 'class-validator';
+import { ColumnStatus } from '../interfaces/column-status.interface';
 
 export class CreateColumnDto {
   @ApiProperty({ example: 'В работе', description: 'Название колонки' })
@@ -13,4 +20,9 @@ export class CreateColumnDto {
   @IsString()
   @MaxLength(64)
   color?: string;
+
+  @ApiProperty({ enum: ColumnStatus, required: false, nullable: true })
+  @IsOptional()
+  @IsEnum(ColumnStatus)
+  status?: ColumnStatus | null;
 }

@@ -10,6 +10,12 @@ import { JwtService } from '@nestjs/jwt';
 import { InjectModel } from '@nestjs/sequelize';
 import { IS_PUBLIC_KEY } from './public.decorator';
 import { User } from '../users/model/users.model';
+import { IUserDataToken } from './interfaces/interface';
+import {
+  getErpSessionHash,
+  isCurrentBoardSession
+} from './utils/board-session';
+
 import { AccessTokenService } from './access-token.service';
 
 /** Имя cookie, которую выдаёт board-сервер */
@@ -41,7 +47,7 @@ export class TokenAuth implements CanActivate {
     private accessTokenService: AccessTokenService
   ) {}
 
-  async canActivate(context: ExecutionContext) {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     // @Public() — пропускаем
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
       context.getHandler(),
@@ -67,6 +73,10 @@ export class TokenAuth implements CanActivate {
 
     const isLocalhost =
       this.isDev && ['localhost', '127.0.0.1'].includes(req.hostname);
+    const boardToken = req.cookies?.[BOARD_TOKEN_COOKIE];
+    const erpToken = req.cookies?.[ERP_TOKEN_COOKIE];
+    // Неверная/удалённая сессия не должна превращаться в вход dev-администратора.
+    const allowDevFallback = isLocalhost && !boardToken && !erpToken;
 
     // При включённом SEP Auth board_token не должен обходить отзыв общей сессии.
     if (this.accessTokenService.isEnabled()) {
@@ -88,20 +98,20 @@ export class TokenAuth implements CanActivate {
 
     try {
       // ──────────────────────────────────────────────
-      // 1. Есть board_token → верифицируем ЛОКАЛЬНО
+      // 1. При неизменной ERP-сессии board_token проверяется локально.
       // ──────────────────────────────────────────────
-      const boardToken = req.cookies?.[BOARD_TOKEN_COOKIE];
-
       if (boardToken) {
         try {
-          const decoded = this.jwtService.verify(boardToken);
-          const user = await this.userRepository.findOne({
-            where: { id: decoded.id }
-          });
+          const decoded = this.jwtService.verify<object>(boardToken);
+          if (isCurrentBoardSession(decoded, erpToken)) {
+            const user = await this.userRepository.findOne({
+              where: { id: decoded.id }
+            });
 
-          if (user && !user.ban) {
-            req.user = this.accessTokenService.toUserPayload(user);
-            return true;
+            if (user && !user.ban) {
+              req.user = this.accessTokenService.toUserPayload(user);
+              return true;
+            }
           }
         } catch {
           // board_token невалиден или истёк — пробуем ERP токен
@@ -112,14 +122,15 @@ export class TokenAuth implements CanActivate {
       // ──────────────────────────────────────────────
       // 2. Есть access_token (ERP) → обмен через ERP
       // ──────────────────────────────────────────────
-      const erpToken = req.cookies?.[ERP_TOKEN_COOKIE];
-
       if (erpToken) {
         const user = await this.accessTokenService.authenticate(erpToken);
 
         // Выдаём СВОЙ board_token только в прежнем режиме.
         const newBoardToken = this.jwtService.sign(
-          this.accessTokenService.toUserPayload(user),
+          {
+            ...this.accessTokenService.toUserPayload(user),
+            erpTokenHash: getErpSessionHash(erpToken)
+          },
           { expiresIn: '24h' }
         );
 
@@ -137,7 +148,7 @@ export class TokenAuth implements CanActivate {
       // ──────────────────────────────────────────────
       // 3. Нет токенов → dev fallback или 401
       // ──────────────────────────────────────────────
-      if (isLocalhost) {
+      if (allowDevFallback) {
         req.user = await this.getDevFallbackUser();
         return true;
       }
@@ -151,7 +162,7 @@ export class TokenAuth implements CanActivate {
         `Auth error: ${error instanceof Error ? error.message : String(error)}`
       );
 
-      if (isLocalhost) {
+      if (allowDevFallback) {
         req.user = await this.getDevFallbackUser();
         return true;
       }
@@ -163,7 +174,7 @@ export class TokenAuth implements CanActivate {
   }
 
   /** Dev-fallback пользователь */
-  private async getDevFallbackUser() {
+  private async getDevFallbackUser(): Promise<IUserDataToken> {
     const user = await this.userRepository.findOne({ where: { id: 1 } });
     if (user) return this.accessTokenService.toUserPayload(user);
     return { id: 1, login: 'admin', serviceNumber: '001' };

@@ -91,6 +91,7 @@ export class ColumnsService {
           boardId,
           title: dto.title,
           color: dto.color || null,
+          status: dto.status ?? null,
           order: (maxOrder || 0) + 1
         } as any,
         { transaction }
@@ -122,6 +123,7 @@ export class ColumnsService {
       const column = await this.getAccessibleColumn(id, userId);
       if (dto.title !== undefined) column.title = dto.title;
       if (dto.color !== undefined) column.color = dto.color;
+      if (dto.status !== undefined) column.status = dto.status;
       await column.save();
 
       // WS

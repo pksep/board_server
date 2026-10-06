@@ -12,6 +12,9 @@ import {
   IsInt,
   Min
 } from 'class-validator';
+import { Type } from 'class-transformer';
+import { ValidateNested } from 'class-validator';
+import { ProjectTaskAttributeDto } from './project-task-attribute.dto';
 
 export class CreateProjectDto {
   @ApiProperty({ example: 'Мой проект', description: 'Название проекта' })
@@ -47,4 +50,15 @@ export class CreateProjectDto {
   @IsInt({ each: true })
   @Min(1, { each: true })
   membersIds?: number[];
+
+  @ApiProperty({
+    type: [ProjectTaskAttributeDto],
+    description: 'Пользовательские атрибуты задач проекта'
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(50)
+  @ValidateNested({ each: true })
+  @Type(() => ProjectTaskAttributeDto)
+  taskAttributeDefinitions?: ProjectTaskAttributeDto[];
 }

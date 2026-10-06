@@ -9,6 +9,7 @@ import {
   BelongsTo
 } from 'sequelize-typescript';
 import { User } from 'src/modules/users/model/users.model';
+import { ITaskAttributeDefinition } from '../interfaces/task-attribute.interface';
 
 // Lazy requires для решения circular dependency (SWC live bindings)
 // Project ↔ ProjectMember, Project ↔ Board, Project ↔ ProjectTag, Project ↔ UserFavorite
@@ -50,6 +51,18 @@ export class Project extends Model<Project> {
   @ApiProperty({ example: 'Описание проекта', description: 'Описание' })
   @Column({ type: DataType.TEXT, allowNull: true })
   description: string;
+
+  @ApiProperty({
+    description: 'Пользовательские атрибуты задач проекта',
+    isArray: true
+  })
+  @Column({
+    type: DataType.JSONB,
+    allowNull: false,
+    defaultValue: [],
+    field: 'task_attribute_definitions'
+  })
+  taskAttributeDefinitions: ITaskAttributeDefinition[];
 
   @ApiProperty({
     example: 0,

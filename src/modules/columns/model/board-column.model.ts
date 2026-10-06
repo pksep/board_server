@@ -8,6 +8,7 @@ import {
   BelongsTo,
   HasMany
 } from 'sequelize-typescript';
+import { ColumnStatus } from '../interfaces/column-status.interface';
 
 // Lazy requires для решения circular dependency (BoardColumn ↔ Board, BoardColumn → Task)
 const lazyBoard = () => require('../../boards/model/board.model').Board;
@@ -35,6 +36,19 @@ export class BoardColumn extends Model<BoardColumn> {
   @ApiProperty({ example: '#548CF6', description: 'CSS-цвет' })
   @Col({ type: DataType.STRING, allowNull: true, defaultValue: null })
   color: string;
+
+  @ApiProperty({
+    enum: ColumnStatus,
+    nullable: true,
+    description: 'Статус задач колонки; по умолчанию не выбран'
+  })
+  @Col({
+    type: DataType.STRING(32),
+    allowNull: true,
+    defaultValue: null,
+    validate: { isIn: [Object.values(ColumnStatus)] }
+  })
+  status: ColumnStatus | null;
 
   @ApiProperty({ example: 0, description: 'Порядок' })
   @Col({ type: DataType.INTEGER, allowNull: false, defaultValue: 0 })

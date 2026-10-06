@@ -21,6 +21,9 @@ import { CurrentUser } from '../auth/current-user.decorator';
 import { IUserDataToken } from '../auth/interfaces/interface';
 import { ActivityHistoryQueryDto } from '../activity-events/dto/activity-history-query.dto';
 import { TaskListQueryDto } from './dto/task-list-query.dto';
+import { CreateTaskTimeEntryDto } from './dto/create-task-time-entry.dto';
+import type { TaskTimeEntry, TaskTimeEntryPage } from './tasks.service';
+import type { Task } from './model/task.model';
 
 @ApiTags('Задачи')
 @Controller()
@@ -50,6 +53,26 @@ export class TasksController {
     @CurrentUser() user: IUserDataToken
   ) {
     return this.tasksService.getHistory(+id, user.id, query);
+  }
+
+  @ApiOperation({ summary: 'Получить записи времени задачи' })
+  @Get('tasks/:id/time-entries')
+  getTimeEntries(
+    @Param('id') id: number,
+    @Query() query: ActivityHistoryQueryDto,
+    @CurrentUser() user: IUserDataToken
+  ): Promise<TaskTimeEntryPage> {
+    return this.tasksService.getTimeEntries(+id, user.id, query);
+  }
+
+  @ApiOperation({ summary: 'Добавить фактическое время выполнения задачи' })
+  @Post('tasks/:id/time-entries')
+  createTimeEntry(
+    @Param('id') id: number,
+    @Body() dto: CreateTaskTimeEntryDto,
+    @CurrentUser() user: IUserDataToken
+  ): Promise<TaskTimeEntry> {
+    return this.tasksService.createTimeEntry(+id, dto, user.id);
   }
 
   @ApiOperation({ summary: 'Все задачи колонки' })
@@ -112,6 +135,16 @@ export class TasksController {
   @Delete('tasks/:id')
   delete(@Param('id') id: number, @CurrentUser() user: IUserDataToken) {
     return this.tasksService.delete(+id, user.id);
+  }
+
+  /** Возвращает запись через канонический сервис задач с сохранением прав проекта. */
+  @ApiOperation({ summary: 'Вернуть задачу из архива' })
+  @Post('tasks/:id/restore')
+  restore(
+    @Param('id') id: number,
+    @CurrentUser() user: IUserDataToken
+  ): Promise<Task> {
+    return this.tasksService.restore(+id, user.id);
   }
 
   @ApiOperation({ summary: 'Получить URL для прямой загрузки файла в MinIO' })

@@ -36,7 +36,8 @@ export class AccessTokenService {
       throw new UnauthorizedException('Access token required');
     }
 
-    const externalUser = this.isCentralToken(token)
+    const isCentral = this.isCentralToken(token);
+    const externalUser = isCentral
       ? await this.introspectCentral(token)
       : await this.checkLegacyErp(token);
 
@@ -44,7 +45,7 @@ export class AccessTokenService {
       throw new UnauthorizedException('User is banned');
     }
 
-    return this.syncBoardUser(externalUser);
+    return this.syncBoardUser(externalUser, isCentral);
   }
 
   toUserPayload(user: User): IUserDataToken {
@@ -184,13 +185,17 @@ export class AccessTokenService {
     };
   }
 
-  /** Одно чтение Board БД; UPDATE выполняется только при изменении полей. */
-  private async syncBoardUser(external: IExternalAuthUser): Promise<User> {
+  /** Синхронизирует подтверждённую идентичность, сохраняя ID и права Board. */
+  private async syncBoardUser(
+    external: IExternalAuthUser,
+    isCentral: boolean
+  ): Promise<User> {
     const erpId = String(external.id);
+    const verifiedServiceNumber = external.tabel || external.serviceNumber;
     const values = {
       initial: external.initial || external.login || `User ${erpId}`,
       login: external.login || `user-${erpId}`,
-      serviceNumber: external.tabel || external.serviceNumber || erpId,
+      serviceNumber: verifiedServiceNumber || erpId,
       image: external.image || null,
       ban: external.ban ?? false,
       role: external.role || '-'
@@ -210,7 +215,36 @@ export class AccessTokenService {
     if (byErpId && byServiceNumber && byErpId.id !== byServiceNumber.id) {
       throw new ConflictException('Conflicting Board user identities');
     }
-    const existing = byErpId || byServiceNumber;
+    let existing = byErpId || byServiceNumber;
+
+    // Общая авторизация подтверждает миграцию ERP ID. Прежний ERP-вход
+    // может привязать только свободную запись по явно подтверждённому табелю.
+    if (!isCentral && !byErpId && byServiceNumber) {
+      if (
+        !verifiedServiceNumber ||
+        byServiceNumber.ban ||
+        (byServiceNumber.erpId !== null && byServiceNumber.erpId !== erpId)
+      ) {
+        throw new UnauthorizedException('Legacy Board identity is unavailable');
+      }
+
+      await this.userRepository.update(
+        { erpId },
+        {
+          where: {
+            id: byServiceNumber.id,
+            erpId: null,
+            serviceNumber: verifiedServiceNumber,
+            ban: false
+          }
+        }
+      );
+      existing = await this.userRepository.findOne({ where: { erpId } });
+
+      if (!existing || existing.id !== byServiceNumber.id) {
+        throw new UnauthorizedException('Legacy Board identity was claimed');
+      }
+    }
 
     if (existing) {
       const updates = { erpId, ...values };

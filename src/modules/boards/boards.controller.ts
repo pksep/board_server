@@ -78,4 +78,14 @@ export class BoardsController {
   delete(@Param('id') id: number, @CurrentUser() user: IUserDataToken) {
     return this.boardsService.delete(+id, user.id);
   }
+
+  /** Использует тот же сервис и проверку доступа, что и архивирование доски. */
+  @ApiOperation({ summary: 'Восстановить доску вместе с задачами' })
+  @Post('boards/:id/restore')
+  restore(
+    @Param('id') id: number,
+    @CurrentUser() user: IUserDataToken
+  ): Promise<Board> {
+    return this.boardsService.restore(+id, user.id);
+  }
 }

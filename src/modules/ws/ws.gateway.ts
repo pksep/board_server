@@ -14,6 +14,8 @@ import * as cookie from 'cookie';
 import { InjectModel } from '@nestjs/sequelize';
 import { Board } from '../boards/model/board.model';
 import { ProjectAccessService } from '../projects/project-access.service';
+import { IBoardSessionToken } from '../auth/interfaces/interface';
+import { isCurrentBoardSession } from '../auth/utils/board-session';
 import { AccessTokenService } from '../auth/access-token.service';
 import type { IBoardSocket } from './interfaces/board-socket.interface';
 
@@ -45,20 +47,18 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   // === Подключение / Отключение ===
 
-  /** Проверяет собственный токен доски и сохраняет ERP-токен как fallback. */
-  private verifySocketUser(cookies: Record<string, string>) {
-    const tokens = [
-      cookies[BOARD_TOKEN_COOKIE],
-      cookies[ERP_TOKEN_COOKIE]
-    ].filter(Boolean);
+  /** Подключает только сессию доски, выданную для текущей ERP-cookie через REST. */
+  private verifySocketUser(
+    cookies: Record<string, string>
+  ): IBoardSessionToken | null {
+    const token = cookies[BOARD_TOKEN_COOKIE];
+    if (!token) return null;
 
-    for (const token of tokens) {
-      try {
-        const user = this.jwtService.verify(token);
-        if (Number(user?.id) > 0) return user;
-      } catch {
-        // Истёкший токен не мешает проверить следующий совместимый вариант.
-      }
+    try {
+      const user = this.jwtService.verify<object>(token);
+      if (isCurrentBoardSession(user, cookies[ERP_TOKEN_COOKIE])) return user;
+    } catch {
+      // После смены аккаунта клиент сначала получает новую сессию штатным REST-запросом.
     }
 
     return null;
@@ -86,7 +86,11 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       if (user) {
         boardClient.user = user;
         this.logger.log(`Client connected: ${client.id} (user: ${user.id})`);
-      } else if (process.env.NODE_ENV !== 'production') {
+      } else if (
+        process.env.NODE_ENV !== 'production' &&
+        !cookies[BOARD_TOKEN_COOKIE] &&
+        !cookies[ERP_TOKEN_COOKIE]
+      ) {
         // В dev-режиме подключение без токена допустимо
         boardClient.user = { id: 1, login: 'admin', serviceNumber: '001' };
         this.logger.log(`Client connected: ${client.id} (dev fallback)`);
@@ -96,17 +100,7 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
     } catch (error) {
       this.logger.warn(`Client ${client.id} rejected: invalid token`);
-      if (
-        this.accessTokenService.isEnabled() ||
-        process.env.NODE_ENV === 'production'
-      ) {
-        client.disconnect(true);
-      } else {
-        boardClient.user = { id: 1, login: 'admin', serviceNumber: '001' };
-        this.logger.log(
-          `Client connected: ${client.id} (dev fallback after error)`
-        );
-      }
+      client.disconnect(true);
     }
   }
 
@@ -131,7 +125,9 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
         data: { message: 'boardId is required and must be a number' }
       };
     }
-    const board = await this.boardRepository.findByPk(data.boardId);
+    const board = await this.boardRepository.findByPk(data.boardId, {
+      paranoid: false
+    });
     if (!board) {
       return { event: 'error', data: { message: 'Доска не найдена' } };
     }

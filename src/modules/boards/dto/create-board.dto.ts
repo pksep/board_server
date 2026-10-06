@@ -1,7 +1,9 @@
 import { ApiProperty } from '@nestjs/swagger';
 import {
+  IsInt,
   IsNotEmpty,
   IsOptional,
+  IsPositive,
   IsString,
   IsDateString,
   MaxLength
@@ -25,4 +27,13 @@ export class CreateBoardDto {
   @IsOptional()
   @IsDateString()
   endDate?: string;
+
+  @ApiProperty({
+    description: 'ID текущей доски, из которой нужно скопировать столбцы',
+    required: false
+  })
+  @IsOptional()
+  @IsInt()
+  @IsPositive()
+  sourceBoardId?: number;
 }

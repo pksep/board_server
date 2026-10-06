@@ -12,6 +12,8 @@ import {
   ArrayMaxSize,
   Min
 } from 'class-validator';
+import { IsObject } from 'class-validator';
+import { TTaskAttributeValues } from 'src/modules/projects/interfaces/task-attribute.interface';
 
 export class CreateTaskDto {
   @ApiProperty({ example: 'Исправить баг', description: 'Название задачи' })
@@ -33,10 +35,15 @@ export class CreateTaskDto {
   @IsEnum(['', 'low', 'medium', 'high', 'urgent'])
   priority?: string;
 
-  @ApiProperty({ description: 'Дедлайн' })
+  @ApiProperty({ description: 'Дата исполнения' })
   @IsOptional()
   @IsDateString()
   dueDate?: string;
+
+  @ApiProperty({ description: 'Дата начала работ' })
+  @IsOptional()
+  @IsDateString()
+  startDate?: string;
 
   @ApiProperty({ example: [1, 2], description: 'ID исполнителей' })
   @IsOptional()
@@ -60,4 +67,9 @@ export class CreateTaskDto {
   @IsOptional()
   @IsEnum(['', 'yes', 'no'])
   approvalStatus?: string;
+
+  @ApiProperty({ description: 'Значения пользовательских атрибутов задачи' })
+  @IsOptional()
+  @IsObject()
+  customAttributeValues?: TTaskAttributeValues;
 }

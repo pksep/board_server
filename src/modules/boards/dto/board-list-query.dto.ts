@@ -1,8 +1,13 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, Max, Min } from 'class-validator';
+import { IsIn, IsInt, IsOptional, Max, Min } from 'class-validator';
 
 export class BoardListQueryDto {
+  @ApiPropertyOptional({ enum: ['active', 'archived'], default: 'active' })
+  @IsOptional()
+  @IsIn(['active', 'archived'])
+  archive?: 'active' | 'archived';
+
   @ApiPropertyOptional({
     example: 5,
     minimum: 1,

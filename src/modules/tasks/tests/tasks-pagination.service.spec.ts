@@ -2,11 +2,12 @@ import { Op } from 'sequelize';
 import { TasksService } from '../tasks.service';
 
 describe('TasksService paginated column loading', () => {
+  /** Создаёт сервис с изолированными репозиториями без обращения к рабочей базе. */
   const createService = (
     taskRepository: Record<string, jest.Mock>,
     assigneeRepository: Record<string, jest.Mock> = {},
     taskTagRepository: Record<string, jest.Mock> = {}
-  ) => {
+  ): TasksService => {
     const service = new TasksService(
       taskRepository as any,
       assigneeRepository as any,
@@ -26,6 +27,183 @@ describe('TasksService paginated column loading', () => {
       .mockResolvedValue(undefined);
     return service;
   };
+
+  it('отбирает задачи любого выбранного создателя до пагинации', async () => {
+    const tasks = [
+      { id: 10, parentTaskId: null, createdById: 7 },
+      { id: 12, parentTaskId: null, createdById: 15 },
+      { id: 13, parentTaskId: null, createdById: 22 }
+    ];
+    const taskRepository = {
+      count: jest.fn().mockResolvedValue(2),
+      findAll: jest
+        .fn()
+        .mockResolvedValueOnce(tasks)
+        .mockResolvedValueOnce([tasks[1]])
+    };
+
+    const result = await createService(taskRepository).getByColumn(10, 7, {
+      creatorIds: [7, 15],
+      limit: 1,
+      offset: 1
+    });
+
+    expect(result).toEqual({
+      items: [tasks[1]],
+      total: 2,
+      limit: 1,
+      offset: 1,
+      hasMore: false
+    });
+    expect(taskRepository.findAll).toHaveBeenNthCalledWith(1, {
+      where: { columnId: 10, parentTaskId: null },
+      attributes: ['id', 'parentTaskId', 'createdById'],
+      raw: true
+    });
+    expect(taskRepository.count).toHaveBeenCalledWith({
+      where: { columnId: 10, parentTaskId: null, id: { [Op.in]: [10, 12] } }
+    });
+    expect(taskRepository.findAll).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ limit: 1, offset: 1 })
+    );
+  });
+
+  it('пересекает создателей с исполнителями, тегами и приоритетами одной задачи', async () => {
+    const tasks = [
+      { id: 10, parentTaskId: null, createdById: 7, priority: 'high' },
+      { id: 12, parentTaskId: null, createdById: 15, priority: 'high' },
+      { id: 13, parentTaskId: null, createdById: 22, priority: 'high' }
+    ];
+    const taskRepository = {
+      count: jest.fn().mockResolvedValue(1),
+      findAll: jest
+        .fn()
+        .mockResolvedValueOnce(tasks)
+        .mockResolvedValueOnce([tasks[1]])
+    };
+    const assigneeRepository = {
+      findAll: jest.fn().mockResolvedValue([{ taskId: 12 }, { taskId: 13 }])
+    };
+    const taskTagRepository = {
+      findAll: jest.fn().mockResolvedValue([{ taskId: 12 }])
+    };
+
+    await createService(
+      taskRepository,
+      assigneeRepository,
+      taskTagRepository
+    ).getByColumn(10, 7, {
+      creatorIds: [7, 15],
+      assigneeIds: [30],
+      priorities: ['high'],
+      tagIds: [3],
+      limit: 5
+    });
+
+    expect(taskRepository.findAll).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        where: {
+          columnId: 10,
+          parentTaskId: null,
+          priority: { [Op.in]: ['high'] }
+        }
+      })
+    );
+    expect(assigneeRepository.findAll).toHaveBeenCalledWith({
+      where: { taskId: { [Op.in]: [10, 12] }, userId: { [Op.in]: [30] } },
+      attributes: ['taskId'],
+      raw: true
+    });
+    expect(taskRepository.count).toHaveBeenCalledWith({
+      where: { columnId: 10, parentTaskId: null, id: { [Op.in]: [12] } }
+    });
+  });
+
+  it('учитывает создателя вложенной подзадачи в прежней группировке по корням', async () => {
+    const root = { id: 10, parentTaskId: null, createdById: 7 };
+    const taskRepository = {
+      count: jest.fn().mockResolvedValue(1),
+      findAll: jest
+        .fn()
+        .mockResolvedValueOnce([root])
+        .mockResolvedValueOnce([{ id: 11, parentTaskId: 10, createdById: 15 }])
+        .mockResolvedValueOnce([{ id: 12, parentTaskId: 11, createdById: 22 }])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([root])
+    };
+
+    await createService(taskRepository).getByColumn(10, 7, {
+      creatorIds: [22],
+      includeSubtasks: true,
+      limit: 5
+    });
+
+    expect(taskRepository.count).toHaveBeenCalledWith({
+      where: { columnId: 10, parentTaskId: null, id: { [Op.in]: [10] } }
+    });
+  });
+
+  it('в плоском режиме использует создателя самой подзадачи, а не родителя', async () => {
+    const child = { id: 11, parentTaskId: 10, createdById: 15 };
+    const taskRepository = {
+      count: jest.fn().mockResolvedValueOnce(1).mockResolvedValueOnce(0),
+      findAll: jest
+        .fn()
+        .mockResolvedValueOnce([
+          { id: 10, parentTaskId: null, createdById: 7 },
+          child
+        ])
+        .mockResolvedValueOnce([child])
+    };
+
+    const result = await createService(taskRepository).getByColumn(10, 7, {
+      creatorIds: [15],
+      includeSubtasks: true,
+      flatSubtasks: true,
+      limit: 5
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({ items: [child], total: 1, rootTotal: 0 })
+    );
+    expect(taskRepository.count).toHaveBeenCalledWith({
+      where: { columnId: 10, id: { [Op.in]: [11] } }
+    });
+  });
+
+  it('не объединяет создателя родителя с исполнителем другой подзадачи', async () => {
+    const taskRepository = {
+      count: jest.fn().mockResolvedValue(0),
+      findAll: jest
+        .fn()
+        .mockResolvedValueOnce([{ id: 10, parentTaskId: null, createdById: 7 }])
+        .mockResolvedValueOnce([{ id: 11, parentTaskId: 10, createdById: 15 }])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([])
+    };
+    const assigneeRepository = {
+      findAll: jest.fn().mockResolvedValue([{ taskId: 11 }])
+    };
+
+    const result = await createService(
+      taskRepository,
+      assigneeRepository
+    ).getByColumn(10, 7, {
+      creatorIds: [7],
+      assigneeIds: [30],
+      includeSubtasks: true,
+      limit: 5
+    });
+
+    expect(result).toEqual(expect.objectContaining({ items: [], total: 0 }));
+    expect(assigneeRepository.findAll).toHaveBeenCalledWith({
+      where: { taskId: { [Op.in]: [10] }, userId: { [Op.in]: [30] } },
+      attributes: ['taskId'],
+      raw: true
+    });
+  });
 
   it('возвращает только запрошенную порцию и общее количество', async () => {
     const task = { id: 2, columnId: 10, order: 1 };
