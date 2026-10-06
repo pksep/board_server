@@ -134,7 +134,11 @@ export class AccessTokenService {
     if (response.status === 401 || response.data?.ok === false) {
       throw new UnauthorizedException('Invalid or expired ERP token');
     }
-    if (response.status !== 200 || response.data?.ok !== true) {
+    if (
+      response.status < 200 ||
+      response.status >= 300 ||
+      response.data?.ok !== true
+    ) {
       throw new ServiceUnavailableException('Invalid ERP auth response');
     }
 
