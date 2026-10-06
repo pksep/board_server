@@ -8,17 +8,15 @@ import {
 import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import { InjectModel } from '@nestjs/sequelize';
-import { ConfigService } from '@nestjs/config';
 import { IS_PUBLIC_KEY } from './public.decorator';
 import { User } from '../users/model/users.model';
-import { ConfigConstains } from 'src/configs/env.config';
 import { IUserDataToken } from './interfaces/interface';
 import {
   getErpSessionHash,
   isCurrentBoardSession
 } from './utils/board-session';
 
-const { Reqi } = require('@pksep/reqi');
+import { AccessTokenService } from './access-token.service';
 
 /** Имя cookie, которую выдаёт board-сервер */
 const BOARD_TOKEN_COOKIE = 'board_token';
@@ -46,7 +44,7 @@ export class TokenAuth implements CanActivate {
     private jwtService: JwtService,
     private reflector: Reflector,
     @InjectModel(User) private userRepository: typeof User,
-    private configService: ConfigService
+    private accessTokenService: AccessTokenService
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -62,8 +60,10 @@ export class TokenAuth implements CanActivate {
 
     const requestUrl = getRequestUrl(req);
 
-    // SSE без аутентификации
-    if (requestUrl?.includes('sse-')) return true;
+    // Совместимость старого режима. При SEP Auth SSE тоже требует общую сессию.
+    if (!this.accessTokenService.isEnabled() && requestUrl?.includes('sse-')) {
+      return true;
+    }
 
     if (requestUrl === null) {
       this.logger.warn(
@@ -78,6 +78,24 @@ export class TokenAuth implements CanActivate {
     // Неверная/удалённая сессия не должна превращаться в вход dev-администратора.
     const allowDevFallback = isLocalhost && !boardToken && !erpToken;
 
+    // При включённом SEP Auth board_token не должен обходить отзыв общей сессии.
+    if (this.accessTokenService.isEnabled()) {
+      const cookieToken = req.cookies?.[ERP_TOKEN_COOKIE];
+      const bearerToken = /^Bearer\s+(\S+)$/i.exec(
+        req.headers?.authorization || ''
+      )?.[1];
+      const accessToken = cookieToken || bearerToken;
+      if (!accessToken) {
+        throw new UnauthorizedException('Пользователь не авторизован');
+      }
+      const user = await this.accessTokenService.authenticate(accessToken);
+      if (req.cookies?.[BOARD_TOKEN_COOKIE]) {
+        res.clearCookie(BOARD_TOKEN_COOKIE, { path: '/' });
+      }
+      req.user = this.accessTokenService.toUserPayload(user);
+      return true;
+    }
+
     try {
       // ──────────────────────────────────────────────
       // 1. При неизменной ERP-сессии board_token проверяется локально.
@@ -91,7 +109,7 @@ export class TokenAuth implements CanActivate {
             });
 
             if (user && !user.ban) {
-              req.user = this.toUserPayload(user);
+              req.user = this.accessTokenService.toUserPayload(user);
               return true;
             }
           }
@@ -105,28 +123,26 @@ export class TokenAuth implements CanActivate {
       // 2. Есть access_token (ERP) → обмен через ERP
       // ──────────────────────────────────────────────
       if (erpToken) {
-        const user = await this.exchangeErpToken(erpToken);
+        const user = await this.accessTokenService.authenticate(erpToken);
 
-        if (user && !user.ban) {
-          // Выдаём СВОЙ board_token
-          const newBoardToken = this.jwtService.sign(
-            {
-              ...this.toUserPayload(user),
-              erpTokenHash: getErpSessionHash(erpToken)
-            },
-            { expiresIn: '24h' }
-          );
+        // Выдаём СВОЙ board_token только в прежнем режиме.
+        const newBoardToken = this.jwtService.sign(
+          {
+            ...this.accessTokenService.toUserPayload(user),
+            erpTokenHash: getErpSessionHash(erpToken)
+          },
+          { expiresIn: '24h' }
+        );
 
-          res.cookie(BOARD_TOKEN_COOKIE, newBoardToken, {
-            httpOnly: true,
-            sameSite: 'lax',
-            maxAge: 24 * 60 * 60 * 1000, // 24h
-            path: '/'
-          });
+        res.cookie(BOARD_TOKEN_COOKIE, newBoardToken, {
+          httpOnly: true,
+          sameSite: 'lax',
+          maxAge: 24 * 60 * 60 * 1000, // 24h
+          path: '/'
+        });
 
-          req.user = this.toUserPayload(user);
-          return true;
-        }
+        req.user = this.accessTokenService.toUserPayload(user);
+        return true;
       }
 
       // ──────────────────────────────────────────────
@@ -157,141 +173,10 @@ export class TokenAuth implements CanActivate {
     }
   }
 
-  /**
-   * Обмен ERP-токена: вызываем ERP /api/auth/check,
-   * получаем данные пользователя, создаём/обновляем в БД.
-   */
-  private async exchangeErpToken(erpToken: string): Promise<User | null> {
-    const erpApiUrl = this.configService.get<string>(ConfigConstains.erpApiUrl);
-
-    if (!erpApiUrl) {
-      this.logger.warn('ERP_API_URL not set, cannot exchange token');
-      return null;
-    }
-
-    try {
-      const normalizedApiUrl = erpApiUrl.replace(/\/+$/, '');
-      const erpApiBaseUrl = normalizedApiUrl.endsWith('/api')
-        ? normalizedApiUrl
-        : `${normalizedApiUrl}/api`;
-
-      const erpApi = new Reqi(erpApiBaseUrl, {
-        credentials: 'include'
-      });
-      const result = await erpApi.post(
-        '/auth/check',
-        { token: erpToken },
-        { parsed: true }
-      );
-
-      if (!result.ok || !result.user) {
-        this.logger.warn('ERP auth/check returned ok=false or no user');
-        return null;
-      }
-
-      const erpUser = result.user;
-      const erpId = String(erpUser.id);
-      const verifiedServiceNumber = erpUser.tabel || erpUser.serviceNumber;
-      const serviceNumber = verifiedServiceNumber || erpId;
-
-      // Ищем или создаём пользователя
-      let user = await this.userRepository.findOne({ where: { erpId } });
-
-      // Как в sync:users, сохраняем ID старой записи с тем же проверенным табелем.
-      // Вычисленный из ERP ID номер не доказывает принадлежность старого аккаунта.
-      if (!user && verifiedServiceNumber) {
-        const legacyUser = await this.userRepository.findOne({
-          where: { serviceNumber }
-        });
-
-        if (legacyUser) {
-          if (
-            (legacyUser.erpId !== null && legacyUser.erpId !== erpId) ||
-            legacyUser.ban ||
-            erpUser.ban
-          ) {
-            return null;
-          }
-
-          // Условная запись не позволяет двум ERP-аккаунтам перехватить один ID.
-          await this.userRepository.update(
-            { erpId },
-            {
-              where: {
-                id: legacyUser.id,
-                erpId: null,
-                serviceNumber,
-                ban: false
-              }
-            }
-          );
-          user = await this.userRepository.findOne({ where: { erpId } });
-
-          if (!user || user.id !== legacyUser.id) return null;
-        }
-      }
-
-      if (user) {
-        // Обновляем синхронизируемые поля
-        let changed = false;
-        const updates: Record<string, any> = {
-          initial: erpUser.initial || erpUser.login,
-          login: erpUser.login,
-          serviceNumber,
-          image: erpUser.image || null,
-          ban: erpUser.ban ?? false,
-          role: erpUser.role || '-'
-        };
-
-        for (const [key, value] of Object.entries(updates)) {
-          if ((user as any)[key] !== value) {
-            (user as any)[key] = value;
-            changed = true;
-          }
-        }
-
-        if (changed) await user.save();
-      } else {
-        user = await this.userRepository.create({
-          erpId,
-          initial: erpUser.initial || erpUser.login || 'User',
-          login: erpUser.login || `user-${erpId}`,
-          serviceNumber,
-          image: erpUser.image || null,
-          ban: erpUser.ban ?? false,
-          role: erpUser.role || '-'
-        } as any);
-
-        this.logger.log(
-          `Created user from ERP: erpId=${erpId}, login=${user.login}`
-        );
-      }
-
-      return user;
-    } catch (error) {
-      this.logger.error(
-        `ERP token exchange failed: ${error instanceof Error ? error.message : String(error)}`
-      );
-      return null;
-    }
-  }
-
-  /** Формат req.user */
-  private toUserPayload(user: User): IUserDataToken {
-    return {
-      id: user.id,
-      erpId: user.erpId,
-      login: user.login,
-      serviceNumber: user.serviceNumber,
-      initial: user.initial,
-      role: user.role
-    };
-  }
-
   /** Dev-fallback пользователь */
   private async getDevFallbackUser(): Promise<IUserDataToken> {
     const user = await this.userRepository.findOne({ where: { id: 1 } });
-    if (user) return this.toUserPayload(user);
+    if (user) return this.accessTokenService.toUserPayload(user);
     return { id: 1, login: 'admin', serviceNumber: '001' };
   }
 }

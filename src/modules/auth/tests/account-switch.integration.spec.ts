@@ -4,6 +4,7 @@ import { Reflector } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import { getModelToken } from '@nestjs/sequelize';
 import { Test } from '@nestjs/testing';
+import axios from 'axios';
 import cookieParser = require('cookie-parser');
 import request = require('supertest');
 import { Sequelize } from 'sequelize-typescript';
@@ -21,14 +22,16 @@ import { UsersService } from '../../users/users.service';
 import { LoggerService } from '../../logger/logger.service';
 import { WsGateway } from '../../ws/ws.gateway';
 import { TokenAuth } from '../jwt-auth.guard';
+import { AccessTokenService } from '../access-token.service';
 import { getErpSessionHash } from '../utils/board-session';
 import { IBoardSessionToken } from '../interfaces/interface';
 
 // Изолируется только внешний ERP transport. JWT, HTTP, guard и доступ к БД настоящие.
 const mockErpCheck = jest.fn();
 
-jest.mock('@pksep/reqi', () => ({
-  Reqi: jest.fn().mockImplementation(() => ({ post: mockErpCheck }))
+jest.mock('axios', () => ({
+  __esModule: true,
+  default: { post: jest.fn() }
 }));
 
 const databaseUrl = process.env.BOARD_ARCHIVE_TEST_DATABASE_URL;
@@ -113,6 +116,7 @@ describeWithDatabase(
           ProjectAccessService,
           UsersService,
           TokenAuth,
+          AccessTokenService,
           Reflector,
           { provide: LoggerService, useValue: { error: jest.fn() } },
           { provide: WsGateway, useValue: {} },
@@ -125,7 +129,12 @@ describeWithDatabase(
           { provide: JwtService, useValue: jwt },
           {
             provide: ConfigService,
-            useValue: { get: (): string => 'http://isolated-erp.invalid/api' }
+            useValue: {
+              get: (key: string): string | undefined =>
+                key === 'erpApiUrl'
+                  ? 'http://isolated-erp.invalid/api'
+                  : undefined
+            }
           }
         ]
       }).compile();
@@ -136,7 +145,7 @@ describeWithDatabase(
 
       userA = await User.build()
         .set({
-          erpId: 'account-qa-A',
+          erpId: '42001',
           login: 'Account QA A',
           initial: 'Account QA A',
           serviceNumber: 'account-qa-A',
@@ -145,7 +154,7 @@ describeWithDatabase(
         .save();
       userB = await User.build()
         .set({
-          erpId: 'account-qa-B',
+          erpId: '42002',
           login: 'Account QA B',
           initial: 'Account QA B',
           serviceNumber: 'account-qa-B',
@@ -161,6 +170,10 @@ describeWithDatabase(
     });
 
     beforeEach((): void => {
+      jest.mocked(axios.post).mockImplementation(async (path, body) => ({
+        status: 200,
+        data: await mockErpCheck(path, body)
+      }));
       mockErpCheck.mockReset();
       mockErpCheck.mockImplementation(
         (_path: string, body: { token: string }) => {
@@ -277,7 +290,7 @@ describeWithDatabase(
       mockErpCheck.mockResolvedValue({
         ok: true,
         user: {
-          id: 'account-qa-blocked',
+          id: '42003',
           login: 'blocked',
           tabel: 'account-qa-blocked',
           ban: true
@@ -290,13 +303,14 @@ describeWithDatabase(
     /** Создаёт старую запись без ERP-привязки в собственной тестовой базе. */
     const createLegacyOwner = async (
       suffix: string,
-      ban = false
+      ban = false,
+      serviceNumber = `00-legacy-${suffix}`
     ): Promise<{ user: User; project: Project }> => {
       const user = await User.build()
         .set({
           login: `Legacy ${suffix}`,
           initial: `Legacy ${suffix}`,
-          serviceNumber: `00-legacy-${suffix}`,
+          serviceNumber,
           role: '-',
           ban
         })
@@ -318,7 +332,7 @@ describeWithDatabase(
       mockErpCheck.mockResolvedValue({
         ok: true,
         user: {
-          id: 'erp-legacy-owner',
+          id: '42004',
           login: 'Verified legacy owner',
           initial: 'Verified legacy owner',
           tabel: user.serviceNumber,
@@ -350,13 +364,13 @@ describeWithDatabase(
         ])
       );
       expect(await User.count()).toBe(usersBefore);
-      expect((await User.findByPk(user.id))?.erpId).toBe('erp-legacy-owner');
+      expect((await User.findByPk(user.id))?.erpId).toBe('42004');
       expect((await Project.findByPk(project.id))?.createdById).toBe(user.id);
       expect(mockErpCheck).toHaveBeenCalledTimes(1);
     });
 
     it('does not claim a legacy owner using an inferred ERP number', async (): Promise<void> => {
-      const { user } = await createLegacyOwner('INFERRED');
+      const { user } = await createLegacyOwner('INFERRED', false, '42005');
       mockErpCheck.mockResolvedValue({
         ok: true,
         user: {
@@ -375,7 +389,7 @@ describeWithDatabase(
       mockErpCheck.mockResolvedValue({
         ok: true,
         user: {
-          id: 'erp-number-conflict',
+          id: '42006',
           login: 'Different identity',
           tabel: userB.serviceNumber,
           ban: false
@@ -384,7 +398,7 @@ describeWithDatabase(
 
       await listProjects('erp-number-conflict-cookie').expect(401);
 
-      expect((await User.findByPk(userB.id))?.erpId).toBe('account-qa-B');
+      expect((await User.findByPk(userB.id))?.erpId).toBe('42002');
       expect((await Project.findByPk(projectB.id))?.createdById).toBe(userB.id);
     });
 
@@ -398,7 +412,7 @@ describeWithDatabase(
         mockErpCheck.mockResolvedValue({
           ok: true,
           user: {
-            id: `erp-legacy-${suffix}`,
+            id: localBan ? '42007' : '42008',
             login: 'Blocked legacy account',
             tabel: user.serviceNumber,
             ban: erpBan
@@ -419,7 +433,7 @@ describeWithDatabase(
       mockErpCheck.mockResolvedValue({
         ok: true,
         user: {
-          id: 'erp-legacy-parallel',
+          id: '42009',
           login: 'Parallel legacy owner',
           tabel: user.serviceNumber,
           role: '-',
@@ -454,7 +468,7 @@ describeWithDatabase(
           Promise.resolve({
             ok: true,
             user: {
-              id: body.token,
+              id: body.token === 'erp-claim-first' ? '42010' : '42011',
               login: 'Concurrent identity',
               tabel: user.serviceNumber,
               role: '-',
@@ -472,9 +486,7 @@ describeWithDatabase(
         200, 401
       ]);
       const persisted = await User.findByPk(user.id);
-      expect(['erp-claim-first', 'erp-claim-second']).toContain(
-        persisted?.erpId
-      );
+      expect(['42010', '42011']).toContain(persisted?.erpId);
       expect(
         await User.count({ where: { serviceNumber: user.serviceNumber } })
       ).toBe(1);

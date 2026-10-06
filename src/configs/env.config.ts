@@ -17,6 +17,7 @@ export default function configFactory() {
     applicationType: process.env.APPLICATION_TYPE!,
     erpClientOfflineHost: process.env.ERP_CLIENT_OFFLINE_HOST!,
     erpApiUrl: process.env.ERP_API_URL || '',
+    authServiceUrl: process.env.AUTH_SERVICE_URL || '',
     minio: {
       user: process.env.MINIO_ROOT_USER!,
       password: process.env.MINIO_ROOT_PASSWORD!,
