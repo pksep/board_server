@@ -38,6 +38,11 @@ import {
   TTaskAttributeValues
 } from '../projects/interfaces/task-attribute.interface';
 import { CreateTaskTimeEntryDto } from './dto/create-task-time-entry.dto';
+import { TaskGanttQueryDto } from './dto/task-gantt-query.dto';
+import type {
+  TaskGanttItem,
+  TaskGanttSnapshot
+} from './interfaces/task-gantt.interface';
 
 export interface TaskListPage {
   items: Task[];
@@ -534,9 +539,103 @@ export class TasksService {
     ];
   }
 
-  /**
-   * Получить все задачи доски
-   */
+  /** Читает лёгкий снимок основных задач Ганта с теми же правами проекта и архивом. */
+  async getProjectGantt(
+    projectId: number,
+    userId: number,
+    query: TaskGanttQueryDto = {}
+  ): Promise<TaskGanttSnapshot> {
+    try {
+      await this.projectAccess.assertCanRead(projectId, userId);
+      const assigneeIds = [...new Set(query.assigneeIds ?? [])];
+      // «Я» включает мои назначения и созданные мной задачи, делегированные другим.
+      // ID создателя берётся из проверенной сессии, а не из параметров браузера.
+      const includeCreatedBySelf = assigneeIds.includes(userId);
+      const selectedTaskQuery = includeCreatedBySelf
+        ? `SELECT DISTINCT assignment.task_id
+          FROM task_assignees assignment
+          JOIN tasks assigned_task ON assigned_task.id = assignment.task_id
+          JOIN board_columns assigned_column ON assigned_column.id = assigned_task.column_id
+          JOIN boards assigned_board ON assigned_board.id = assigned_column.board_id
+          WHERE assigned_board.project_id = :projectId
+            AND (
+              assignment.user_id IN (:assigneeIds)
+              OR (assigned_task.created_by_id = :userId AND assignment.user_id <> :userId)
+            )`
+        : `SELECT DISTINCT task_id FROM task_assignees
+          WHERE user_id IN (:assigneeIds)`;
+      const source = `
+        FROM tasks task
+        ${
+          assigneeIds.length
+            ? `JOIN (${selectedTaskQuery}) selected ON selected.task_id = task.id`
+            : ''
+        }
+        JOIN board_columns col ON col.id = task.column_id AND col."deletedAt" IS NULL
+        JOIN boards board ON board.id = col.board_id AND board."deletedAt" IS NULL
+        WHERE board.project_id = :projectId
+          AND task."deletedAt" IS NULL
+          AND task.parent_task_id IS NULL`;
+      const replacements = { projectId, assigneeIds, userId };
+
+      if (query.summaryOnly === 'true') {
+        const counts = await this.sequelize.query<{ total: string }>(
+          `SELECT COUNT(*) AS total ${source}`,
+          { replacements, type: QueryTypes.SELECT }
+        );
+
+        return { items: [], total: Number(counts[0].total) };
+      }
+
+      // Один упорядоченный запрос вместо загрузки полного графа задач каждой доски.
+      // DISTINCT в выборе исполнителей не размножает строки при нескольких совпадениях.
+      const tasks = await this.sequelize.query<
+        Omit<TaskGanttItem, 'assignees'>
+      >(
+        `SELECT task.id, task.task_number AS "taskNumber", task.title, task.priority,
+          task.start_date AS "startDate", task.due_date AS "dueDate",
+          task.column_id AS "columnId", col.board_id AS "boardId",
+          col.status AS "columnStatus", task.created_by_id AS "createdById",
+          task."order", task."updatedAt"
+          ${source}
+          ORDER BY board."order", board."createdAt", board.id, col."order", task."order", task.id`,
+        { replacements, type: QueryTypes.SELECT }
+      );
+
+      // Читаем назначения одной порцией, без JOIN с пользователями и без запроса на каждую задачу.
+      const assignments = tasks.length
+        ? await this.assigneeRepository.findAll({
+            attributes: ['taskId', 'userId'],
+            where: { taskId: { [Op.in]: tasks.map(task => task.id) } },
+            order: [['id', 'ASC']],
+            raw: true
+          })
+        : [];
+      const byTask = new Map<number, { userId: number }[]>();
+
+      for (const assignment of assignments) {
+        const values = byTask.get(assignment.taskId) ?? [];
+        values.push({ userId: assignment.userId });
+        byTask.set(assignment.taskId, values);
+      }
+
+      const items = tasks.map(task => ({
+        ...task,
+        assignees: byTask.get(task.id) ?? []
+      }));
+
+      return { items, total: items.length };
+    } catch (error) {
+      if (error instanceof HttpException) throw error;
+      this.logger.error('getProjectGantt failed', error);
+      throw new HttpException(
+        'Ошибка при получении задач',
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  /** Получить все задачи доски. */
   async getByBoard(boardId: number, userId: number): Promise<Task[]> {
     try {
       const board = await this.boardRepository.findByPk(boardId);

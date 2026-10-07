@@ -170,8 +170,9 @@ describeWithDatabase(
     });
 
     beforeEach((): void => {
+      // Внешний ERP POST возвращает стандартный Nest HTTP 201, не только 200.
       jest.mocked(axios.post).mockImplementation(async (path, body) => ({
-        status: 200,
+        status: 201,
         data: await mockErpCheck(path, body)
       }));
       mockErpCheck.mockReset();
@@ -209,6 +210,29 @@ describeWithDatabase(
     afterAll(async (): Promise<void> => {
       await app?.close();
       await sequelize?.close();
+    });
+
+    it('loads preserved projects and users after ERP confirms with HTTP 201', async (): Promise<void> => {
+      const projects = await listProjects('erp-A').expect(200);
+      const users = await request(app.getHttpServer())
+        .get('/users/list')
+        .set('Cookie', ['access_token=erp-A'])
+        .expect(200);
+
+      expect(
+        projects.body.map((project: { id: number }) => project.id)
+      ).toEqual([projectA.id]);
+      expect(users.body).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: userA.id,
+            serviceNumber: userA.serviceNumber
+          })
+        ])
+      );
+      expect(mockErpCheck).toHaveBeenCalledTimes(2);
+      expect(await User.count({ where: { erpId: userA.erpId } })).toBe(1);
+      expect((await projectA.reload()).createdById).toBe(userA.id);
     });
 
     it('returns only current projects for A → B → A with stale board cookies', async (): Promise<void> => {

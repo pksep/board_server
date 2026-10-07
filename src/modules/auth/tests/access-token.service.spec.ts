@@ -111,7 +111,7 @@ describe('AccessTokenService', () => {
 
   it.each([200, 201, 202, 299])(
     'проверяет старый ERP-токен при успешном ответе ERP %i',
-    async status => {
+    async (status): Promise<void> => {
       const post = jest.spyOn(axios, 'post').mockResolvedValue({
         status,
         data: {
@@ -137,13 +137,13 @@ describe('AccessTokenService', () => {
     }
   );
 
-  it.each([199, 300, 403, 500])(
+  it.each([199, 300, 302, 403, 500, 503])(
     'отклоняет ответ ERP %i даже при ok: true',
-    async status => {
+    async (status): Promise<void> => {
       jest.spyOn(axios, 'post').mockResolvedValue({
         status,
         data: { ok: true, user: { id: 42, tabel: '0042' } }
-      } as never);
+      });
 
       await expect(service.authenticate('legacy-erp-token')).rejects.toThrow(
         ServiceUnavailableException
@@ -154,23 +154,52 @@ describe('AccessTokenService', () => {
   );
 
   it.each([
-    { status: 201, data: { ok: false }, error: UnauthorizedException },
     {
+      name: 'пустое тело',
+      status: 201,
+      data: null,
+      error: ServiceUnavailableException
+    },
+    {
+      name: 'нет подтверждения',
       status: 201,
       data: { user: { id: 42 } },
       error: ServiceUnavailableException
     },
-    { status: 201, data: { ok: true }, error: ServiceUnavailableException },
     {
+      name: 'нет пользователя',
+      status: 201,
+      data: { ok: true },
+      error: ServiceUnavailableException
+    },
+    {
+      name: 'неверный ID',
       status: 201,
       data: { ok: true, user: { id: 'invalid' } },
       error: ServiceUnavailableException
     },
-    { status: 204, data: undefined, error: ServiceUnavailableException }
+    {
+      name: 'отказ ERP',
+      status: 201,
+      data: { ok: false },
+      error: UnauthorizedException
+    },
+    {
+      name: 'пользователь заблокирован',
+      status: 201,
+      data: { ok: true, user: { id: 42, ban: true } },
+      error: UnauthorizedException
+    },
+    {
+      name: 'нет тела ответа 204',
+      status: 204,
+      data: undefined,
+      error: ServiceUnavailableException
+    }
   ])(
-    'отклоняет некорректный успешный ответ ERP $status с данными $data',
-    async ({ status, data, error }) => {
-      jest.spyOn(axios, 'post').mockResolvedValue({ status, data } as never);
+    'отклоняет ответ $status: $name',
+    async ({ status, data, error }): Promise<void> => {
+      jest.spyOn(axios, 'post').mockResolvedValue({ status, data });
 
       await expect(service.authenticate('legacy-erp-token')).rejects.toThrow(
         error

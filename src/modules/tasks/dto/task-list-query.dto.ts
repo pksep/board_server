@@ -27,7 +27,7 @@ function parseQueryList(value: unknown): string[] {
 }
 
 /** Преобразует строковые идентификаторы из URL в числа для Sequelize-запроса. */
-function parseNumberQueryList(value: unknown): number[] {
+export function parseNumberQueryList(value: unknown): number[] {
   return parseQueryList(value).map(item => Number(item));
 }
 
