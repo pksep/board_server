@@ -109,8 +109,8 @@ describe('AccessTokenService', () => {
     expect(repository.findAll).not.toHaveBeenCalled();
   });
 
-  it.each([200, 201])(
-    'проверяет старый ERP-токен при ответе %s',
+  it.each([200, 201, 202, 299])(
+    'проверяет старый ERP-токен при успешном ответе ERP %i',
     async (status): Promise<void> => {
       const post = jest.spyOn(axios, 'post').mockResolvedValue({
         status,
@@ -137,8 +137,8 @@ describe('AccessTokenService', () => {
     }
   );
 
-  it.each([202, 204, 302, 403, 500, 503])(
-    'не принимает неподтверждённый HTTP-ответ ERP %s',
+  it.each([199, 300, 302, 403, 500, 503])(
+    'отклоняет ответ ERP %i даже при ok: true',
     async (status): Promise<void> => {
       jest.spyOn(axios, 'post').mockResolvedValue({
         status,
@@ -154,37 +154,60 @@ describe('AccessTokenService', () => {
   );
 
   it.each([
-    { name: 'пустое тело', data: null, error: ServiceUnavailableException },
+    {
+      name: 'пустое тело',
+      status: 201,
+      data: null,
+      error: ServiceUnavailableException
+    },
     {
       name: 'нет подтверждения',
+      status: 201,
       data: { user: { id: 42 } },
       error: ServiceUnavailableException
     },
     {
       name: 'нет пользователя',
+      status: 201,
       data: { ok: true },
       error: ServiceUnavailableException
     },
     {
       name: 'неверный ID',
+      status: 201,
       data: { ok: true, user: { id: 'invalid' } },
       error: ServiceUnavailableException
     },
-    { name: 'отказ ERP', data: { ok: false }, error: UnauthorizedException },
+    {
+      name: 'отказ ERP',
+      status: 201,
+      data: { ok: false },
+      error: UnauthorizedException
+    },
     {
       name: 'пользователь заблокирован',
+      status: 201,
       data: { ok: true, user: { id: 42, ban: true } },
       error: UnauthorizedException
+    },
+    {
+      name: 'нет тела ответа 204',
+      status: 204,
+      data: undefined,
+      error: ServiceUnavailableException
     }
-  ])('отклоняет ответ 201: $name', async ({ data, error }): Promise<void> => {
-    jest.spyOn(axios, 'post').mockResolvedValue({ status: 201, data });
+  ])(
+    'отклоняет ответ $status: $name',
+    async ({ status, data, error }): Promise<void> => {
+      jest.spyOn(axios, 'post').mockResolvedValue({ status, data });
 
-    await expect(service.authenticate('legacy-erp-token')).rejects.toThrow(
-      error
-    );
-    expect(repository.findAll).not.toHaveBeenCalled();
-    expect(repository.create).not.toHaveBeenCalled();
-  });
+      await expect(service.authenticate('legacy-erp-token')).rejects.toThrow(
+        error
+      );
+      expect(repository.findAll).not.toHaveBeenCalled();
+      expect(repository.create).not.toHaveBeenCalled();
+    }
+  );
 
   it('отклоняет старый ERP-токен при ответе 401', async () => {
     jest.spyOn(axios, 'post').mockResolvedValue({

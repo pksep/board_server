@@ -134,10 +134,9 @@ export class AccessTokenService {
     if (response.status === 401 || response.data?.ok === false) {
       throw new UnauthorizedException('Invalid or expired ERP token');
     }
-    // ERP POST /auth/check штатно возвращает 201; прежние версии используют 200.
-    // Оба ответа требуют явного подтверждения и проверки идентичности ниже.
     if (
-      (response.status !== 200 && response.status !== 201) ||
+      response.status < 200 ||
+      response.status >= 300 ||
       response.data?.ok !== true
     ) {
       throw new ServiceUnavailableException('Invalid ERP auth response');
