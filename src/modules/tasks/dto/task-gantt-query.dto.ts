@@ -7,7 +7,8 @@ import { parseNumberQueryList } from './task-list-query.dto';
 export class TaskGanttQueryDto {
   // До серверного отбора Гант не ограничивал число выбранных исполнителей.
   @ApiPropertyOptional({
-    description: 'Исполнители; подходит любой выбранный участник'
+    description:
+      'Исполнители; подходит любой выбранный участник. При выборе себя также учитываются созданные вами задачи, назначенные другим'
   })
   @IsOptional()
   @Transform(({ value }) => parseNumberQueryList(value))

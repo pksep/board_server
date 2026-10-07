@@ -548,14 +548,27 @@ export class TasksService {
     try {
       await this.projectAccess.assertCanRead(projectId, userId);
       const assigneeIds = [...new Set(query.assigneeIds ?? [])];
+      // «Я» включает мои назначения и созданные мной задачи, делегированные другим.
+      // ID создателя берётся из проверенной сессии, а не из параметров браузера.
+      const includeCreatedBySelf = assigneeIds.includes(userId);
+      const selectedTaskQuery = includeCreatedBySelf
+        ? `SELECT DISTINCT assignment.task_id
+          FROM task_assignees assignment
+          JOIN tasks assigned_task ON assigned_task.id = assignment.task_id
+          JOIN board_columns assigned_column ON assigned_column.id = assigned_task.column_id
+          JOIN boards assigned_board ON assigned_board.id = assigned_column.board_id
+          WHERE assigned_board.project_id = :projectId
+            AND (
+              assignment.user_id IN (:assigneeIds)
+              OR (assigned_task.created_by_id = :userId AND assignment.user_id <> :userId)
+            )`
+        : `SELECT DISTINCT task_id FROM task_assignees
+          WHERE user_id IN (:assigneeIds)`;
       const source = `
         FROM tasks task
         ${
           assigneeIds.length
-            ? `JOIN (
-          SELECT DISTINCT task_id FROM task_assignees
-          WHERE user_id IN (:assigneeIds)
-        ) selected ON selected.task_id = task.id`
+            ? `JOIN (${selectedTaskQuery}) selected ON selected.task_id = task.id`
             : ''
         }
         JOIN board_columns col ON col.id = task.column_id AND col."deletedAt" IS NULL
@@ -563,7 +576,7 @@ export class TasksService {
         WHERE board.project_id = :projectId
           AND task."deletedAt" IS NULL
           AND task.parent_task_id IS NULL`;
-      const replacements = { projectId, assigneeIds };
+      const replacements = { projectId, assigneeIds, userId };
 
       if (query.summaryOnly === 'true') {
         const counts = await this.sequelize.query<{ total: string }>(

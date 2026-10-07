@@ -276,11 +276,14 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     ]);
     expect(result.total).toBe(2);
     const ownerOnly = await read({ assigneeIds: String(owner.id) });
-    expect(ownerOnly.total).toBe(1);
-    expect(ownerOnly.items[0].assignees).toEqual([
-      { userId: owner.id },
-      { userId: outsider.id }
+    expect(ownerOnly.total).toBe(2);
+    expect(ownerOnly.items.map(item => item.id)).toEqual([
+      roots[1].id,
+      roots[0].id
     ]);
+    expect(
+      ownerOnly.items.find(item => item.id === roots[0].id)?.assignees
+    ).toEqual([{ userId: owner.id }, { userId: outsider.id }]);
     expect((await read({ assigneeIds: '2147483647' })).items).toEqual([]);
     // Оптимизация не должна вводить новый лимит 100 для прежнего выбора пользователей Ганта.
     const many = await read({
@@ -289,6 +292,62 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       ).join(',')
     });
     expect(many.total).toBe(2);
+  });
+
+  it('shows self assignments and self-created delegated tasks only for self selection, without including unrelated or unassigned tasks', async (): Promise<void> => {
+    const assignedToSelf = await persist(Task.build(), {
+      title: 'Created by another participant, assigned to me',
+      taskNumber: 20,
+      columnId: columns[0].id,
+      createdById: outsider.id,
+      order: 5
+    });
+    await persist(TaskAssignee.build(), {
+      taskId: assignedToSelf.id,
+      userId: owner.id
+    });
+    const unrelated = await persist(Task.build(), {
+      title: 'Created and assigned to another participant',
+      taskNumber: 21,
+      columnId: columns[0].id,
+      createdById: outsider.id,
+      order: 6
+    });
+    await persist(TaskAssignee.build(), {
+      taskId: unrelated.id,
+      userId: outsider.id
+    });
+
+    const self = await read({ assigneeIds: String(owner.id) });
+    expect(self.items.map(item => item.id)).toEqual([
+      roots[1].id,
+      roots[0].id,
+      assignedToSelf.id
+    ]);
+    expect(self.total).toBe(3);
+    expect(self.items.some(item => item.id === roots[2].id)).toBe(false);
+    expect(
+      await read({ assigneeIds: String(owner.id), summaryOnly: 'true' })
+    ).toEqual({
+      items: [],
+      total: self.total
+    });
+    const others = await read({ assigneeIds: String(outsider.id) });
+    expect(others.items.map(item => item.id)).toEqual([
+      roots[1].id,
+      roots[0].id,
+      unrelated.id
+    ]);
+    expect((await read()).total).toBe(5);
+
+    // Архив и проверка проекта остаются обязательными и для делегированных карточек.
+    await roots[1].destroy();
+    expect((await read({ assigneeIds: String(owner.id) })).total).toBe(2);
+    await request(app.getHttpServer())
+      .get(`/projects/${project.id}/gantt`)
+      .query({ assigneeIds: String(outsider.id) })
+      .auth('gantt-outsider-token', { type: 'bearer' })
+      .expect(404);
   });
 
   it('excludes archived tasks, columns and boards even if their tasks were not separately archived', async (): Promise<void> => {
@@ -318,8 +377,9 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       assigneeIds: String(owner.id),
       summaryOnly: 'true'
     });
-    expect(result).toEqual({ items: [], total: 1 });
+    expect(result).toEqual({ items: [], total: 2 });
     const full = await read({ assigneeIds: String(owner.id) });
+    expect(full.total).toBe(result.total);
     expect(full.items[0]).not.toHaveProperty('description');
     expect(full.items[0]).not.toHaveProperty('attachments');
     expect(full.items[0]).not.toHaveProperty('subtasks');
@@ -410,7 +470,7 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
           (ARRAY[:columnIds]::integer[])[(n - 1) % 20 + 1], :ownerId, n,
           '2026-10-01'::timestamptz, '2026-10-04'::timestamptz, NOW(), NOW()
         FROM generate_series(1, 6000) n`,
-      { replacements: { columnIds, ownerId: owner.id } }
+      { replacements: { columnIds, ownerId: users[0].id } }
     );
     await sequelize.query(
       `INSERT INTO task_assignees (task_id, user_id, "createdAt", "updatedAt")
@@ -422,6 +482,12 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       `INSERT INTO task_assignees (task_id, user_id, "createdAt", "updatedAt")
         SELECT id, :ownerId, NOW(), NOW() FROM tasks
         WHERE column_id IN (:columnIds) AND task_number % 100 = 0`,
+      { replacements: { columnIds, ownerId: owner.id } }
+    );
+    // Большая выборка включает отдельно мои назначения и мои делегированные задачи.
+    await sequelize.query(
+      `UPDATE tasks SET created_by_id = :ownerId
+        WHERE column_id IN (:columnIds) AND task_number % 100 = 1`,
       { replacements: { columnIds, ownerId: owner.id } }
     );
 
@@ -466,10 +532,12 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       const allBytes = Buffer.byteLength(JSON.stringify(all));
 
       expect(legacy).toHaveLength(6000);
-      expect(result.total).toBe(60);
+      expect(result.total).toBe(120);
       expect(
         result.items.every(item =>
-          item.assignees.some(assigned => assigned.userId === owner.id)
+          item.assignees.some(assigned => assigned.userId === owner.id) ||
+          (item.createdById === owner.id &&
+            item.assignees.some(assigned => assigned.userId !== owner.id))
         )
       ).toBe(true);
       expect(
@@ -487,7 +555,7 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
           tasks: 6000,
           users: 600,
           boards: 20,
-          matched: 60,
+          matched: result.total,
           legacyMs: Math.round(legacyMs),
           optimizedMs: Math.round(optimizedMs),
           legacyQueries,
