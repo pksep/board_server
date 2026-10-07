@@ -24,11 +24,24 @@ import { TaskListQueryDto } from './dto/task-list-query.dto';
 import { CreateTaskTimeEntryDto } from './dto/create-task-time-entry.dto';
 import type { TaskTimeEntry, TaskTimeEntryPage } from './tasks.service';
 import type { Task } from './model/task.model';
+import { TaskGanttQueryDto } from './dto/task-gantt-query.dto';
+import type { TaskGanttSnapshot } from './interfaces/task-gantt.interface';
 
 @ApiTags('Задачи')
 @Controller()
 export class TasksController {
   constructor(private tasksService: TasksService) {}
+
+  /** Использует каноническое чтение задач с проверкой доступа к проекту. */
+  @ApiOperation({ summary: 'Список задач и сроки для диаграммы Ганта проекта' })
+  @Get('projects/:projectId/gantt')
+  getProjectGantt(
+    @Param('projectId') projectId: number,
+    @Query() query: TaskGanttQueryDto,
+    @CurrentUser() user: IUserDataToken
+  ): Promise<TaskGanttSnapshot> {
+    return this.tasksService.getProjectGantt(+projectId, user.id, query);
+  }
 
   @ApiOperation({ summary: 'Все задачи доски' })
   @Get('boards/:boardId/tasks')
