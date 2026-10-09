@@ -8,16 +8,18 @@ import { ActivityEventsService } from '../activity-events.service';
 describe('ActivityEventsService', () => {
   const repository = {
     create: jest.fn(),
-    findAll: jest.fn()
+    findAll: jest.fn(),
+    sequelize: { query: jest.fn().mockResolvedValue([]) }
   };
-  const service = new ActivityEventsService(repository as any);
+  const ws = { emitTaskActivityChanged: jest.fn() };
+  const service = new ActivityEventsService(repository as any, ws as any);
 
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
   it('создаёт событие в переданной транзакции', async () => {
-    const transaction = {} as any;
+    const transaction = { afterCommit: jest.fn() } as any;
     const event = {
       projectId: 1,
       entityType: ActivityEntityType.Task,
@@ -37,6 +39,34 @@ describe('ActivityEventsService', () => {
       }),
       { transaction }
     );
+  });
+
+  it('сохраняет обе стороны назначения в одной транзакции и уведомляет только после commit', async () => {
+    const transaction = { afterCommit: jest.fn() } as any;
+    repository.create.mockResolvedValue({ id: 12 });
+    repository.sequelize.query.mockResolvedValueOnce([
+      { userId: 1 },
+      { userId: 2 }
+    ]);
+    await service.create(
+      {
+        projectId: 1,
+        entityType: ActivityEntityType.Task,
+        entityId: '42',
+        actionType: ActivityActionType.Updated,
+        changes: [{ field: 'assigneeIds', before: [1, 1], after: [2] }]
+      },
+      { transaction }
+    );
+    expect(repository.sequelize.query.mock.calls[0][1]).toEqual(
+      expect.objectContaining({
+        transaction,
+        replacements: { eventId: 12, taskId: 42, additionalIds: [1, 2] }
+      })
+    );
+    expect(ws.emitTaskActivityChanged).not.toHaveBeenCalled();
+    transaction.afterCommit.mock.calls[0][0]();
+    expect(ws.emitTaskActivityChanged).toHaveBeenCalledWith([1, 2]);
   });
 
   it('оставляет только реально изменённые поля', () => {

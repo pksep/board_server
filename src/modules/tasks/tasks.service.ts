@@ -325,6 +325,24 @@ export class TasksService {
     return Number.isNaN(date.getTime()) ? String(value) : date.toISOString();
   }
 
+  /** Не допускает обратный диапазон, сохраняя совместимость с незаполненными старыми сроками. */
+  private assertTaskDateOrder(
+    startDate: Date | string | null | undefined,
+    dueDate: Date | string | null | undefined
+  ): void {
+    if (!startDate || !dueDate) return;
+
+    const start = startDate instanceof Date ? startDate : new Date(startDate);
+    const due = dueDate instanceof Date ? dueDate : new Date(dueDate);
+
+    if (due.getTime() < start.getTime()) {
+      throw new HttpException(
+        'Дата исполнения не может быть раньше даты начала работ',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+  }
+
   /**
    * Атомарно выделяет последовательный диапазон номеров задач проекта.
    */
@@ -1247,6 +1265,11 @@ export class TasksService {
         transaction
       );
       await this.projectAccess.assertCanRead(projectId, userId, transaction);
+
+      const startDate = dto.startDate ? new Date(dto.startDate) : new Date();
+      const dueDate = dto.dueDate ? new Date(dto.dueDate) : startDate;
+      this.assertTaskDateOrder(startDate, dueDate);
+
       if (dto.assigneeIds?.length) {
         await this.projectAccess.assertAssigneesBelongToProject(
           projectId,
@@ -1285,8 +1308,8 @@ export class TasksService {
           description: dto.description || '',
           priority: dto.priority || '',
           approvalStatus: dto.approvalStatus || '',
-          dueDate: dto.dueDate || dto.startDate || new Date(),
-          startDate: dto.startDate || new Date(),
+          dueDate,
+          startDate,
           customAttributeValues,
           columnId,
           order: 0,
@@ -1375,6 +1398,11 @@ export class TasksService {
         transaction
       );
       await this.projectAccess.assertCanRead(projectId, userId, transaction);
+
+      const startDate = dto.startDate ? new Date(dto.startDate) : new Date();
+      const dueDate = dto.dueDate ? new Date(dto.dueDate) : startDate;
+      this.assertTaskDateOrder(startDate, dueDate);
+
       if (dto.assigneeIds?.length) {
         await this.projectAccess.assertAssigneesBelongToProject(
           projectId,
@@ -1401,8 +1429,8 @@ export class TasksService {
           description: dto.description || '',
           priority: dto.priority || '',
           approvalStatus: dto.approvalStatus || '',
-          dueDate: dto.dueDate || dto.startDate || new Date(),
-          startDate: dto.startDate || new Date(),
+          dueDate,
+          startDate,
           customAttributeValues,
           columnId: parent.columnId,
           parentTaskId: parentId,
@@ -1537,6 +1565,14 @@ export class TasksService {
         task.columnId,
         transaction
       );
+
+      if (dto.startDate !== undefined || dto.dueDate !== undefined) {
+        this.assertTaskDateOrder(
+          dto.startDate !== undefined ? dto.startDate : task.startDate,
+          dto.dueDate !== undefined ? dto.dueDate : task.dueDate
+        );
+      }
+
       if (dto.assigneeIds?.length) {
         await this.projectAccess.assertAssigneesBelongToProject(
           projectId,

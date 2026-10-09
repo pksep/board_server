@@ -54,6 +54,7 @@ describeWithDatabase('Archive API with isolated PostgreSQL', () => {
   let previouslyArchived: Task;
   let sequence = 0;
   const ws = {
+    emitTaskActivityChanged: jest.fn(),
     emitTaskCreated: jest.fn(),
     emitTaskUpdated: jest.fn(),
     emitTaskDeleted: jest.fn(),

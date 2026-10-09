@@ -389,6 +389,57 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     expect(original.attachments).toHaveLength(1);
   });
 
+  it('includes tasks without execution dates in assignee-filtered rows and collapsed counts', async (): Promise<void> => {
+    // Старые задачи могут не иметь срока: чтение не требует заполнить форму.
+    for (const task of roots) await task.update({ dueDate: null });
+
+    const unrelated = await persist(Task.build(), {
+      title: 'Other participant without an execution date',
+      taskNumber: 10,
+      columnId: columns[0].id,
+      createdById: outsider.id,
+      dueDate: null,
+      order: 5
+    });
+    await persist(TaskAssignee.build(), {
+      taskId: unrelated.id,
+      userId: outsider.id
+    });
+
+    const self = await read({ assigneeIds: String(owner.id) });
+    expect(self.items.map(item => item.id)).toEqual([roots[1].id, roots[0].id]);
+    expect(self.items.every(item => item.dueDate === null)).toBe(true);
+    expect(self.total).toBe(2);
+    expect(
+      await read({ assigneeIds: String(owner.id), summaryOnly: 'true' })
+    ).toEqual({ items: [], total: self.total });
+
+    const multiple = await read({ assigneeIds: `${owner.id},${outsider.id}` });
+    expect(multiple.items.map(item => item.id)).toEqual([
+      roots[1].id,
+      roots[0].id,
+      unrelated.id
+    ]);
+    expect(multiple.items.every(item => item.dueDate === null)).toBe(true);
+    expect(multiple.total).toBe(3);
+    expect(
+      await read({
+        assigneeIds: `${owner.id},${outsider.id}`,
+        summaryOnly: 'true'
+      })
+    ).toEqual({ items: [], total: multiple.total });
+
+    // Очистка выбора показывает также неназначенные задачи, но не дублирует назначения.
+    const all = await read();
+    expect(all.items.map(item => item.id)).toEqual([
+      roots[1].id,
+      roots[2].id,
+      roots[0].id,
+      unrelated.id
+    ]);
+    expect(all.total).toBe(4);
+  });
+
   it('does not disclose projects to unauthorized or removed participants', async (): Promise<void> => {
     await request(app.getHttpServer())
       .get(`/projects/${project.id}/gantt`)
