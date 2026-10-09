@@ -4,6 +4,21 @@ import { getErpSessionHash } from '../../auth/utils/board-session';
 describe('WsGateway connection authentication', () => {
   const originalNodeEnv = process.env.NODE_ENV;
 
+  it('distinguishes read-only invalidation without changing the existing task-change signal', (): void => {
+    const gateway = createGateway(jest.fn());
+    const emit = jest.fn();
+    const to = jest.fn().mockReturnValue({ emit });
+    gateway.server = { to } as typeof gateway.server;
+
+    gateway.emitTaskActivityChanged([7], true);
+    expect(to).toHaveBeenCalledWith(['user:7']);
+    expect(emit).toHaveBeenLastCalledWith('activity:changed', {
+      readOnly: true
+    });
+    gateway.emitTaskActivityChanged([7]);
+    expect(emit).toHaveBeenLastCalledWith('activity:changed');
+  });
+
   /** Создаёт gateway с изолированными зависимостями для проверки cookie. */
   const createGateway = (verify: jest.Mock) =>
     new WsGateway(

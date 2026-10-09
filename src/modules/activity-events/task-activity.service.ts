@@ -131,7 +131,7 @@ export class TaskActivityService {
       }
     );
     try {
-      this.ws.emitTaskActivityChanged([userId]);
+      this.ws.emitTaskActivityChanged([userId], true);
     } catch {
       this.logger.warn(
         'Task activity read-state realtime delivery unavailable'

@@ -408,6 +408,10 @@ describeWithDatabase(
         .expect(200);
       expect((await counts(first)).total).toBe(0);
       expect((await feed(first)).items).toHaveLength(2);
+      expect(ws.emitTaskActivityChanged).toHaveBeenLastCalledWith(
+        [first.id],
+        true
+      );
     });
 
     it('rechecks project access on every feed/count/read request', async (): Promise<void> => {
