@@ -78,6 +78,8 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
         }
         const user = await this.accessTokenService.authenticate(accessToken);
         boardClient.user = this.accessTokenService.toUserPayload(user);
+        await client.join(`user:${boardClient.user.id}`);
+        client.emit('activity:ready');
         this.logger.log(`Client connected: ${client.id} (user: ${user.id})`);
         return;
       }
@@ -85,6 +87,8 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const user = this.verifySocketUser(cookies);
       if (user) {
         boardClient.user = user;
+        await client.join(`user:${user.id}`);
+        client.emit('activity:ready');
         this.logger.log(`Client connected: ${client.id} (user: ${user.id})`);
       } else if (
         process.env.NODE_ENV !== 'production' &&
@@ -93,6 +97,8 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       ) {
         // В dev-режиме подключение без токена допустимо
         boardClient.user = { id: 1, login: 'admin', serviceNumber: '001' };
+        await client.join('user:1');
+        client.emit('activity:ready');
         this.logger.log(`Client connected: ${client.id} (dev fallback)`);
       } else {
         this.logger.warn(`Client ${client.id} rejected: no token`);
@@ -209,6 +215,11 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   // === Методы эмита (вызываются из сервисов) ===
+
+  /** Личная инвалидация без текста задачи, идентификаторов проекта и чужих получателей. */
+  emitTaskActivityChanged(userIds: number[]): void {
+    this.server.to(userIds.map(id => `user:${id}`)).emit('activity:changed');
+  }
 
   /** Обновляет доступность исполнителя во всех открытых досках. */
   emitUserAvailabilityChanged(id: number, ban: boolean): void {

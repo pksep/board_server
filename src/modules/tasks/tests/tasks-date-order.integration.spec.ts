@@ -53,7 +53,11 @@ describeWithDatabase(
     let column: BoardColumn;
     let task: Task;
     let sequence = 0;
-    const ws = { emitTaskCreated: jest.fn(), emitTaskUpdated: jest.fn() };
+    const ws = {
+      emitTaskCreated: jest.fn(),
+      emitTaskUpdated: jest.fn(),
+      emitTaskActivityChanged: jest.fn()
+    };
 
     beforeAll(async (): Promise<void> => {
       const url = new URL(databaseUrl!);

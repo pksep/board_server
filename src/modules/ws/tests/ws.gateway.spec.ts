@@ -18,6 +18,8 @@ describe('WsGateway connection authentication', () => {
     ({
       id: 'socket-1',
       handshake: { headers: { cookie: cookieHeader } },
+      join: jest.fn(),
+      emit: jest.fn(),
       disconnect: jest.fn()
     }) as any;
 
@@ -50,6 +52,8 @@ describe('WsGateway connection authentication', () => {
     expect(verify).toHaveBeenCalledTimes(1);
     expect(verify).toHaveBeenCalledWith('board-token');
     expect(client.user).toEqual(user);
+    expect(client.join).toHaveBeenCalledWith('user:7');
+    expect(client.emit).toHaveBeenCalledWith('activity:ready');
     expect(client.disconnect).not.toHaveBeenCalled();
   });
 
@@ -68,6 +72,7 @@ describe('WsGateway connection authentication', () => {
     expect(verify.mock.calls).toEqual([['board-token']]);
     expect(client.user).toBeUndefined();
     expect(client.disconnect).toHaveBeenCalledWith(true);
+    expect(client.join).not.toHaveBeenCalled();
   });
 
   it.each(['erp-B', undefined])(
@@ -146,6 +151,7 @@ describe('WsGateway connection authentication', () => {
     expect(authenticate).toHaveBeenCalledWith('new-auth');
     expect(verify).not.toHaveBeenCalled();
     expect(client.user.id).toBe(8);
+    expect(client.join).toHaveBeenCalledWith('user:8');
     expect(client.disconnect).not.toHaveBeenCalled();
   });
 
