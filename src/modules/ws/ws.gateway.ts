@@ -5,10 +5,16 @@ import {
   ConnectedSocket,
   MessageBody,
   OnGatewayConnection,
-  OnGatewayDisconnect
+  OnGatewayDisconnect,
+  OnGatewayInit
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  ServiceUnavailableException
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as cookie from 'cookie';
 import { InjectModel } from '@nestjs/sequelize';
@@ -18,6 +24,7 @@ import { IBoardSessionToken } from '../auth/interfaces/interface';
 import { isCurrentBoardSession } from '../auth/utils/board-session';
 import { AccessTokenService } from '../auth/access-token.service';
 import type { IBoardSocket } from './interfaces/board-socket.interface';
+import type { SessionSocket } from './interfaces/session-socket.interface';
 
 const BOARD_SOCKET_PATH = process.env.BOARD_SOCKET_PATH || '/api/socket.io';
 const BOARD_TOKEN_COOKIE = 'board_token';
@@ -32,8 +39,69 @@ const ERP_TOKEN_COOKIE = 'access_token';
   namespace: '/board',
   path: BOARD_SOCKET_PATH
 })
-export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class WsGateway
+  implements
+    OnGatewayConnection,
+    OnGatewayDisconnect,
+    OnGatewayInit,
+    OnModuleDestroy
+{
   private readonly logger = new Logger(WsGateway.name);
+  private sessionTimer?: ReturnType<typeof setInterval>;
+  private checkingSessions = false;
+
+  /** Revalidates open central sessions, including sockets on another adapter node. */
+  afterInit(): void {
+    this.sessionTimer = setInterval(
+      () => void this.revalidateConnections(),
+      10000
+    );
+    this.sessionTimer.unref();
+  }
+
+  /** Releases background work on shutdown. */
+  onModuleDestroy(): void {
+    if (this.sessionTimer) clearInterval(this.sessionTimer);
+  }
+
+  /** Retains the legacy socket path when central auth is disabled. */
+  async revalidateConnections(): Promise<void> {
+    if (
+      !this.server ||
+      !this.accessTokenService.isEnabled() ||
+      this.checkingSessions
+    )
+      return;
+    this.checkingSessions = true;
+
+    try {
+      const sockets = await this.server.fetchSockets();
+      await Promise.all(sockets.map(socket => this.validateSession(socket)));
+    } catch {
+      // A stopped adapter is retried on the next poll.
+    } finally {
+      this.checkingSessions = false;
+    }
+  }
+
+  /** The saved access token cannot outlive revocation of its central session. */
+  private async validateSession(socket: SessionSocket): Promise<boolean> {
+    try {
+      const user = await this.accessTokenService.authenticate(
+        socket.data.accessToken
+      );
+      if (user.id !== socket.data.userId)
+        throw new Error('Session user changed');
+
+      return true;
+    } catch (error) {
+      if (error instanceof ServiceUnavailableException) return false;
+      socket.emit('auth:revoked');
+      socket.disconnect(true);
+
+      return false;
+    }
+  }
 
   constructor(
     private jwtService: JwtService,
@@ -78,6 +146,8 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
         }
         const user = await this.accessTokenService.authenticate(accessToken);
         boardClient.user = this.accessTokenService.toUserPayload(user);
+        client.data.accessToken = accessToken;
+        client.data.userId = boardClient.user.id;
         await client.join(`user:${boardClient.user.id}`);
         client.emit('activity:ready');
         this.logger.log(`Client connected: ${client.id} (user: ${user.id})`);
@@ -121,6 +191,13 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { boardId: number }
   ) {
+    if (
+      (client as IBoardSocket).user?.id &&
+      this.accessTokenService.isEnabled() &&
+      !(await this.validateSession(client))
+    ) {
+      return { event: 'error', data: { message: 'Не авторизован' } };
+    }
     // handleConnection асинхронный: событие может прийти до проверки токена.
     if (!(client as IBoardSocket).user?.id) {
       return { event: 'error', data: { message: 'Не авторизован' } };
@@ -174,6 +251,13 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: Socket,
     @MessageBody() data: { projectId: number }
   ) {
+    if (
+      (client as IBoardSocket).user?.id &&
+      this.accessTokenService.isEnabled() &&
+      !(await this.validateSession(client))
+    ) {
+      return { event: 'error', data: { message: 'Не авторизован' } };
+    }
     if (!(client as IBoardSocket).user?.id) {
       return { event: 'error', data: { message: 'Не авторизован' } };
     }
@@ -218,34 +302,34 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   /** Личная инвалидация без текста задачи, идентификаторов проекта и чужих получателей. */
   emitTaskActivityChanged(userIds: number[], readOnly = false): void {
-    const recipients = this.server.to(userIds.map(id => `user:${id}`));
+    const rooms = userIds.map(id => `user:${id}`);
 
     // Прочтение не меняет историю: клиенту достаточно сверить личные счётчики.
     if (readOnly) {
-      recipients.emit('activity:changed', { readOnly: true });
+      this.emitToRooms(rooms, 'activity:changed', { readOnly: true });
 
       return;
     }
 
-    recipients.emit('activity:changed');
+    this.emitToRooms(rooms, 'activity:changed');
   }
 
   /** Обновляет доступность исполнителя во всех открытых досках. */
   emitUserAvailabilityChanged(id: number, ban: boolean): void {
-    this.server.emit('user:availability', { id, ban });
+    this.emitToRooms([], 'user:availability', { id, ban });
   }
 
   /** Задачи */
   emitTaskCreated(boardId: number, task: any) {
-    this.server.to(`board:${boardId}`).emit('task:created', task);
+    this.emitToRooms([`board:${boardId}`], 'task:created', task);
   }
 
   emitTaskUpdated(boardId: number, task: any) {
-    this.server.to(`board:${boardId}`).emit('task:updated', task);
+    this.emitToRooms([`board:${boardId}`], 'task:updated', task);
   }
 
   emitTaskDeleted(boardId: number, taskId: number) {
-    this.server.to(`board:${boardId}`).emit('task:deleted', { id: taskId });
+    this.emitToRooms([`board:${boardId}`], 'task:deleted', { id: taskId });
   }
 
   emitTaskMoved(
@@ -258,7 +342,7 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       order: number;
     }
   ) {
-    this.server.to(`board:${boardId}`).emit('task:moved', data);
+    this.emitToRooms([`board:${boardId}`], 'task:moved', data);
   }
 
   emitTaskRelocated(
@@ -276,41 +360,79 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
       order: number;
     }
   ) {
-    this.server
-      .to([`board:${sourceBoardId}`, `board:${targetBoardId}`])
-      .emit('task:relocated', data);
+    this.emitToRooms(
+      [`board:${sourceBoardId}`, `board:${targetBoardId}`],
+      'task:relocated',
+      data
+    );
   }
 
   /** Колонки */
   emitColumnCreated(boardId: number, column: any) {
-    this.server.to(`board:${boardId}`).emit('column:created', column);
+    this.emitToRooms([`board:${boardId}`], 'column:created', column);
   }
 
   emitColumnUpdated(boardId: number, column: any) {
-    this.server.to(`board:${boardId}`).emit('column:updated', column);
+    this.emitToRooms([`board:${boardId}`], 'column:updated', column);
   }
 
   emitColumnDeleted(boardId: number, columnId: number) {
-    this.server.to(`board:${boardId}`).emit('column:deleted', { id: columnId });
+    this.emitToRooms([`board:${boardId}`], 'column:deleted', { id: columnId });
   }
 
   emitColumnReordered(boardId: number, ids: number[]) {
-    this.server.to(`board:${boardId}`).emit('column:reordered', { ids });
+    this.emitToRooms([`board:${boardId}`], 'column:reordered', { ids });
   }
 
   /** Проекты */
   emitProjectUpdated(projectId: number, project: any) {
-    this.server.to(`project:${projectId}`).emit('project:updated', project);
+    this.emitToRooms([`project:${projectId}`], 'project:updated', project);
   }
 
   emitProjectDeleted(projectId: number) {
-    this.server
-      .to(`project:${projectId}`)
-      .emit('project:deleted', { id: projectId });
+    this.emitToRooms([`project:${projectId}`], 'project:deleted', {
+      id: projectId
+    });
   }
 
   /** Доски */
   emitBoardReordered(projectId: number, ids: number[]) {
-    this.server.to(`project:${projectId}`).emit('board:reordered', { ids });
+    this.emitToRooms([`project:${projectId}`], 'board:reordered', { ids });
+  }
+
+  /** Uses the live session before delivering payloads; old deployments retain their path. */
+  private emitToRooms(rooms: string[], event: string, payload?: unknown): void {
+    if (!this.accessTokenService.isEnabled()) {
+      const target = rooms.length ? this.server.to(rooms) : this.server;
+      if (payload === undefined) target.emit(event);
+      else target.emit(event, payload);
+
+      return;
+    }
+
+    void this.emitToActiveSessions(rooms, event, payload);
+  }
+
+  /** Fetches adapter recipients so a remote revoked socket is also excluded. */
+  private async emitToActiveSessions(
+    rooms: string[],
+    event: string,
+    payload?: unknown
+  ): Promise<void> {
+    try {
+      const target = rooms.length ? this.server.in(rooms) : this.server;
+      const sockets = await target.fetchSockets();
+      await Promise.all(
+        sockets.map(async socket => {
+          if (!(await this.validateSession(socket))) return;
+          if (payload === undefined) socket.emit(event);
+          else socket.emit(event, payload);
+        })
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Session delivery failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 }
