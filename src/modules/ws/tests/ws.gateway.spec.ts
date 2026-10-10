@@ -35,11 +35,39 @@ describe('WsGateway connection authentication', () => {
       handshake: { headers: { cookie: cookieHeader } },
       join: jest.fn(),
       emit: jest.fn(),
-      disconnect: jest.fn()
+      disconnect: jest.fn(),
+      data: {}
     }) as any;
 
   beforeEach(() => {
     process.env.NODE_ENV = 'production';
+  });
+
+  it('disconnects an already connected central session after device revocation', async (): Promise<void> => {
+    const authenticate = jest
+      .fn()
+      .mockResolvedValueOnce({ id: 7 })
+      .mockRejectedValue(new Error('revoked'));
+    const gateway = new WsGateway(
+      {} as any,
+      {} as any,
+      {} as any,
+      {
+        isEnabled: () => true,
+        authenticate,
+        toUserPayload: () => ({ id: 7 })
+      } as any
+    );
+    const client = createClient('access_token=central');
+    gateway.server = {
+      fetchSockets: jest.fn().mockResolvedValue([client])
+    } as any;
+
+    await gateway.handleConnection(client);
+    await gateway.revalidateConnections();
+
+    expect(authenticate).toHaveBeenNthCalledWith(2, 'central');
+    expect(client.disconnect).toHaveBeenCalledWith(true);
   });
 
   afterAll(() => {
