@@ -1,4 +1,5 @@
 import { WsGateway } from '../ws.gateway';
+import { Server } from 'socket.io';
 import { getErpSessionHash } from '../../auth/utils/board-session';
 
 describe('WsGateway connection authentication', () => {
@@ -6,17 +7,30 @@ describe('WsGateway connection authentication', () => {
 
   it('distinguishes read-only invalidation without changing the existing task-change signal', (): void => {
     const gateway = createGateway(jest.fn());
-    const emit = jest.fn();
-    const to = jest.fn().mockReturnValue({ emit });
-    gateway.server = { to } as typeof gateway.server;
+    gateway.server = new Server();
+    const recipients = gateway.server.to('user:7');
+    const emit = jest.spyOn(recipients, 'emit').mockReturnValue(true);
+    const broadcast = jest.spyOn(gateway.server, 'emit').mockReturnValue(true);
+    const to = jest.spyOn(gateway.server, 'to').mockReturnValue(recipients);
 
     gateway.emitTaskActivityChanged([7], true);
     expect(to).toHaveBeenCalledWith(['user:7']);
     expect(emit).toHaveBeenLastCalledWith('activity:changed', {
       readOnly: true
     });
+    expect(broadcast).not.toHaveBeenCalled();
     gateway.emitTaskActivityChanged([7]);
     expect(emit).toHaveBeenLastCalledWith('activity:changed');
+    expect(broadcast).toHaveBeenLastCalledWith('activity:general-changed');
+    to.mockClear();
+    gateway.emitTaskActivityChanged([]);
+    expect(to).not.toHaveBeenCalled();
+    expect(broadcast).toHaveBeenCalledTimes(2);
+    gateway.emitTaskActivityChanged([7], false, 42);
+    expect(emit).toHaveBeenLastCalledWith('activity:changed', { eventId: 42 });
+    expect(broadcast).toHaveBeenLastCalledWith('activity:general-changed', {
+      eventId: 42
+    });
   });
 
   /** Создаёт gateway с изолированными зависимостями для проверки cookie. */

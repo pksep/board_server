@@ -79,20 +79,9 @@ export class ProjectAccessService {
     ];
     if (!normalizedUserIds.length) return;
 
-    const members = await this.memberRepository.findAll({
-      attributes: ['userId'],
-      include: [
-        { model: User, attributes: [], where: { ban: false }, required: true }
-      ],
-      // Блокировка не позволяет архивированию пересечься с новым назначением.
-      lock: transaction ? Transaction.LOCK.SHARE : undefined,
-      where: {
-        projectId,
-        userId: { [Op.in]: normalizedUserIds }
-      },
-      transaction
-    });
-    const memberIds = new Set(members.map(member => Number(member.userId)));
+    const memberIds = new Set(
+      await this.getActiveMemberIds(projectId, transaction, normalizedUserIds)
+    );
     const hasExternalAssignee = normalizedUserIds.some(
       userId => !memberIds.has(userId)
     );
@@ -103,5 +92,28 @@ export class ProjectAccessService {
         HttpStatus.BAD_REQUEST
       );
     }
+  }
+
+  /** Единый источник действующих участников для назначений и состава доски. */
+  async getActiveMemberIds(
+    projectId: number,
+    transaction?: Transaction,
+    userIds?: number[]
+  ): Promise<number[]> {
+    const members = await this.memberRepository.findAll({
+      attributes: ['userId'],
+      include: [
+        { model: User, attributes: [], where: { ban: false }, required: true }
+      ],
+      // Блокировка не позволяет архивированию пересечься с новым назначением.
+      lock: transaction ? Transaction.LOCK.SHARE : undefined,
+      where: {
+        projectId,
+        ...(userIds ? { userId: { [Op.in]: userIds } } : {})
+      },
+      transaction
+    });
+
+    return members.map(member => Number(member.userId));
   }
 }

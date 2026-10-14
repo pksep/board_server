@@ -33,6 +33,14 @@ export class Board extends Model<Board> {
   @Column({ type: DataType.STRING, allowNull: false })
   title: string;
 
+  @ApiProperty({
+    type: [Number],
+    nullable: true,
+    description: 'Участники доски; null у старых досок означает состав проекта'
+  })
+  @Column({ type: DataType.JSONB, allowNull: true, field: 'members_ids' })
+  membersIds: number[] | null;
+
   @ApiProperty({ description: 'Дата начала' })
   @Column({ type: DataType.DATE, allowNull: true, field: 'start_date' })
   startDate: Date;

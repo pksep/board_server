@@ -1,6 +1,6 @@
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/sequelize';
-import { Op } from 'sequelize';
+import { Op, Transaction } from 'sequelize';
 import { Board } from './model/board.model';
 import { CreateBoardDto } from './dto/create-board.dto';
 import { UpdateBoardDto } from './dto/update-board.dto';
@@ -9,6 +9,7 @@ import { ProjectAccessService } from '../projects/project-access.service';
 import { BoardColumn } from '../columns/model/board-column.model';
 import { Task } from '../tasks/model/task.model';
 import { BoardListQueryDto } from './dto/board-list-query.dto';
+import { ColumnMovePermission } from '../columns/interfaces/column-move-permission.interface';
 
 type BoardWithTasksCount = Board & { tasksCount: number };
 
@@ -187,6 +188,29 @@ export class BoardsService {
     }
   }
 
+  /** Выбирает весь проект по умолчанию и отклоняет посторонних/архивных участников. */
+  private async resolveMembersIds(
+    projectId: number,
+    membersIds: number[] | undefined,
+    transaction: Transaction
+  ): Promise<number[]> {
+    const activeIds = await this.projectAccess.getActiveMemberIds(
+      projectId,
+      transaction
+    );
+    if (membersIds === undefined) return activeIds;
+
+    const allowed = new Set(activeIds);
+    if (membersIds.some(id => !allowed.has(id))) {
+      throw new HttpException(
+        'Участниками доски могут быть только действующие участники проекта',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    return [...new Set(membersIds)];
+  }
+
   async create(
     projectId: number,
     dto: CreateBoardDto,
@@ -197,6 +221,11 @@ export class BoardsService {
 
       return await this.boardRepository.sequelize.transaction(
         async transaction => {
+          const membersIds = await this.resolveMembersIds(
+            projectId,
+            dto.membersIds,
+            transaction
+          );
           let sourceColumns: BoardColumn[] = [];
 
           if (dto.sourceBoardId) {
@@ -231,6 +260,7 @@ export class BoardsService {
             {
               projectId,
               title: dto.title,
+              membersIds,
               startDate: dto.startDate || null,
               endDate: dto.endDate || null,
               order: (maxOrder || 0) + 1
@@ -245,6 +275,8 @@ export class BoardsService {
                 title: column.title,
                 color: column.color,
                 status: column.status ?? null,
+                movePermission:
+                  column.movePermission ?? ColumnMovePermission.AnyActions,
                 order: column.order
               })),
               { transaction }
@@ -275,11 +307,26 @@ export class BoardsService {
         throw new HttpException('Доска не найдена', HttpStatus.NOT_FOUND);
       }
       await this.projectAccess.assertCanRead(board.projectId, userId);
-      if (dto.title !== undefined) board.title = dto.title;
-      if (dto.startDate !== undefined) board.startDate = dto.startDate as any;
-      if (dto.endDate !== undefined) board.endDate = dto.endDate as any;
-      await board.save();
-      return board;
+
+      // Валидация и запись состава выполняются вместе; ошибка не сохраняет остальные поля.
+      return await this.boardRepository.sequelize.transaction(
+        async transaction => {
+          if (dto.membersIds !== undefined) {
+            board.membersIds = await this.resolveMembersIds(
+              board.projectId,
+              dto.membersIds,
+              transaction
+            );
+          }
+          if (dto.title !== undefined) board.title = dto.title;
+          if (dto.startDate !== undefined)
+            board.startDate = dto.startDate as any;
+          if (dto.endDate !== undefined) board.endDate = dto.endDate as any;
+          await board.save({ transaction });
+
+          return board;
+        }
+      );
     } catch (error) {
       if (error instanceof HttpException) throw error;
       this.logger.error('update board failed', error);

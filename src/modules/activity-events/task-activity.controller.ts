@@ -1,12 +1,13 @@
 import { Body, Controller, Get, Patch, Query } from '@nestjs/common';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { IUserDataToken } from '../auth/interfaces/interface';
-import { ActivityHistoryQueryDto } from './dto/activity-history-query.dto';
+import { TaskActivityQueryDto } from './dto/task-activity-query.dto';
 import { ReadTaskActivityDto } from './dto/read-task-activity.dto';
 import { ActivityEventPage } from './interfaces/activity-event.interface';
 import {
   TaskActivityCounts,
-  TaskActivityItem
+  TaskActivityItem,
+  TaskActivityReadResult
 } from './interfaces/task-activity.interface';
 import { TaskActivityService } from './task-activity.service';
 
@@ -14,11 +15,11 @@ import { TaskActivityService } from './task-activity.service';
 export class TaskActivityController {
   constructor(private activity: TaskActivityService) {}
 
-  /** Лента исполнителя: идентификатор получателя берётся только из серверной сессии. */
+  /** Личная либо общая история: доступ и получатель определяются серверной сессией. */
   @Get()
   getFeed(
     @CurrentUser() user: IUserDataToken,
-    @Query() query: ActivityHistoryQueryDto
+    @Query() query: TaskActivityQueryDto
   ): Promise<ActivityEventPage<TaskActivityItem>> {
     return this.activity.getFeed(user.id, query);
   }
@@ -34,7 +35,7 @@ export class TaskActivityController {
   markRead(
     @CurrentUser() user: IUserDataToken,
     @Body() dto: ReadTaskActivityDto
-  ): Promise<void> {
+  ): Promise<TaskActivityReadResult> {
     return this.activity.markRead(user.id, dto);
   }
 }

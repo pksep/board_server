@@ -4,9 +4,11 @@ import {
   IsNotEmpty,
   IsOptional,
   IsString,
-  MaxLength
+  MaxLength,
+  ValidateIf
 } from 'class-validator';
 import { ColumnStatus } from '../interfaces/column-status.interface';
+import { ColumnMovePermission } from '../interfaces/column-move-permission.interface';
 
 export class CreateColumnDto {
   @ApiProperty({ example: 'В работе', description: 'Название колонки' })
@@ -25,4 +27,13 @@ export class CreateColumnDto {
   @IsOptional()
   @IsEnum(ColumnStatus)
   status?: ColumnStatus | null;
+
+  @ApiProperty({
+    enum: ColumnMovePermission,
+    required: false,
+    default: ColumnMovePermission.AnyActions
+  })
+  @ValidateIf((_object, value): boolean => value !== undefined)
+  @IsEnum(ColumnMovePermission)
+  movePermission?: ColumnMovePermission;
 }

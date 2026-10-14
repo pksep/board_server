@@ -15,6 +15,7 @@ const createContext = (options: TestContextOptions = {}) => {
   };
   const task = {
     id: 42,
+    createdById: 7,
     taskNumber: 12,
     title: 'Листовая задача',
     description: '',

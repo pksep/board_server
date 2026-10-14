@@ -10,12 +10,27 @@ import {
   IsEnum,
   MaxLength,
   ArrayMaxSize,
-  Min
+  Min,
+  ValidateNested
 } from 'class-validator';
 import { IsObject } from 'class-validator';
+import { Type } from 'class-transformer';
+import { TaskEntityDto } from './task-entity.dto';
 import { TTaskAttributeValues } from 'src/modules/projects/interfaces/task-attribute.interface';
 
 export class CreateTaskDto {
+  @ApiProperty({
+    description: 'Сущность из базы продукции',
+    type: TaskEntityDto,
+    nullable: true,
+    required: false
+  })
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => TaskEntityDto)
+  linkedEntity?: TaskEntityDto | null;
+
   @ApiProperty({ example: 'Исправить баг', description: 'Название задачи' })
   @IsString()
   @IsNotEmpty({ message: 'Название задачи обязательно' })

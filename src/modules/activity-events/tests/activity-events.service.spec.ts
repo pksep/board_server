@@ -66,7 +66,7 @@ describe('ActivityEventsService', () => {
     );
     expect(ws.emitTaskActivityChanged).not.toHaveBeenCalled();
     transaction.afterCommit.mock.calls[0][0]();
-    expect(ws.emitTaskActivityChanged).toHaveBeenCalledWith([1, 2]);
+    expect(ws.emitTaskActivityChanged).toHaveBeenCalledWith([1, 2], false, 12);
   });
 
   it('оставляет только реально изменённые поля', () => {

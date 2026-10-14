@@ -26,11 +26,23 @@ import type { TaskTimeEntry, TaskTimeEntryPage } from './tasks.service';
 import type { Task } from './model/task.model';
 import { TaskGanttQueryDto } from './dto/task-gantt-query.dto';
 import type { TaskGanttSnapshot } from './interfaces/task-gantt.interface';
+import { PersonalTaskQueryDto } from './dto/personal-task-query.dto';
+import type { PersonalTaskPage } from './interfaces/personal-task.interface';
 
 @ApiTags('Задачи')
 @Controller()
 export class TasksController {
   constructor(private tasksService: TasksService) {}
+
+  /** Пользователь берётся из сессии, а не из произвольного ID в фильтре. */
+  @ApiOperation({ summary: 'Созданные мной или назначенные мне задачи' })
+  @Get('tasks/personal')
+  getPersonalTasks(
+    @Query() query: PersonalTaskQueryDto,
+    @CurrentUser() user: IUserDataToken
+  ): Promise<PersonalTaskPage> {
+    return this.tasksService.getPersonalTasks(user.id, query);
+  }
 
   /** Использует каноническое чтение задач с проверкой доступа к проекту. */
   @ApiOperation({ summary: 'Список задач и сроки для диаграммы Ганта проекта' })

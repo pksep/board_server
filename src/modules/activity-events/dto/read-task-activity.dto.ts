@@ -1,16 +1,25 @@
 import { Type } from 'class-transformer';
-import { IsInt, Max, Min } from 'class-validator';
+import { IsInt, IsOptional, Max, Min } from 'class-validator';
 
 export class ReadTaskActivityDto {
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
   @Max(2147483647)
-  taskId: number;
+  taskId?: number;
 
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
   @Max(2147483647)
-  throughEventId: number;
+  projectId?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(2147483647)
+  throughEventId?: number;
 }

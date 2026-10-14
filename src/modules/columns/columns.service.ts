@@ -8,6 +8,7 @@ import { ReorderColumnsDto } from './dto/reorder-columns.dto';
 import { WsGateway } from '../ws/ws.gateway';
 import { Board } from '../boards/model/board.model';
 import { ProjectAccessService } from '../projects/project-access.service';
+import { ColumnMovePermission } from './interfaces/column-move-permission.interface';
 
 @Injectable()
 export class ColumnsService {
@@ -92,6 +93,7 @@ export class ColumnsService {
           title: dto.title,
           color: dto.color || null,
           status: dto.status ?? null,
+          movePermission: dto.movePermission ?? ColumnMovePermission.AnyActions,
           order: (maxOrder || 0) + 1
         } as any,
         { transaction }
@@ -124,6 +126,8 @@ export class ColumnsService {
       if (dto.title !== undefined) column.title = dto.title;
       if (dto.color !== undefined) column.color = dto.color;
       if (dto.status !== undefined) column.status = dto.status;
+      if (dto.movePermission !== undefined)
+        column.movePermission = dto.movePermission;
       await column.save();
 
       // WS
