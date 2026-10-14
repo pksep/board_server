@@ -102,18 +102,18 @@ export class ActivityEventsService {
       }
     );
 
-    if (recipients.length) {
-      options.transaction.afterCommit(() => {
-        try {
-          this.ws.emitTaskActivityChanged(
-            recipients.map(recipient => recipient.userId)
-          );
-        } catch {
-          // Недоступный realtime не превращает уже сохранённую правку в ошибку сохранения.
-          this.logger.warn('Task activity realtime delivery unavailable');
-        }
-      });
-    }
+    options.transaction.afterCommit(() => {
+      try {
+        this.ws.emitTaskActivityChanged(
+          recipients.map(recipient => recipient.userId),
+          false,
+          activity.id
+        );
+      } catch {
+        // Недоступный realtime не превращает уже сохранённую правку в ошибку сохранения.
+        this.logger.warn('Task activity realtime delivery unavailable');
+      }
+    });
 
     return activity;
   }

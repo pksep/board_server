@@ -1,6 +1,15 @@
-import { OmitType, PartialType } from '@nestjs/swagger';
+import {
+  IntersectionType,
+  OmitType,
+  PartialType,
+  PickType
+} from '@nestjs/swagger';
 import { CreateBoardDto } from './create-board.dto';
 
-export class UpdateBoardDto extends PartialType(
-  OmitType(CreateBoardDto, ['sourceBoardId'] as const)
+// Состав допускает пропуск и [], но не null; остальные поля сохраняют прежние правила PartialType.
+export class UpdateBoardDto extends IntersectionType(
+  PartialType(
+    OmitType(CreateBoardDto, ['sourceBoardId', 'membersIds'] as const)
+  ),
+  PickType(CreateBoardDto, ['membersIds'] as const)
 ) {}

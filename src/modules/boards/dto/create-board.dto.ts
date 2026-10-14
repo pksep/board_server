@@ -6,7 +6,10 @@ import {
   IsPositive,
   IsString,
   IsDateString,
-  MaxLength
+  MaxLength,
+  IsArray,
+  ArrayUnique,
+  ValidateIf
 } from 'class-validator';
 
 export class CreateBoardDto {
@@ -36,4 +39,17 @@ export class CreateBoardDto {
   @IsInt()
   @IsPositive()
   sourceBoardId?: number;
+
+  @ApiProperty({
+    type: [Number],
+    required: false,
+    description:
+      'ID участников проекта. Если не переданы, выбираются все действующие участники'
+  })
+  @ValidateIf((_object, value): boolean => value !== undefined)
+  @IsArray()
+  @ArrayUnique()
+  @IsInt({ each: true })
+  @IsPositive({ each: true })
+  membersIds?: number[];
 }

@@ -217,17 +217,32 @@ export class WsGateway implements OnGatewayConnection, OnGatewayDisconnect {
   // === Методы эмита (вызываются из сервисов) ===
 
   /** Личная инвалидация без текста задачи, идентификаторов проекта и чужих получателей. */
-  emitTaskActivityChanged(userIds: number[], readOnly = false): void {
-    const recipients = this.server.to(userIds.map(id => `user:${id}`));
-
+  emitTaskActivityChanged(
+    userIds: number[],
+    readOnly = false,
+    eventId?: number
+  ): void {
     // Прочтение не меняет историю: клиенту достаточно сверить личные счётчики.
     if (readOnly) {
-      recipients.emit('activity:changed', { readOnly: true });
+      if (userIds.length) {
+        this.server
+          .to(userIds.map(id => `user:${id}`))
+          .emit('activity:changed', { readOnly: true });
+      }
 
       return;
     }
 
-    recipients.emit('activity:changed');
+    if (userIds.length) {
+      this.server
+        .to(userIds.map(id => `user:${id}`))
+        .emit('activity:changed', ...(eventId ? [{ eventId }] : []));
+    }
+    // Общая лента получает только сигнал: содержание и доступ проверяет защищённый GET.
+    this.server.emit(
+      'activity:general-changed',
+      ...(eventId ? [{ eventId }] : [])
+    );
   }
 
   /** Обновляет доступность исполнителя во всех открытых досках. */
