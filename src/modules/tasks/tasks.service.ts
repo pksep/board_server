@@ -1683,8 +1683,13 @@ export class TasksService {
     const fields = Object.entries(dto).filter(
       ([, value]) => value !== undefined
     );
-    if (fields.length === 1 && fields[0][0] === 'startDate') {
-      // Снятие назначения не пересекается с разрешённой записью начала работ.
+    if (
+      fields.length > 0 &&
+      fields.every(
+        ([field]) => field === 'startDate' || field === 'description'
+      )
+    ) {
+      // Снятие назначения не пересекается с разрешённой записью описания или начала работ.
       const assignment = await this.assigneeRepository.findOne({
         where: { taskId: task.id, userId },
         transaction,
@@ -1694,7 +1699,7 @@ export class TasksService {
     }
 
     throw new HttpException(
-      'Изменять поля задачи может только её создатель. Исполнитель может изменять только дату начала работ.',
+      'Изменять остальные поля задачи может только её создатель. Исполнитель может изменять описание и дату начала работ.',
       HttpStatus.FORBIDDEN
     );
   }

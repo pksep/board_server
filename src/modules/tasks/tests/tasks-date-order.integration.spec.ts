@@ -344,7 +344,6 @@ describeWithDatabase(
 
     it.each([
       { title: 'Other title' },
-      { description: '<p>Changed</p>' },
       { priority: 'high' },
       { dueDate: '2026-10-23T00:00:00Z' },
       { assigneeIds: [] },
@@ -362,7 +361,7 @@ describeWithDatabase(
       { linkedEntity: null },
       { parentTaskId: null }
     ])(
-      'denies executor changes to protected fields, including a mixed date patch: %p',
+      'denies executor changes to protected fields, including description and date in the same patch: %p',
       async (protectedPatch): Promise<void> => {
         await assignExecutor(outsider);
         const before = task.toJSON();
@@ -371,6 +370,7 @@ describeWithDatabase(
           .auth('date-outsider-token', { type: 'bearer' })
           .send({
             ...protectedPatch,
+            description: '<p>Must not be saved</p>',
             startDate: '2026-10-12T00:00:00Z'
           })
           .expect(403);
@@ -381,6 +381,144 @@ describeWithDatabase(
         expect(ws.emitTaskUpdated).not.toHaveBeenCalled();
       }
     );
+
+    it.each(['task', 'subtask'])(
+      'allows every current executor to edit the %s description, alone or with its start date, through normal history',
+      async (kind): Promise<void> => {
+        await assignExecutor(outsider);
+        await assignExecutor(secondExecutor);
+        const target =
+          kind === 'task'
+            ? task
+            : await persist(Task.build(), {
+                title: 'Child task',
+                taskNumber: 2,
+                columnId: column.id,
+                parentTaskId: task.id,
+                createdById: owner.id,
+                description: '<p>Initial</p>',
+                startDate: new Date('2026-10-10T00:00:00Z'),
+                dueDate: new Date('2026-10-20T00:00:00Z')
+              });
+        if (kind === 'subtask') {
+          for (const user of [outsider, secondExecutor]) {
+            await persist(TaskAssignee.build(), {
+              taskId: target.id,
+              userId: user.id
+            });
+          }
+        }
+        const originalTitle = target.title;
+        for (const [index, [token, actor]] of (
+          [
+            ['date-outsider-token', outsider],
+            ['date-second-executor-token', secondExecutor]
+          ] as const
+        ).entries()) {
+          const description = `<p>Executor ${index}</p><img src="/test.png">`;
+          await write(
+            'put',
+            `/tasks/${target.id}`,
+            {
+              description,
+              ...(index ? { startDate: '2026-10-13T00:00:00Z' } : {})
+            },
+            token
+          ).expect(200);
+          const saved = await target.reload();
+          expect(saved.description).toBe(description);
+          expect(saved.title).toBe(originalTitle);
+          expect(saved.createdById).toBe(owner.id);
+          const last = await ActivityEvent.findOne({
+            where: { entityId: String(target.id) },
+            order: [['id', 'DESC']]
+          });
+          expect(last?.actorUserId).toBe(actor.id);
+          expect(
+            last?.changes.some(change => change.field === 'description')
+          ).toBe(true);
+        }
+        // Очистка текста допустима; она не изменяет право на остальные поля.
+        await write(
+          'put',
+          `/tasks/${target.id}`,
+          { description: '' },
+          'date-outsider-token'
+        ).expect(200);
+        expect((await target.reload()).description).toBe('');
+        expect(ws.emitTaskUpdated).toHaveBeenCalledTimes(3);
+      }
+    );
+
+    it('does not inherit description editing from assignment on the parent task', async (): Promise<void> => {
+      await assignExecutor(outsider);
+      const child = await persist(Task.build(), {
+        title: 'Child task',
+        taskNumber: 2,
+        columnId: column.id,
+        parentTaskId: task.id,
+        createdById: owner.id
+      });
+      await write(
+        'put',
+        `/tasks/${child.id}`,
+        { description: '<p>Denied</p>' },
+        'date-outsider-token'
+      ).expect(403);
+      expect((await child.reload()).description).toBeFalsy();
+      expect(ws.emitTaskUpdated).not.toHaveBeenCalled();
+    });
+
+    it('rejects description changes after assignment or project access is removed', async (): Promise<void> => {
+      await assignExecutor(outsider);
+      const before = task.toJSON();
+      await TaskAssignee.destroy({
+        where: { taskId: task.id, userId: outsider.id }
+      });
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { description: '<p>Removed assignment</p>' },
+        'date-outsider-token'
+      ).expect(403);
+      await persist(TaskAssignee.build(), {
+        taskId: task.id,
+        userId: outsider.id
+      });
+      await ProjectMember.destroy({
+        where: { projectId: project.id, userId: outsider.id }
+      });
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { description: '<p>Removed access</p>' },
+        'date-outsider-token'
+      ).expect(404);
+      expect((await task.reload()).toJSON()).toEqual(before);
+      expect(
+        await ActivityEvent.count({ where: { projectId: project.id } })
+      ).toBe(0);
+      expect(ws.emitTaskUpdated).not.toHaveBeenCalled();
+    });
+
+    it('rolls back an executor description when its accompanying start date is invalid', async (): Promise<void> => {
+      await assignExecutor(outsider);
+      const before = task.toJSON();
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        {
+          description: '<p>Must not be saved</p>',
+          startDate: '2026-10-21T00:00:00Z'
+        },
+        'date-outsider-token'
+      ).expect(400);
+      expect((await task.reload()).toJSON()).toEqual(before);
+      expect(
+        await ActivityEvent.count({ where: { projectId: project.id } })
+      ).toBe(0);
+      expect(ws.emitTaskUpdated).not.toHaveBeenCalled();
+    });
 
     it('allows a creator who is not project owner to update all fields without being an executor', async (): Promise<void> => {
       await persist(ProjectMember.build(), {
