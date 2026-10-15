@@ -450,7 +450,121 @@ describeWithDatabase(
       }
     );
 
-    it('does not inherit description editing from assignment on the parent task', async (): Promise<void> => {
+    it.each(['task', 'subtask'])(
+      'allows an unassigned project member to edit and clear a %s description with normal history',
+      async (kind): Promise<void> => {
+        await persist(ProjectMember.build(), {
+          projectId: project.id,
+          userId: outsider.id
+        });
+
+        const target =
+          kind === 'task'
+            ? task
+            : await persist(Task.build(), {
+                title: 'Unassigned child',
+                taskNumber: 2,
+                columnId: column.id,
+                parentTaskId: task.id,
+                createdById: owner.id
+              });
+        const before = target.toJSON();
+
+        expect(await TaskAssignee.count({ where: { taskId: target.id } })).toBe(
+          0
+        );
+
+        for (const description of ['<p>Text from a project member</p>', '']) {
+          await write(
+            'put',
+            `/tasks/${target.id}`,
+            { description },
+            'date-outsider-token'
+          ).expect(200);
+
+          const response = await request(app.getHttpServer())
+            .get(`/tasks/${target.id}`)
+            .auth('date-outsider-token', { type: 'bearer' })
+            .expect(200);
+
+          expect(response.body.description).toBe(description);
+          expect(response.body.title).toBe(before.title);
+          expect(response.body.createdById).toBe(owner.id);
+          expect((await target.reload()).dueDate).toEqual(before.dueDate);
+          expect(target.startDate).toEqual(before.startDate);
+
+          const history = await ActivityEvent.findOne({
+            where: { entityId: String(target.id) },
+            order: [['id', 'DESC']]
+          });
+
+          expect(history?.actorUserId).toBe(outsider.id);
+          expect(
+            history?.changes.some(change => change.field === 'description')
+          ).toBe(true);
+        }
+
+        expect(ws.emitTaskUpdated).toHaveBeenCalledTimes(2);
+      }
+    );
+
+    it.each([
+      { title: 'Other title' },
+      { startDate: '2026-10-12T00:00:00Z' },
+      { dueDate: '2026-10-23T00:00:00Z' }
+    ])(
+      'rejects a member description patch mixed with protected fields: %p',
+      async (protectedPatch): Promise<void> => {
+        await persist(ProjectMember.build(), {
+          projectId: project.id,
+          userId: outsider.id
+        });
+
+        const before = task.toJSON();
+
+        await write(
+          'put',
+          `/tasks/${task.id}`,
+          { description: '<p>Must not be saved</p>', ...protectedPatch },
+          'date-outsider-token'
+        ).expect(403);
+
+        expect((await task.reload()).toJSON()).toEqual(before);
+        expect(
+          await ActivityEvent.count({ where: { projectId: project.id } })
+        ).toBe(0);
+        expect(ws.emitTaskUpdated).not.toHaveBeenCalled();
+      }
+    );
+
+    it('denies description writes without authentication, project access or an active task', async (): Promise<void> => {
+      await request(app.getHttpServer())
+        .put(`/tasks/${task.id}`)
+        .send({ description: '<p>No session</p>' })
+        .expect(401);
+
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { description: '<p>No access</p>' },
+        'date-outsider-token'
+      ).expect(404);
+      await assignExecutor(outsider);
+      await task.destroy();
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { description: '<p>Archived</p>' },
+        'date-outsider-token'
+      ).expect(404);
+
+      expect(
+        await ActivityEvent.count({ where: { projectId: project.id } })
+      ).toBe(0);
+      expect(ws.emitTaskUpdated).not.toHaveBeenCalled();
+    });
+
+    it('allows description editing in a child without inheriting start-date permission from its parent', async (): Promise<void> => {
       await assignExecutor(outsider);
       const child = await persist(Task.build(), {
         title: 'Child task',
@@ -462,29 +576,37 @@ describeWithDatabase(
       await write(
         'put',
         `/tasks/${child.id}`,
-        { description: '<p>Denied</p>' },
+        { description: '<p>Child description</p>' },
+        'date-outsider-token'
+      ).expect(200);
+
+      await write(
+        'put',
+        `/tasks/${child.id}`,
+        { startDate: '2026-10-12T00:00:00Z' },
         'date-outsider-token'
       ).expect(403);
-      expect((await child.reload()).description).toBeFalsy();
-      expect(ws.emitTaskUpdated).not.toHaveBeenCalled();
+
+      expect((await child.reload()).description).toBe(
+        '<p>Child description</p>'
+      );
+      expect(ws.emitTaskUpdated).toHaveBeenCalledTimes(1);
     });
 
-    it('rejects description changes after assignment or project access is removed', async (): Promise<void> => {
+    it('keeps description editing after assignment removal but denies it after project access removal', async (): Promise<void> => {
       await assignExecutor(outsider);
-      const before = task.toJSON();
       await TaskAssignee.destroy({
         where: { taskId: task.id, userId: outsider.id }
       });
       await write(
         'put',
         `/tasks/${task.id}`,
-        { description: '<p>Removed assignment</p>' },
+        { description: '<p>Still a project member</p>' },
         'date-outsider-token'
-      ).expect(403);
-      await persist(TaskAssignee.build(), {
-        taskId: task.id,
-        userId: outsider.id
-      });
+      ).expect(200);
+
+      const before = (await task.reload()).toJSON();
+
       await ProjectMember.destroy({
         where: { projectId: project.id, userId: outsider.id }
       });
@@ -497,8 +619,8 @@ describeWithDatabase(
       expect((await task.reload()).toJSON()).toEqual(before);
       expect(
         await ActivityEvent.count({ where: { projectId: project.id } })
-      ).toBe(0);
-      expect(ws.emitTaskUpdated).not.toHaveBeenCalled();
+      ).toBe(1);
+      expect(ws.emitTaskUpdated).toHaveBeenCalledTimes(1);
     });
 
     it('rolls back an executor description when its accompanying start date is invalid', async (): Promise<void> => {
