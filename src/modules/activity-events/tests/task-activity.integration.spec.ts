@@ -346,12 +346,12 @@ describeWithDatabase(
       await http(first)
         .put(`/tasks/${task.id}`)
         .send({
-          dueDate: '2026-10-15'
+          startDate: '2026-10-09'
         })
         .expect(200);
       await http(owner)
         .put(`/tasks/${task.id}`)
-        .send({ startDate: '2026-10-09', priority: 'high' })
+        .send({ dueDate: '2026-10-15', priority: 'high' })
         .expect(200);
       await http(owner)
         .patch(`/tasks/${task.id}/move`)
@@ -362,11 +362,11 @@ describeWithDatabase(
       expect(page.items[0].actionType).toBe('moved');
       expect(page.items[1].actorUserId).toBe(owner.id);
       expect(page.items[1].changes.map(change => change.field)).toEqual(
-        expect.arrayContaining(['startDate', 'priority'])
+        expect.arrayContaining(['dueDate', 'priority'])
       );
       expect(page.items[2].actorUserId).toBe(first.id);
       expect(page.items[2].changes.map(change => change.field)).toEqual([
-        'dueDate'
+        'startDate'
       ]);
       await http(owner)
         .put(`/tasks/${task.id}`)

@@ -343,7 +343,7 @@ export class TasksService {
 
     if (due.getTime() < start.getTime()) {
       throw new HttpException(
-        'Дата исполнения не может быть раньше даты начала работ',
+        'Требуемое время готовности не может быть раньше даты начала работ',
         HttpStatus.BAD_REQUEST
       );
     }
@@ -1683,8 +1683,8 @@ export class TasksService {
     const fields = Object.entries(dto).filter(
       ([, value]) => value !== undefined
     );
-    if (fields.length === 1 && fields[0][0] === 'dueDate') {
-      // Снятие назначения не пересекается с уже разрешённой записью срока.
+    if (fields.length === 1 && fields[0][0] === 'startDate') {
+      // Снятие назначения не пересекается с разрешённой записью начала работ.
       const assignment = await this.assigneeRepository.findOne({
         where: { taskId: task.id, userId },
         transaction,
@@ -1694,7 +1694,7 @@ export class TasksService {
     }
 
     throw new HttpException(
-      'Изменять поля задачи может только её создатель. Исполнитель может изменять только дату исполнения.',
+      'Изменять поля задачи может только её создатель. Исполнитель может изменять только дату начала работ.',
       HttpStatus.FORBIDDEN
     );
   }

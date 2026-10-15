@@ -382,6 +382,11 @@ describeWithDatabase('Column status API with isolated PostgreSQL', () => {
         .put(`/tasks/${task.id}`)
         .set('x-test-user', String(outsider.id))
         .send({ dueDate: '2026-10-20T00:00:00Z' })
+        .expect(403);
+      await request(app.getHttpServer())
+        .put(`/tasks/${task.id}`)
+        .set('x-test-user', String(outsider.id))
+        .send({ startDate: '2026-10-14T00:00:00Z' })
         .expect(isExecutor ? 200 : 403);
 
       await request(app.getHttpServer())

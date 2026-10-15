@@ -50,7 +50,7 @@ export class CreateTaskDto {
   @IsEnum(['', 'low', 'medium', 'high', 'urgent'])
   priority?: string;
 
-  @ApiProperty({ description: 'Дата исполнения' })
+  @ApiProperty({ description: 'Требуемое время готовности' })
   @IsOptional()
   @IsDateString()
   dueDate?: string;
