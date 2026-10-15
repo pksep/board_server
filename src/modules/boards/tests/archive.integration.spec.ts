@@ -597,4 +597,137 @@ describeWithDatabase('Archive API with isolated PostgreSQL', () => {
     expect(await Board.findByPk(board.id)).not.toBeNull();
     expect(await Task.findByPk(root.id)).not.toBeNull();
   });
+
+  it('creates a board with every active project member, not the source board subset', async (): Promise<void> => {
+    await persist(ProjectMember.build(), {
+      projectId: project.id,
+      userId: outsider.id
+    });
+    board.membersIds = [owner.id];
+    await board.save();
+    const archivedUser = await persist(User.build(), {
+      initial: 'Archived',
+      login: 'Archived',
+      serviceNumber: `board-archived-${sequence}`,
+      ban: true
+    });
+    await persist(ProjectMember.build(), {
+      projectId: project.id,
+      userId: archivedUser.id
+    });
+    const response = await request(app.getHttpServer())
+      .post(`/projects/${project.id}/boards`)
+      .set('x-test-user', String(owner.id))
+      .send({ title: 'All project', sourceBoardId: board.id })
+      .expect(201);
+
+    expect(response.body.membersIds.sort()).toEqual(
+      [owner.id, outsider.id].sort()
+    );
+    expect((await Board.findByPk(response.body.id))!.membersIds.sort()).toEqual(
+      [owner.id, outsider.id].sort()
+    );
+    expect(
+      await BoardColumn.count({ where: { boardId: response.body.id } })
+    ).toBe(columns.length);
+  });
+
+  it('persists a selected subset and explicit empty selection without changing project access', async (): Promise<void> => {
+    await persist(ProjectMember.build(), {
+      projectId: project.id,
+      userId: outsider.id
+    });
+    await request(app.getHttpServer())
+      .put(`/boards/${board.id}`)
+      .set('x-test-user', String(owner.id))
+      .send({ membersIds: [owner.id] })
+      .expect(200);
+    const response = await request(app.getHttpServer())
+      .get(`/boards/${board.id}`)
+      .set('x-test-user', String(outsider.id))
+      .expect(200);
+    expect(response.body.membersIds).toEqual([owner.id]);
+    await request(app.getHttpServer())
+      .put(`/boards/${board.id}`)
+      .set('x-test-user', String(owner.id))
+      .send({ membersIds: [] })
+      .expect(200);
+    expect((await Board.findByPk(board.id))!.membersIds).toEqual([]);
+    await request(app.getHttpServer())
+      .put(`/boards/${board.id}`)
+      .set('x-test-user', String(owner.id))
+      .send({ title: 'Rename only' })
+      .expect(200);
+    expect((await Board.findByPk(board.id))!.membersIds).toEqual([]);
+  });
+
+  it('keeps legacy inheritance when editing only board details', async (): Promise<void> => {
+    expect(board.membersIds).toBeNull();
+    await request(app.getHttpServer())
+      .put(`/boards/${board.id}`)
+      .set('x-test-user', String(owner.id))
+      .send({ title: 'Legacy rename' })
+      .expect(200);
+    expect((await Board.findByPk(board.id))!.membersIds).toBeNull();
+    const response = await request(app.getHttpServer())
+      .post(`/projects/${project.id}/boards`)
+      .set('x-test-user', String(owner.id))
+      .send({ title: 'Empty', membersIds: [] })
+      .expect(201);
+    expect(response.body.membersIds).toEqual([]);
+  });
+
+  it('rejects outsiders and archived members without partially saving board details', async (): Promise<void> => {
+    const archivedUser = await persist(User.build(), {
+      initial: 'Banned',
+      login: 'Banned',
+      serviceNumber: `board-banned-${sequence}`,
+      ban: true
+    });
+    await persist(ProjectMember.build(), {
+      projectId: project.id,
+      userId: archivedUser.id
+    });
+    const originalTitle = board.title;
+    const count = await Board.count({ where: { projectId: project.id } });
+    for (const invalid of [outsider.id, archivedUser.id]) {
+      await request(app.getHttpServer())
+        .post(`/projects/${project.id}/boards`)
+        .set('x-test-user', String(owner.id))
+        .send({ title: 'Rejected', membersIds: [invalid] })
+        .expect(400);
+      await request(app.getHttpServer())
+        .put(`/boards/${board.id}`)
+        .set('x-test-user', String(owner.id))
+        .send({ title: 'Rejected', membersIds: [invalid] })
+        .expect(400);
+    }
+    expect(await Board.count({ where: { projectId: project.id } })).toBe(count);
+    expect((await Board.findByPk(board.id))!.title).toBe(originalTitle);
+    await request(app.getHttpServer())
+      .put(`/boards/${board.id}`)
+      .set('x-test-user', String(outsider.id))
+      .send({ membersIds: [owner.id] })
+      .expect(404);
+  });
+
+  it('validates membership again after a participant leaves the project', async (): Promise<void> => {
+    await persist(ProjectMember.build(), {
+      projectId: project.id,
+      userId: outsider.id
+    });
+    await request(app.getHttpServer())
+      .put(`/boards/${board.id}`)
+      .set('x-test-user', String(owner.id))
+      .send({ membersIds: [outsider.id] })
+      .expect(200);
+    await ProjectMember.destroy({
+      where: { projectId: project.id, userId: outsider.id }
+    });
+    await request(app.getHttpServer())
+      .put(`/boards/${board.id}`)
+      .set('x-test-user', String(owner.id))
+      .send({ membersIds: [outsider.id] })
+      .expect(400);
+  });
 });

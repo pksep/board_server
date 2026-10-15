@@ -10,6 +10,7 @@ import {
 } from 'sequelize-typescript';
 import { User } from 'src/modules/users/model/users.model';
 import { TTaskAttributeValues } from 'src/modules/projects/interfaces/task-attribute.interface';
+import type { TaskEntityReference } from '../interfaces/task-entity.interface';
 
 // Lazy requires для решения circular dependency (SWC live bindings)
 const lazyBoardColumn = () =>
@@ -21,6 +22,10 @@ const lazyTaskAttachment = () =>
 
 @Table({ tableName: 'tasks', paranoid: true })
 export class Task extends Model<Task> {
+  @ApiProperty({ description: 'Сущность из базы продукции', nullable: true })
+  @Column({ type: DataType.JSONB, allowNull: true, field: 'linked_entity' })
+  linkedEntity: TaskEntityReference | null;
+
   @ApiProperty({ example: 1, description: 'Уникальный идентификатор' })
   @Column({
     type: DataType.INTEGER,
@@ -66,7 +71,7 @@ export class Task extends Model<Task> {
   })
   approvalStatus: string;
 
-  @ApiProperty({ description: 'Дата исполнения' })
+  @ApiProperty({ description: 'Требуемое время готовности' })
   @Column({ type: DataType.DATE, allowNull: true, field: 'due_date' })
   dueDate: Date;
 

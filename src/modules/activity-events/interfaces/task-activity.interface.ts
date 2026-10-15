@@ -2,7 +2,15 @@ import {
   ActivityActionType,
   ActivityEntityType
 } from '../activity-events.constants';
-import { ActivityChange } from './activity-event.interface';
+import { ActivityChange, ActivityEventPage } from './activity-event.interface';
+
+export interface TaskActivityPage extends ActivityEventPage<TaskActivityItem> {
+  accessibleProjectIds: number[];
+}
+
+export interface TaskActivityReadResult {
+  throughEventId: number;
+}
 
 export interface TaskActivityItem {
   id: number;
@@ -21,6 +29,7 @@ export interface TaskActivityItem {
   metadata: Record<string, unknown>;
   createdAt: Date;
   readAt: Date | null;
+  isRecipient: boolean;
   taskId: number;
   taskProjectId: number;
   taskTitle: string;

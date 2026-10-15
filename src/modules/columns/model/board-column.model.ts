@@ -9,6 +9,7 @@ import {
   HasMany
 } from 'sequelize-typescript';
 import { ColumnStatus } from '../interfaces/column-status.interface';
+import { ColumnMovePermission } from '../interfaces/column-move-permission.interface';
 
 // Lazy requires для решения circular dependency (BoardColumn ↔ Board, BoardColumn → Task)
 const lazyBoard = () => require('../../boards/model/board.model').Board;
@@ -49,6 +50,21 @@ export class BoardColumn extends Model<BoardColumn> {
     validate: { isIn: [Object.values(ColumnStatus)] }
   })
   status: ColumnStatus | null;
+
+  @ApiProperty({
+    enum: ColumnMovePermission,
+    default: ColumnMovePermission.AnyActions,
+    description:
+      'Разрешение на вывод задач из колонки; владельцем считается создатель задачи'
+  })
+  @Col({
+    type: DataType.STRING(32),
+    allowNull: false,
+    defaultValue: ColumnMovePermission.AnyActions,
+    field: 'move_permission',
+    validate: { isIn: [Object.values(ColumnMovePermission)] }
+  })
+  movePermission: ColumnMovePermission;
 
   @ApiProperty({ example: 0, description: 'Порядок' })
   @Col({ type: DataType.INTEGER, allowNull: false, defaultValue: 0 })

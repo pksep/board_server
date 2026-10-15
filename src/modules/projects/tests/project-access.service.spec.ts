@@ -101,4 +101,21 @@ describe('ProjectAccessService', () => {
       })
     );
   });
+
+  it('reads all active project members with the same transactional lock used by assignment validation', async () => {
+    memberRepository.findAll.mockResolvedValue([{ userId: 2 }, { userId: 3 }]);
+
+    await expect(service.getActiveMemberIds(10, transaction)).resolves.toEqual([
+      2, 3
+    ]);
+    expect(memberRepository.findAll).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { projectId: 10 },
+        transaction,
+        include: [
+          expect.objectContaining({ where: { ban: false }, required: true })
+        ]
+      })
+    );
+  });
 });

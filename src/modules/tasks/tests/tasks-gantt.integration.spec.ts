@@ -28,6 +28,7 @@ import { TokenAuth } from '../../auth/jwt-auth.guard';
 import { AccessTokenService } from '../../auth/access-token.service';
 import type { IUserDataToken } from '../../auth/interfaces/interface';
 import type { TaskGanttSnapshot } from '../interfaces/task-gantt.interface';
+import type { PersonalTaskPage } from '../interfaces/personal-task.interface';
 import { S3Service } from '../../s3/s3.service';
 import { WsGateway } from '../../ws/ws.gateway';
 
@@ -487,6 +488,172 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     }
   );
 
+  /** Личные списки проверяются тем же HTTP-контуром, без отдельного обхода авторизации. */
+  async function readPersonal(
+    query: Record<string, string> = {},
+    token = 'gantt-owner-token'
+  ): Promise<PersonalTaskPage> {
+    const response = await request(app.getHttpServer())
+      .get('/tasks/personal')
+      .query(query)
+      .auth(token, { type: 'bearer' })
+      .expect(200);
+
+    return response.body;
+  }
+
+  it('personal lists separate creator and assignee, include subtasks/undated/completed tasks and omit bodies/files', async (): Promise<void> => {
+    roots[0].dueDate = null;
+    await roots[0].save();
+    const child = await persist(Task.build(), {
+      title: 'Personal child',
+      taskNumber: 90,
+      columnId: columns[0].id,
+      createdById: outsider.id,
+      parentTaskId: roots[0].id,
+      dueDate: new Date('2026-10-02T00:00:00Z')
+    });
+    await persist(TaskAssignee.build(), { taskId: child.id, userId: owner.id });
+    const ids = new Set([...roots, child].map(task => task.id));
+    const created = await readPersonal({ scope: 'created', limit: '100' });
+    expect(
+      created.items
+        .filter(item => ids.has(item.task.id))
+        .map(item => item.task.id)
+    ).toEqual([roots[1].id, roots[2].id, roots[0].id]);
+    const assigned = await readPersonal({ scope: 'assigned', limit: '100' });
+    expect(
+      await service.getPersonalTaskIds(owner.id, { scope: 'assigned' })
+    ).toEqual(
+      assigned.items
+        .map(item => item.task.id)
+        .sort((left, right) => left - right)
+    );
+    expect(
+      await service.getPersonalTaskIds(owner.id, { scope: 'created' })
+    ).toEqual(
+      created.items
+        .map(item => item.task.id)
+        .sort((left, right) => left - right)
+    );
+    expect(
+      assigned.items
+        .filter(item => ids.has(item.task.id))
+        .map(item => item.task.id)
+    ).toEqual([child.id, roots[0].id]);
+    for (const item of assigned.items) {
+      expect(item.task).not.toHaveProperty('attachments');
+      expect(item.task).not.toHaveProperty('description');
+      expect(item.task).not.toHaveProperty('subtasks');
+      expect(
+        item.task.assignees.some(assignment => assignment.userId === owner.id)
+      ).toBe(true);
+    }
+    expect(
+      assigned.items.find(item => item.task.id === roots[0].id)
+    ).toMatchObject({ projectId: project.id, projectPrefix: project.prefix });
+  });
+
+  it('personal task pages sort globally before pagination, with deterministic ties and null dates last', async (): Promise<void> => {
+    roots[0].dueDate = null;
+    await roots[0].save();
+    roots[2].dueDate = new Date('2026-09-01T00:00:00Z');
+    await roots[2].save();
+    const all = await readPersonal({ limit: '100' });
+    expect(all.hasMore).toBe(false);
+    const collected: number[] = [];
+    let offset = 0;
+    let more = true;
+    while (more) {
+      const page = await readPersonal({ limit: '2', offset: String(offset) });
+      collected.push(...page.items.map(item => item.task.id));
+      expect(page.offset).toBe(offset + page.items.length);
+      offset = page.offset;
+      more = page.hasMore;
+    }
+    expect(collected).toEqual(all.items.map(item => item.task.id));
+    expect(new Set(collected).size).toBe(collected.length);
+    expect(all.items.at(-1)?.task.dueDate).toBeNull();
+    const dates = all.items.map(item =>
+      item.task.dueDate ? new Date(item.task.dueDate).getTime() : Infinity
+    );
+    expect(dates).toEqual([...dates].sort((left, right) => left - right));
+  });
+
+  it('personal lists keep project access checks even for a creator/assignee and reject revoked/archived locations', async (): Promise<void> => {
+    roots[0].createdById = outsider.id;
+    await roots[0].save();
+    const containsRoot = (page: PersonalTaskPage): boolean =>
+      page.items.some(item => item.task.id === roots[0].id);
+    expect(
+      containsRoot(
+        await readPersonal({ scope: 'created' }, 'gantt-outsider-token')
+      )
+    ).toBe(false);
+    expect(
+      containsRoot(
+        await readPersonal({ scope: 'assigned' }, 'gantt-outsider-token')
+      )
+    ).toBe(false);
+    const member = await persist(ProjectMember.build(), {
+      projectId: project.id,
+      userId: outsider.id
+    });
+    expect(
+      containsRoot(
+        await readPersonal({ scope: 'created' }, 'gantt-outsider-token')
+      )
+    ).toBe(true);
+    await member.destroy();
+    expect(
+      containsRoot(
+        await readPersonal({ scope: 'assigned' }, 'gantt-outsider-token')
+      )
+    ).toBe(false);
+    await board.destroy();
+    expect(containsRoot(await readPersonal({ scope: 'assigned' }))).toBe(false);
+    expect(
+      await service.getPersonalTaskIds(owner.id, { scope: 'assigned' })
+    ).not.toContain(roots[0].id);
+    await board.restore();
+    await columns[0].destroy();
+    expect(containsRoot(await readPersonal({ scope: 'assigned' }))).toBe(false);
+    await columns[0].restore();
+    await roots[0].destroy();
+    expect(containsRoot(await readPersonal({ scope: 'assigned' }))).toBe(false);
+    await roots[0].restore();
+    await project.destroy();
+    expect(containsRoot(await readPersonal({ scope: 'assigned' }))).toBe(false);
+    expect(
+      await service.getPersonalTaskIds(owner.id, { scope: 'assigned' })
+    ).not.toContain(roots[0].id);
+  });
+
+  it.each([
+    { scope: 'wrong' },
+    { limit: '101' },
+    { limit: '0' },
+    { offset: '-1' }
+  ])('validates personal list parameters: %p', async (query): Promise<void> => {
+    await request(app.getHttpServer())
+      .get('/tasks/personal')
+      .query(query)
+      .auth('gantt-owner-token', { type: 'bearer' })
+      .expect(400);
+  });
+
+  it('personal lists require authentication and do not accept an impersonated user ID', async (): Promise<void> => {
+    await request(app.getHttpServer()).get('/tasks/personal').expect(401);
+    const own = await readPersonal({
+      userId: String(outsider.id),
+      scope: 'created',
+      limit: '100'
+    });
+    expect(own.items.every(item => item.task.createdById === owner.id)).toBe(
+      true
+    );
+  });
+
   it('loads a filtered 6000-task/600-user/20-board fixture with bounded queries and a reduced payload', async (): Promise<void> => {
     const loadProject = await persist(Project.build(), {
       title: 'Large Gantt QA',
@@ -585,10 +752,11 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       expect(legacy).toHaveLength(6000);
       expect(result.total).toBe(120);
       expect(
-        result.items.every(item =>
-          item.assignees.some(assigned => assigned.userId === owner.id) ||
-          (item.createdById === owner.id &&
-            item.assignees.some(assigned => assigned.userId !== owner.id))
+        result.items.every(
+          item =>
+            item.assignees.some(assigned => assigned.userId === owner.id) ||
+            (item.createdById === owner.id &&
+              item.assignees.some(assigned => assigned.userId !== owner.id))
         )
       ).toBe(true);
       expect(
@@ -600,6 +768,28 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       expect(all.total).toBe(6000);
       expect(allQueries).toBeLessThanOrEqual(4);
       expect(allBytes).toBeLessThan(legacyBytes / 4);
+      queryCount = 0;
+      const personal = await service.getPersonalTasks(owner.id, {
+        scope: 'assigned',
+        limit: 50
+      });
+      expect(personal.items).toHaveLength(50);
+      expect(personal.hasMore).toBe(true);
+      expect(queryCount).toBeLessThanOrEqual(4);
+      queryCount = 0;
+      const counterTaskIds = await service.getPersonalTaskIds(owner.id, {
+        scope: 'assigned'
+      });
+      expect(counterTaskIds.length).toBeGreaterThan(50);
+      expect(queryCount).toBe(1);
+      expect(
+        personal.items.every(item => counterTaskIds.includes(item.task.id))
+      ).toBe(true);
+      expect(
+        personal.items.every(item =>
+          item.task.assignees.some(assignment => assignment.userId === owner.id)
+        )
+      ).toBe(true);
       console.log(
         'Gantt isolated benchmark',
         JSON.stringify({

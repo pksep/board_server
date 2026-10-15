@@ -5,6 +5,7 @@ import { BoardsService } from './boards.service';
 import { Board } from './model/board.model';
 import { BoardColumn } from '../columns/model/board-column.model';
 import { ColumnStatus } from '../columns/interfaces/column-status.interface';
+import { ColumnMovePermission } from '../columns/interfaces/column-move-permission.interface';
 import { ProjectAccessService } from '../projects/project-access.service';
 import { Task } from '../tasks/model/task.model';
 import { WsGateway } from '../ws/ws.gateway';
@@ -128,6 +129,7 @@ describe('BoardsService.create', () => {
         title: 'Очередь',
         color: '#111111',
         status: ColumnStatus.Queued,
+        movePermission: ColumnMovePermission.CreatorsOnly,
         order: 0
       },
       { id: 2, boardId: 10, title: 'Готово', color: '#22aa22', order: 1 }
@@ -149,7 +151,8 @@ describe('BoardsService.create', () => {
       bulkCreate: jest.fn().mockResolvedValue([])
     };
     const projectAccess = {
-      assertCanRead: jest.fn().mockResolvedValue(undefined)
+      assertCanRead: jest.fn().mockResolvedValue(undefined),
+      getActiveMemberIds: jest.fn().mockResolvedValue([42, 43])
     };
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -168,6 +171,10 @@ describe('BoardsService.create', () => {
     ).resolves.toBe(createdBoard);
 
     expect(projectAccess.assertCanRead).toHaveBeenCalledWith(7, 42);
+    expect(boardRepository.create).toHaveBeenCalledWith(
+      expect.objectContaining({ membersIds: [42, 43] }),
+      { transaction }
+    );
     expect(boardRepository.findOne).toHaveBeenCalledWith({
       attributes: ['id'],
       where: { id: 10, projectId: 7 },
@@ -185,6 +192,7 @@ describe('BoardsService.create', () => {
           title: 'Очередь',
           color: '#111111',
           status: ColumnStatus.Queued,
+          movePermission: ColumnMovePermission.CreatorsOnly,
           order: 0
         },
         {
@@ -192,6 +200,7 @@ describe('BoardsService.create', () => {
           title: 'Готово',
           color: '#22aa22',
           status: null,
+          movePermission: ColumnMovePermission.AnyActions,
           order: 1
         }
       ],

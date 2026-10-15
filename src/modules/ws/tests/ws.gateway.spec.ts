@@ -1,4 +1,5 @@
 import { WsGateway } from '../ws.gateway';
+import { Server } from 'socket.io';
 import { getErpSessionHash } from '../../auth/utils/board-session';
 
 describe('WsGateway connection authentication', () => {
@@ -6,17 +7,30 @@ describe('WsGateway connection authentication', () => {
 
   it('distinguishes read-only invalidation without changing the existing task-change signal', (): void => {
     const gateway = createGateway(jest.fn());
-    const emit = jest.fn();
-    const to = jest.fn().mockReturnValue({ emit });
-    gateway.server = { to } as typeof gateway.server;
+    gateway.server = new Server();
+    const recipients = gateway.server.to('user:7');
+    const emit = jest.spyOn(recipients, 'emit').mockReturnValue(true);
+    const broadcast = jest.spyOn(gateway.server, 'emit').mockReturnValue(true);
+    const to = jest.spyOn(gateway.server, 'to').mockReturnValue(recipients);
 
     gateway.emitTaskActivityChanged([7], true);
     expect(to).toHaveBeenCalledWith(['user:7']);
     expect(emit).toHaveBeenLastCalledWith('activity:changed', {
       readOnly: true
     });
+    expect(broadcast).not.toHaveBeenCalled();
     gateway.emitTaskActivityChanged([7]);
     expect(emit).toHaveBeenLastCalledWith('activity:changed');
+    expect(broadcast).toHaveBeenLastCalledWith('activity:general-changed');
+    to.mockClear();
+    gateway.emitTaskActivityChanged([]);
+    expect(to).not.toHaveBeenCalled();
+    expect(broadcast).toHaveBeenCalledTimes(2);
+    gateway.emitTaskActivityChanged([7], false, 42);
+    expect(emit).toHaveBeenLastCalledWith('activity:changed', { eventId: 42 });
+    expect(broadcast).toHaveBeenLastCalledWith('activity:general-changed', {
+      eventId: 42
+    });
   });
 
   /** Создаёт gateway с изолированными зависимостями для проверки cookie. */
@@ -69,6 +83,74 @@ describe('WsGateway connection authentication', () => {
     expect(authenticate).toHaveBeenNthCalledWith(2, 'central');
     expect(client.disconnect).toHaveBeenCalledWith(true);
   });
+
+  it.each([
+    { userIds: [7], readOnly: false },
+    { userIds: [], readOnly: false },
+    { userIds: [7], readOnly: true }
+  ])(
+    'filters revoked sessions from activity delivery: %p',
+    async ({ userIds, readOnly }): Promise<void> => {
+      const active = createClient('');
+      const revoked = createClient('');
+      active.data = { userId: 7, accessToken: 'active' };
+      revoked.data = { userId: 7, accessToken: 'revoked' };
+      const gateway = new WsGateway(
+        {} as any,
+        {} as any,
+        {} as any,
+        {
+          isEnabled: () => true,
+          authenticate: async (token: string): Promise<{ id: number }> => {
+            if (token === 'revoked') throw new Error('revoked');
+
+            return { id: 7 };
+          }
+        } as any
+      );
+      const fetchSockets = jest.fn().mockResolvedValue([active, revoked]);
+      gateway.server = {
+        in: jest.fn().mockReturnValue({ fetchSockets }),
+        fetchSockets
+      } as any;
+
+      gateway.emitTaskActivityChanged(userIds, readOnly, 42);
+      // Рассылка проверяет сессии асинхронно, включая общую ленту.
+      await new Promise<void>(resolve => setImmediate(resolve));
+
+      if (userIds.length) {
+        expect(active.emit).toHaveBeenCalledWith(
+          'activity:changed',
+          readOnly ? { readOnly: true } : { eventId: 42 }
+        );
+      } else {
+        expect(active.emit).not.toHaveBeenCalledWith(
+          'activity:changed',
+          expect.anything()
+        );
+      }
+      if (readOnly) {
+        expect(active.emit).not.toHaveBeenCalledWith(
+          'activity:general-changed',
+          expect.anything()
+        );
+      } else {
+        expect(active.emit).toHaveBeenCalledWith('activity:general-changed', {
+          eventId: 42
+        });
+      }
+      expect(revoked.emit).toHaveBeenCalledWith('auth:revoked');
+      expect(revoked.emit).not.toHaveBeenCalledWith(
+        'activity:changed',
+        expect.anything()
+      );
+      expect(revoked.emit).not.toHaveBeenCalledWith(
+        'activity:general-changed',
+        expect.anything()
+      );
+      expect(revoked.disconnect).toHaveBeenCalledWith(true);
+    }
+  );
 
   afterAll(() => {
     if (originalNodeEnv === undefined) {

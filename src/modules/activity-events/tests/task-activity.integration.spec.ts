@@ -346,27 +346,33 @@ describeWithDatabase(
       await http(first)
         .put(`/tasks/${task.id}`)
         .send({
-          startDate: '2026-10-09',
-          dueDate: '2026-10-15',
-          priority: 'high'
+          startDate: '2026-10-09'
         })
+        .expect(200);
+      await http(owner)
+        .put(`/tasks/${task.id}`)
+        .send({ dueDate: '2026-10-15', priority: 'high' })
         .expect(200);
       await http(owner)
         .patch(`/tasks/${task.id}/move`)
         .send({ columnId: otherColumn.id, order: 0 })
         .expect(200);
       const page = await feed(first);
-      expect(page.items).toHaveLength(3);
+      expect(page.items).toHaveLength(4);
       expect(page.items[0].actionType).toBe('moved');
-      expect(page.items[1].actorUserId).toBe(first.id);
+      expect(page.items[1].actorUserId).toBe(owner.id);
       expect(page.items[1].changes.map(change => change.field)).toEqual(
-        expect.arrayContaining(['dueDate', 'startDate', 'priority'])
+        expect.arrayContaining(['dueDate', 'priority'])
       );
+      expect(page.items[2].actorUserId).toBe(first.id);
+      expect(page.items[2].changes.map(change => change.field)).toEqual([
+        'startDate'
+      ]);
       await http(owner)
         .put(`/tasks/${task.id}`)
         .send({ priority: 'high' })
         .expect(200);
-      expect((await feed(first)).items).toHaveLength(3);
+      expect((await feed(first)).items).toHaveLength(4);
     });
 
     it('preserves the historical title and number after later changes', async (): Promise<void> => {
@@ -491,6 +497,163 @@ describeWithDatabase(
       const page = await feed(first);
       expect(page.items[0].actionType).toBe('deleted');
       await http(first).get(`/tasks/${page.items[0].taskId}`).expect(200);
+    });
+
+    it('shows all available task history only in the general scope and keeps counters personal', async (): Promise<void> => {
+      expect((await feed(owner)).items).toEqual([]);
+      const general = await feed(owner, '?scope=all&limit=20');
+      expect(
+        general.items.filter(event => event.taskId === task.id)
+      ).toHaveLength(1);
+      expect(general.items[0]).toMatchObject({
+        taskId: task.id,
+        isRecipient: false
+      });
+      expect((await feed(outsider, '?scope=all')).items).toEqual([]);
+      expect((await feed(first, '?scope=all')).items[0].isRecipient).toBe(true);
+      expect((await counts(owner)).total).toBe(0);
+      await http(owner)
+        .put(`/tasks/${task.id}`)
+        .send({ assigneeIds: [] })
+        .expect(200);
+      await http(owner)
+        .put(`/tasks/${task.id}`)
+        .send({ title: 'Unassigned general action' })
+        .expect(200);
+      const actions = await feed(owner, '?scope=all');
+      expect(
+        actions.items.filter(event => event.taskId === task.id)
+      ).toHaveLength(3);
+      expect(actions.items[0].taskTitle).toBe('Unassigned general action');
+      expect(ws.emitTaskActivityChanged).toHaveBeenLastCalledWith(
+        [],
+        false,
+        actions.items[0].id
+      );
+    });
+
+    it('paginates new actions oldest-first without skipping a burst, while old pages stay newest-first', async (): Promise<void> => {
+      const snapshot = (await feed(first)).items[0].id;
+      for (let index = 0; index < 7; index += 1) {
+        await http(owner)
+          .put(`/tasks/${task.id}`)
+          .send({ title: `Delta ${index}` })
+          .expect(200);
+      }
+      const all = (await feed(first)).items.map(event => event.id);
+      const incoming: number[] = [];
+      let cursor: number | null = snapshot;
+      do {
+        const page = await feed(first, `?afterId=${cursor}&limit=3`);
+        expect(page.items.length).toBeLessThanOrEqual(3);
+        incoming.push(...page.items.map(event => event.id));
+        cursor = page.nextCursor;
+      } while (cursor);
+      expect(incoming).toEqual(all.filter(id => id > snapshot).reverse());
+      const older = await feed(first, `?beforeId=${all[2]}&limit=2`);
+      expect(older.items.map(event => event.id)).toEqual(all.slice(3, 5));
+      await http(first)
+        .get(`/activity/task-feed?beforeId=${snapshot}&afterId=${snapshot}`)
+        .expect(400);
+      await http(first).get('/activity/task-feed?scope=invalid').expect(400);
+      await http(first).get('/activity/task-feed?afterId=-1').expect(400);
+      await http(first).get('/activity/task-feed?limit=101').expect(400);
+    });
+
+    it('read-only requests for task or project do not erase history or mark another user', async (): Promise<void> => {
+      const baseline = await feed(first);
+      await feed(first, '?scope=all');
+      await feed(first, '?limit=1');
+      expect((await counts(first)).total).toBe(1); // Само чтение HTTP-ленты ничего не подтверждает.
+      const opened = await http(first)
+        .patch('/activity/task-feed/read')
+        .send({ taskId: task.id })
+        .expect(200);
+      expect(opened.body.throughEventId).toBe(baseline.items[0].id);
+      expect((await counts(first)).total).toBe(0);
+      await http(owner)
+        .put(`/tasks/${task.id}`)
+        .send({ priority: 'high' })
+        .expect(200);
+      const snapshot = (await feed(first)).items[0].id;
+      await http(owner)
+        .put(`/tasks/${task.id}`)
+        .send({ priority: 'urgent' })
+        .expect(200);
+      await http(first)
+        .patch('/activity/task-feed/read')
+        .send({ projectId: project.id, throughEventId: snapshot })
+        .expect(200);
+      expect((await counts(first)).total).toBe(1);
+      expect((await feed(first)).items).toHaveLength(3);
+      await http(outsider)
+        .patch('/activity/task-feed/read')
+        .send({ projectId: project.id })
+        .expect(200);
+      expect((await counts(first)).total).toBe(1);
+      await http(first)
+        .patch('/activity/task-feed/read')
+        .send({ projectId: project.id })
+        .expect(200);
+      expect((await counts(first)).total).toBe(0);
+      await http(first).patch('/activity/task-feed/read').send({}).expect(400);
+      await http(first)
+        .patch('/activity/task-feed/read')
+        .send({ projectId: project.id, taskId: task.id })
+        .expect(400);
+    });
+
+    it('notifies the committed event ID so a late smaller transaction can be fetched again', async (): Promise<void> => {
+      const transaction = await sequelize.transaction();
+      let committed = false;
+      try {
+        const earlier = await activity.create(
+          {
+            projectId: project.id,
+            entityType: ActivityEntityType.Task,
+            entityId: String(task.id),
+            actionType: ActivityActionType.Updated,
+            actorUserId: owner.id,
+            changes: [{ field: 'priority', before: 'low', after: 'high' }]
+          },
+          { transaction }
+        );
+        await http(owner)
+          .put(`/tasks/${task.id}`)
+          .send({ title: 'Newer committed first' })
+          .expect(200);
+        const newest = (await feed(first)).items[0].id;
+        expect(newest).toBeGreaterThan(earlier.id);
+        expect(
+          (await feed(first)).items.some(event => event.id === earlier.id)
+        ).toBe(false);
+        await transaction.commit();
+        committed = true;
+        expect(ws.emitTaskActivityChanged).toHaveBeenLastCalledWith(
+          [first.id],
+          false,
+          earlier.id
+        );
+        const delta = await feed(first, `?afterId=${earlier.id - 1}&limit=20`);
+        expect(delta.items.map(event => event.id)).toEqual([
+          earlier.id,
+          newest
+        ]);
+      } finally {
+        if (!committed) await transaction.rollback();
+      }
+    });
+
+    it('removes revoked source and destination projects in general updates too', async (): Promise<void> => {
+      const before = await feed(first, '?scope=all');
+      await ProjectMember.destroy({
+        where: { projectId: project.id, userId: first.id }
+      });
+      const after = await http(first)
+        .get(`/activity/task-feed?scope=all&afterId=${before.items[0].id}`)
+        .expect(200);
+      expect(after.body.items).toEqual([]);
+      expect(after.body.accessibleProjectIds).not.toContain(project.id);
     });
 
     it('has idempotent deployment migration and does not backfill old history', async (): Promise<void> => {

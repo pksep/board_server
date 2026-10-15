@@ -11,6 +11,7 @@ import { UpdateTaskDto } from './dto/update-task.dto';
 import { MoveTaskDto } from './dto/move-task.dto';
 import { Project } from '../projects/model/project.model';
 import { BoardColumn } from '../columns/model/board-column.model';
+import { ColumnMovePermission } from '../columns/interfaces/column-move-permission.interface';
 import { Board } from '../boards/model/board.model';
 import { User } from '../users/model/users.model';
 import { ProjectTag } from '../tags/model/project-tag.model';
@@ -39,6 +40,11 @@ import {
 } from '../projects/interfaces/task-attribute.interface';
 import { CreateTaskTimeEntryDto } from './dto/create-task-time-entry.dto';
 import { TaskGanttQueryDto } from './dto/task-gantt-query.dto';
+import { PersonalTaskQueryDto } from './dto/personal-task-query.dto';
+import type {
+  PersonalTaskLocation,
+  PersonalTaskPage
+} from './interfaces/personal-task.interface';
 import type {
   TaskGanttItem,
   TaskGanttSnapshot
@@ -337,7 +343,7 @@ export class TasksService {
 
     if (due.getTime() < start.getTime()) {
       throw new HttpException(
-        'Дата исполнения не может быть раньше даты начала работ',
+        'Требуемое время готовности не может быть раньше даты начала работ',
         HttpStatus.BAD_REQUEST
       );
     }
@@ -441,6 +447,7 @@ export class TasksService {
   ) {
     return this.activityEvents.buildChanges({
       title: { before: null, after: task.title },
+      linkedEntity: { before: null, after: task.linkedEntity },
       description: { before: null, after: task.description },
       priority: { before: null, after: task.priority },
       approvalStatus: { before: null, after: task.approvalStatus },
@@ -513,6 +520,7 @@ export class TasksService {
         separate: true,
         attributes: [
           'id',
+          'createdById',
           'taskNumber',
           'title',
           'description',
@@ -521,6 +529,7 @@ export class TasksService {
           'dueDate',
           'startDate',
           'customAttributeValues',
+          'linkedEntity',
           'parentTaskId',
           'columnId',
           'order',
@@ -555,6 +564,112 @@ export class TasksService {
         ]
       }
     ];
+  }
+
+  /** Единая область личных списков и их счётчиков, включая доступ и архив каждого уровня. */
+  private personalTaskSource(query: PersonalTaskQueryDto): string {
+    return `FROM tasks task
+       JOIN board_columns col ON col.id = task.column_id AND col."deletedAt" IS NULL
+       JOIN boards board ON board.id = col.board_id AND board."deletedAt" IS NULL
+       JOIN projects project ON project.id = board.project_id AND project."deletedAt" IS NULL
+       WHERE task."deletedAt" IS NULL
+         AND (project.created_by_id = :userId OR EXISTS (
+           SELECT 1 FROM project_members member
+           WHERE member.project_id = project.id AND member.user_id = :userId
+         ))
+         AND ${
+           query.scope === 'assigned'
+             ? `EXISTS (SELECT 1 FROM task_assignees assignment
+                 WHERE assignment.task_id = task.id AND assignment.user_id = :userId)`
+             : 'task.created_by_id = :userId'
+         }`;
+  }
+
+  /** Счётчик раздела учитывает все его задачи, а не только первую видимую страницу. */
+  async getPersonalTaskIds(
+    userId: number,
+    query: PersonalTaskQueryDto
+  ): Promise<number[]> {
+    const records = await this.sequelize.query<{ id: number }>(
+      `SELECT task.id ${this.personalTaskSource(query)} ORDER BY task.id`,
+      { replacements: { userId }, type: QueryTypes.SELECT }
+    );
+
+    return records.map(record => record.id);
+  }
+
+  /** Проверка доступа к счётчику не загружает описание и граф дочерних задач. */
+  async assertCanReadTaskComments(
+    taskId: number,
+    userId: number
+  ): Promise<void> {
+    await this.assertTaskAccess(taskId, userId, undefined, false, true);
+  }
+
+  /** Читает одну порцию личного списка без обхода всех досок и полной иерархии задач. */
+  async getPersonalTasks(
+    userId: number,
+    query: PersonalTaskQueryDto = {}
+  ): Promise<PersonalTaskPage> {
+    const limit = query.limit ?? 50;
+    const offset = query.offset ?? 0;
+    // Владелец или участник активного проекта: те же правила, что assertCanRead.
+    // EXISTS не размножает задачу при нескольких участниках/назначениях.
+    const locations = await this.sequelize.query<PersonalTaskLocation>(
+      `SELECT task.id, project.id AS "projectId", project.prefix AS "projectPrefix"
+       ${this.personalTaskSource(query)}
+       ORDER BY task.due_date ASC NULLS LAST, task.id ASC
+       LIMIT :limit OFFSET :offset`,
+      {
+        replacements: { userId, limit: limit + 1, offset },
+        type: QueryTypes.SELECT
+      }
+    );
+    const page = locations.slice(0, limit);
+    if (!page.length) return { items: [], offset, hasMore: false };
+
+    // Общие связи строки списка; файлы, HTML и дочерние карточки здесь не нужны.
+    const tasks = await this.taskRepository.findAll({
+      attributes: [
+        'id',
+        'taskNumber',
+        'title',
+        'createdById',
+        'priority',
+        'approvalStatus',
+        'startDate',
+        'dueDate',
+        'columnId',
+        'parentTaskId',
+        'order',
+        'createdAt',
+        'updatedAt'
+      ],
+      where: { id: { [Op.in]: page.map(item => item.id) } },
+      include: this.taskIncludes().filter(
+        include => include.as === 'assignees' || include.as === 'tags'
+      )
+    });
+    const byId = new Map(tasks.map(task => [task.id, task]));
+    const items = page.flatMap(location => {
+      const task = byId.get(location.id);
+
+      return task
+        ? [
+            {
+              task,
+              projectId: location.projectId,
+              projectPrefix: location.projectPrefix
+            }
+          ]
+        : [];
+    });
+
+    return {
+      items,
+      offset: offset + page.length,
+      hasMore: locations.length > limit
+    };
   }
 
   /** Читает лёгкий снимок основных задач Ганта с теми же правами проекта и архивом. */
@@ -1311,6 +1426,7 @@ export class TasksService {
           dueDate,
           startDate,
           customAttributeValues,
+          linkedEntity: dto.linkedEntity ?? null,
           columnId,
           order: 0,
           createdById: userId
@@ -1432,6 +1548,7 @@ export class TasksService {
           dueDate,
           startDate,
           customAttributeValues,
+          linkedEntity: dto.linkedEntity ?? null,
           columnId: parent.columnId,
           parentTaskId: parentId,
           order: 0,
@@ -1554,6 +1671,34 @@ export class TasksService {
     }
   }
 
+  /** Проверяет именно поля: отдельное перемещение сохраняет правила исходной колонки. */
+  private async assertCanEditTaskFields(
+    task: Task,
+    dto: UpdateTaskDto,
+    userId: number,
+    transaction: Transaction
+  ): Promise<void> {
+    if (task.createdById === userId) return;
+
+    const fields = Object.entries(dto).filter(
+      ([, value]) => value !== undefined
+    );
+    if (fields.length === 1 && fields[0][0] === 'startDate') {
+      // Снятие назначения не пересекается с разрешённой записью начала работ.
+      const assignment = await this.assigneeRepository.findOne({
+        where: { taskId: task.id, userId },
+        transaction,
+        lock: transaction.LOCK.SHARE
+      });
+      if (assignment) return;
+    }
+
+    throw new HttpException(
+      'Изменять поля задачи может только её создатель. Исполнитель может изменять только дату начала работ.',
+      HttpStatus.FORBIDDEN
+    );
+  }
+
   /**
    * Обновить задачу
    */
@@ -1561,6 +1706,7 @@ export class TasksService {
     const transaction = await this.sequelize.transaction();
     try {
       const task = await this.assertTaskAccess(id, userId, transaction, true);
+      await this.assertCanEditTaskFields(task, dto, userId, transaction);
       const projectId = await this.getProjectIdByColumnId(
         task.columnId,
         transaction
@@ -1589,6 +1735,7 @@ export class TasksService {
               transaction
             );
       const before = {
+        linkedEntity: task.linkedEntity,
         title: task.title,
         description: task.description,
         priority: task.priority,
@@ -1613,10 +1760,16 @@ export class TasksService {
         dto.parentTaskId !== undefined &&
         dto.parentTaskId !== task.parentTaskId
       ) {
-        await this.prepareParentTaskChange(task, dto.parentTaskId, transaction);
+        await this.prepareParentTaskChange(
+          task,
+          dto.parentTaskId,
+          transaction,
+          userId
+        );
       }
 
       if (dto.title !== undefined) task.title = dto.title;
+      if (dto.linkedEntity !== undefined) task.linkedEntity = dto.linkedEntity;
       if (dto.description !== undefined) task.description = dto.description;
       if (dto.priority !== undefined) task.priority = dto.priority;
       if (dto.dueDate !== undefined) task.dueDate = dto.dueDate as any;
@@ -1665,6 +1818,12 @@ export class TasksService {
 
       const changedFields: Record<string, { before: unknown; after: unknown }> =
         {};
+      if (dto.linkedEntity !== undefined) {
+        changedFields.linkedEntity = {
+          before: before.linkedEntity,
+          after: task.linkedEntity
+        };
+      }
       if (dto.title !== undefined) {
         changedFields.title = { before: before.title, after: task.title };
       }
@@ -1775,7 +1934,8 @@ export class TasksService {
   private async prepareParentTaskChange(
     task: Task,
     parentTaskId: number | null,
-    transaction: Transaction
+    transaction: Transaction,
+    userId: number
   ): Promise<void> {
     const childTask = await this.taskRepository.findOne({
       where: { parentTaskId: task.id },
@@ -1808,6 +1968,12 @@ export class TasksService {
         );
       }
 
+      await this.assertTasksCanLeaveColumns(
+        [task],
+        currentParent.columnId,
+        userId,
+        transaction
+      );
       await this.placeTaskInColumn(
         task,
         currentParent.columnId,
@@ -1955,16 +2121,53 @@ export class TasksService {
     return order;
   }
 
+  /** Проверяет только выход, блокируя исходные правила до завершения переноса. */
+  private async assertTasksCanLeaveColumns(
+    tasks: Task[],
+    targetColumnId: number,
+    userId: number,
+    transaction: Transaction
+  ): Promise<void> {
+    const leaving = tasks.filter(task => task.columnId !== targetColumnId);
+    const columnIds = [...new Set(leaving.map(task => task.columnId))].sort(
+      (left, right) => left - right
+    );
+    const columns = new Map<number, BoardColumn>();
+
+    // Одно чтение на исходную колонку, не на каждую подзадачу; без JOIN в блокирующем запросе.
+    for (const id of columnIds) {
+      const column = await this.columnRepository.findByPk(id, {
+        attributes: ['id', 'movePermission'],
+        transaction,
+        lock: Transaction.LOCK.SHARE
+      });
+      if (!column)
+        throw new HttpException('Колонка не найдена', HttpStatus.NOT_FOUND);
+      columns.set(id, column);
+    }
+
+    if (
+      leaving.some(
+        task =>
+          columns.get(task.columnId)!.movePermission ===
+            ColumnMovePermission.CreatorsOnly && task.createdById !== userId
+      )
+    ) {
+      throw new HttpException(
+        'Из этой колонки задачу может переместить только её создатель',
+        HttpStatus.FORBIDDEN
+      );
+    }
+  }
+
   /**
-   * Перемещает задачу в колонку.
-   * Внутри текущей доски задача и её подзадачи меняют колонки независимо.
-   * При переносе родительской задачи на другую доску вместе с ней переносится
-   * вся иерархия, а отдельно подзадачу на другую доску переносить нельзя.
+   * Перемещает задачу в колонку с проверкой каждого фактического выхода.
+   * Внутри доски подзадачи перемещаются независимо; между досками переносится иерархия.
    */
   async move(id: number, dto: MoveTaskDto, userId: number): Promise<Task> {
     const transaction = await this.sequelize.transaction();
     try {
-      const task = await this.assertTaskAccess(id, userId, transaction);
+      const task = await this.assertTaskAccess(id, userId, transaction, true);
       const isSubtask = Boolean(task.parentTaskId);
       const source = await this.getColumnLocation(task.columnId, transaction);
       const target = await this.assertColumnAccess(
@@ -1986,6 +2189,12 @@ export class TasksService {
         !isSubtask && isCrossBoard
           ? await this.getTaskHierarchy(task, transaction)
           : [task];
+      await this.assertTasksCanLeaveColumns(
+        hierarchy,
+        dto.columnId,
+        userId,
+        transaction
+      );
       const taskIds = hierarchy.map(item => item.id);
       const beforeMove = new Map(
         hierarchy.map(item => [

@@ -10,6 +10,7 @@ describe('TasksService.update activity', () => {
     };
     const task = {
       id: 42,
+      createdById: 7,
       taskNumber: 12,
       title: 'Старое название',
       description: null,

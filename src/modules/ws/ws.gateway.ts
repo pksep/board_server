@@ -301,17 +301,28 @@ export class WsGateway
   // === Методы эмита (вызываются из сервисов) ===
 
   /** Личная инвалидация без текста задачи, идентификаторов проекта и чужих получателей. */
-  emitTaskActivityChanged(userIds: number[], readOnly = false): void {
+  emitTaskActivityChanged(
+    userIds: number[],
+    readOnly = false,
+    eventId?: number
+  ): void {
     const rooms = userIds.map(id => `user:${id}`);
 
     // Прочтение не меняет историю: клиенту достаточно сверить личные счётчики.
     if (readOnly) {
-      this.emitToRooms(rooms, 'activity:changed', { readOnly: true });
+      if (userIds.length) {
+        this.emitToRooms(rooms, 'activity:changed', { readOnly: true });
+      }
 
       return;
     }
 
-    this.emitToRooms(rooms, 'activity:changed');
+    const payload = eventId ? { eventId } : undefined;
+    if (userIds.length) {
+      this.emitToRooms(rooms, 'activity:changed', payload);
+    }
+    // Общая лента получает только сигнал: содержание и доступ проверяет защищённый GET.
+    this.emitToRooms([], 'activity:general-changed', payload);
   }
 
   /** Обновляет доступность исполнителя во всех открытых досках. */

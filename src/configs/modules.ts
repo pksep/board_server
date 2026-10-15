@@ -21,6 +21,7 @@ import { TagsModule } from 'src/modules/tags/tags.module';
 import { BoardsModule } from 'src/modules/boards/boards.module';
 import { ColumnsModule } from 'src/modules/columns/columns.module';
 import { TasksModule } from 'src/modules/tasks/tasks.module';
+import { TaskCommentCountersModule } from 'src/modules/task-comment-counters/task-comment-counters.module';
 import { WsModule } from 'src/modules/ws/ws.module';
 import { ActivityEventsModule } from 'src/modules/activity-events/activity-events.module';
 import { ProjectsMcpModule } from 'src/modules/projects-mcp/projects-mcp.module';
@@ -108,5 +109,6 @@ export const getAppModule = (): Type<any>[] => [
   ActivityEventsModule,
   ProjectsMcpModule,
   TasksModule,
+  TaskCommentCountersModule,
   WsModule
 ];
