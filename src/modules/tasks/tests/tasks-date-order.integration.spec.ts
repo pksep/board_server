@@ -33,7 +33,8 @@ import { WsGateway } from '../../ws/ws.gateway';
 
 const databaseUrl = process.env.BOARD_ARCHIVE_TEST_DATABASE_URL;
 const describeWithDatabase = databaseUrl ? describe : describe.skip;
-const errorMessage = 'Дата исполнения не может быть раньше даты начала работ';
+const errorMessage =
+  'Требуемое время готовности не может быть раньше даты начала работ';
 
 /** Создаёт данные только в выделенной тестовой базе. */
 async function persist<T extends Model>(
@@ -267,7 +268,7 @@ describeWithDatabase(
       }
     );
 
-    it('lets each current executor update only the execution date and records the real actor', async (): Promise<void> => {
+    it('lets each current executor update the start date and records the real actor without changing the deadline', async (): Promise<void> => {
       await assignExecutor(outsider);
       await assignExecutor(secondExecutor);
       for (const [index, [token, actor]] of (
@@ -279,7 +280,7 @@ describeWithDatabase(
         await write(
           'put',
           `/tasks/${task.id}`,
-          { dueDate: `2026-10-${22 + index}T00:00:00Z` },
+          { startDate: `2026-10-${12 + index}T00:00:00Z` },
           token
         ).expect(200);
         const last = await ActivityEvent.findOne({
@@ -287,19 +288,65 @@ describeWithDatabase(
           order: [['id', 'DESC']]
         });
         expect(last?.actorUserId).toBe(actor.id);
+        expect(last?.changes.map(change => change.field)).toEqual([
+          'startDate'
+        ]);
       }
-      expect((await task.reload()).dueDate.toISOString()).toBe(
-        '2026-10-23T00:00:00.000Z'
+      expect((await task.reload()).startDate.toISOString()).toBe(
+        '2026-10-13T00:00:00.000Z'
       );
-      expect(task.startDate.toISOString()).toBe('2026-10-10T00:00:00.000Z');
+      expect(task.dueDate.toISOString()).toBe('2026-10-20T00:00:00.000Z');
       expect(task.createdById).toBe(owner.id);
     });
+
+    it.each(['task', 'subtask'])(
+      'denies an assigned noncreator changing the %s deadline on its own',
+      async (kind): Promise<void> => {
+        await assignExecutor(outsider);
+        const target =
+          kind === 'task'
+            ? task
+            : await persist(Task.build(), {
+                title: 'Executor subtask',
+                taskNumber: 2,
+                columnId: column.id,
+                parentTaskId: task.id,
+                createdById: owner.id,
+                startDate: new Date('2026-10-10T00:00:00Z'),
+                dueDate: new Date('2026-10-20T00:00:00Z')
+              });
+
+        if (kind === 'subtask') {
+          await persist(TaskAssignee.build(), {
+            taskId: target.id,
+            userId: outsider.id
+          });
+        }
+
+        const before = target.toJSON();
+
+        for (const dueDate of ['2026-10-23T00:00:00Z', null]) {
+          await write(
+            'put',
+            `/tasks/${target.id}`,
+            { dueDate },
+            'date-outsider-token'
+          ).expect(403);
+        }
+
+        expect((await target.reload()).toJSON()).toEqual(before);
+        expect(
+          await ActivityEvent.count({ where: { projectId: project.id } })
+        ).toBe(0);
+        expect(ws.emitTaskUpdated).not.toHaveBeenCalled();
+      }
+    );
 
     it.each([
       { title: 'Other title' },
       { description: '<p>Changed</p>' },
       { priority: 'high' },
-      { startDate: '2026-10-11T00:00:00Z' },
+      { dueDate: '2026-10-23T00:00:00Z' },
       { assigneeIds: [] },
       { tagIds: [] },
       { approvalStatus: 'yes' },
@@ -322,7 +369,10 @@ describeWithDatabase(
         await request(app.getHttpServer())
           .put(`/tasks/${task.id}`)
           .auth('date-outsider-token', { type: 'bearer' })
-          .send({ ...protectedPatch, dueDate: '2026-10-22T00:00:00Z' })
+          .send({
+            ...protectedPatch,
+            startDate: '2026-10-12T00:00:00Z'
+          })
           .expect(403);
         expect((await task.reload()).toJSON()).toEqual(before);
         expect(
@@ -373,11 +423,11 @@ describeWithDatabase(
       await write(
         'put',
         `/tasks/${task.id}`,
-        { dueDate: '2026-10-22T00:00:00Z' },
+        { startDate: '2026-10-12T00:00:00Z' },
         'date-outsider-token'
       ).expect(403);
-      expect((await task.reload()).dueDate.toISOString()).toBe(
-        '2026-10-20T00:00:00.000Z'
+      expect((await task.reload()).startDate.toISOString()).toBe(
+        '2026-10-10T00:00:00.000Z'
       );
       expect(
         await ActivityEvent.count({ where: { projectId: project.id } })
@@ -416,7 +466,7 @@ describeWithDatabase(
       await write(
         'put',
         `/tasks/${task.id}`,
-        { dueDate: '2026-10-09T00:00:00Z' },
+        { startDate: '2026-10-21T00:00:00Z' },
         'date-outsider-token'
       ).expect(400);
       await ProjectMember.destroy({
@@ -425,7 +475,7 @@ describeWithDatabase(
       await write(
         'put',
         `/tasks/${task.id}`,
-        { dueDate: '2026-10-22T00:00:00Z' },
+        { startDate: '2026-10-12T00:00:00Z' },
         'date-outsider-token'
       ).expect(404);
       expect(ws.emitTaskUpdated).not.toHaveBeenCalled();

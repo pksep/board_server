@@ -140,14 +140,16 @@ export class TaskListQueryDto {
   startDateTo?: string;
 
   @ApiPropertyOptional({
-    description: 'Дата исполнения: от указанного момента включительно'
+    description:
+      'Требуемое время готовности: от указанного момента включительно'
   })
   @IsOptional()
   @IsDateString({ strict: true })
   dueDateFrom?: string;
 
   @ApiPropertyOptional({
-    description: 'Дата исполнения: до указанного момента включительно'
+    description:
+      'Требуемое время готовности: до указанного момента включительно'
   })
   @IsOptional()
   @IsDateString({ strict: true })

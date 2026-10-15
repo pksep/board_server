@@ -71,7 +71,7 @@ export class Task extends Model<Task> {
   })
   approvalStatus: string;
 
-  @ApiProperty({ description: 'Дата исполнения' })
+  @ApiProperty({ description: 'Требуемое время готовности' })
   @Column({ type: DataType.DATE, allowNull: true, field: 'due_date' })
   dueDate: Date;
 
