@@ -49,12 +49,108 @@ describe('WsGateway connection authentication', () => {
       handshake: { headers: { cookie: cookieHeader } },
       join: jest.fn(),
       emit: jest.fn(),
-      disconnect: jest.fn()
+      disconnect: jest.fn(),
+      data: {}
     }) as any;
 
   beforeEach(() => {
     process.env.NODE_ENV = 'production';
   });
+
+  it('disconnects an already connected central session after device revocation', async (): Promise<void> => {
+    const authenticate = jest
+      .fn()
+      .mockResolvedValueOnce({ id: 7 })
+      .mockRejectedValue(new Error('revoked'));
+    const gateway = new WsGateway(
+      {} as any,
+      {} as any,
+      {} as any,
+      {
+        isEnabled: () => true,
+        authenticate,
+        toUserPayload: () => ({ id: 7 })
+      } as any
+    );
+    const client = createClient('access_token=central');
+    gateway.server = {
+      fetchSockets: jest.fn().mockResolvedValue([client])
+    } as any;
+
+    await gateway.handleConnection(client);
+    await gateway.revalidateConnections();
+
+    expect(authenticate).toHaveBeenNthCalledWith(2, 'central');
+    expect(client.disconnect).toHaveBeenCalledWith(true);
+  });
+
+  it.each([
+    { userIds: [7], readOnly: false },
+    { userIds: [], readOnly: false },
+    { userIds: [7], readOnly: true }
+  ])(
+    'filters revoked sessions from activity delivery: %p',
+    async ({ userIds, readOnly }): Promise<void> => {
+      const active = createClient('');
+      const revoked = createClient('');
+      active.data = { userId: 7, accessToken: 'active' };
+      revoked.data = { userId: 7, accessToken: 'revoked' };
+      const gateway = new WsGateway(
+        {} as any,
+        {} as any,
+        {} as any,
+        {
+          isEnabled: () => true,
+          authenticate: async (token: string): Promise<{ id: number }> => {
+            if (token === 'revoked') throw new Error('revoked');
+
+            return { id: 7 };
+          }
+        } as any
+      );
+      const fetchSockets = jest.fn().mockResolvedValue([active, revoked]);
+      gateway.server = {
+        in: jest.fn().mockReturnValue({ fetchSockets }),
+        fetchSockets
+      } as any;
+
+      gateway.emitTaskActivityChanged(userIds, readOnly, 42);
+      // Рассылка проверяет сессии асинхронно, включая общую ленту.
+      await new Promise<void>(resolve => setImmediate(resolve));
+
+      if (userIds.length) {
+        expect(active.emit).toHaveBeenCalledWith(
+          'activity:changed',
+          readOnly ? { readOnly: true } : { eventId: 42 }
+        );
+      } else {
+        expect(active.emit).not.toHaveBeenCalledWith(
+          'activity:changed',
+          expect.anything()
+        );
+      }
+      if (readOnly) {
+        expect(active.emit).not.toHaveBeenCalledWith(
+          'activity:general-changed',
+          expect.anything()
+        );
+      } else {
+        expect(active.emit).toHaveBeenCalledWith('activity:general-changed', {
+          eventId: 42
+        });
+      }
+      expect(revoked.emit).toHaveBeenCalledWith('auth:revoked');
+      expect(revoked.emit).not.toHaveBeenCalledWith(
+        'activity:changed',
+        expect.anything()
+      );
+      expect(revoked.emit).not.toHaveBeenCalledWith(
+        'activity:general-changed',
+        expect.anything()
+      );
+      expect(revoked.disconnect).toHaveBeenCalledWith(true);
+    }
+  );
 
   afterAll(() => {
     if (originalNodeEnv === undefined) {
