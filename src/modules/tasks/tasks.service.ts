@@ -446,6 +446,7 @@ export class TasksService {
     tagIds: number[] = []
   ) {
     return this.activityEvents.buildChanges({
+      controllerIds: { before: [], after: task.controllerIds },
       title: { before: null, after: task.title },
       linkedEntity: { before: null, after: task.linkedEntity },
       description: { before: null, after: task.description },
@@ -521,6 +522,7 @@ export class TasksService {
         attributes: [
           'id',
           'createdById',
+          'controllerIds',
           'taskNumber',
           'title',
           'description',
@@ -635,6 +637,7 @@ export class TasksService {
         'taskNumber',
         'title',
         'createdById',
+        'controllerIds',
         'priority',
         'approvalStatus',
         'startDate',
@@ -728,7 +731,7 @@ export class TasksService {
         `SELECT task.id, task.task_number AS "taskNumber", task.title, task.priority,
           task.start_date AS "startDate", task.due_date AS "dueDate",
           task.column_id AS "columnId", col.board_id AS "boardId",
-          col.status AS "columnStatus", task.created_by_id AS "createdById",
+          col.status AS "columnStatus", task.created_by_id AS "createdById", task.controller_ids AS "controllerIds",
           task."order", task."updatedAt"
           ${source}
           ORDER BY board."order", board."createdAt", board.id, col."order", task."order", task.id`,
@@ -1392,6 +1395,13 @@ export class TasksService {
           transaction
         );
       }
+      if (dto.controllerIds !== undefined)
+        await this.assertControllerIds(
+          projectId,
+          dto.controllerIds,
+          transaction
+        );
+
       const customAttributeValues = await this.normalizeCustomAttributeValues(
         projectId,
         dto.customAttributeValues,
@@ -1429,7 +1439,11 @@ export class TasksService {
           linkedEntity: dto.linkedEntity ?? null,
           columnId,
           order: 0,
-          createdById: userId
+          createdById: userId,
+          controllerIds: this.normalizeIds([
+            userId,
+            ...(dto.controllerIds ?? [])
+          ])
         } as any,
         { transaction }
       );
@@ -1526,6 +1540,13 @@ export class TasksService {
           transaction
         );
       }
+      if (dto.controllerIds !== undefined)
+        await this.assertControllerIds(
+          projectId,
+          dto.controllerIds,
+          transaction
+        );
+
       const customAttributeValues = await this.normalizeCustomAttributeValues(
         projectId,
         dto.customAttributeValues,
@@ -1552,7 +1573,11 @@ export class TasksService {
           columnId: parent.columnId,
           parentTaskId: parentId,
           order: 0,
-          createdById: userId
+          createdById: userId,
+          controllerIds: this.normalizeIds([
+            userId,
+            ...(dto.controllerIds ?? [])
+          ])
         } as any,
         { transaction }
       );
@@ -1671,6 +1696,36 @@ export class TasksService {
     }
   }
 
+  /** Проверяет непустое назначение действующих участников через общий источник проекта. */
+  private async assertControllerIds(
+    projectId: number,
+    ids: number[],
+    transaction: Transaction
+  ): Promise<void> {
+    if (
+      !Array.isArray(ids) ||
+      !ids.length ||
+      ids.length > 500 ||
+      ids.some(id => !Number.isSafeInteger(id) || id < 1) ||
+      new Set(ids).size !== ids.length
+    )
+      throw new HttpException(
+        'У задачи должен быть хотя бы один контроллер; список должен содержать уникальные ID пользователей',
+        HttpStatus.BAD_REQUEST
+      );
+
+    const activeIds = await this.projectAccess.getActiveMemberIds(
+      projectId,
+      transaction,
+      ids
+    );
+    if (ids.some(id => !activeIds.includes(id)))
+      throw new HttpException(
+        'Контроллерами могут быть только активные участники проекта',
+        HttpStatus.BAD_REQUEST
+      );
+  }
+
   /** Проверяет именно поля: отдельное перемещение сохраняет правила исходной колонки. */
   private async assertCanEditTaskFields(
     task: Task,
@@ -1678,7 +1733,7 @@ export class TasksService {
     userId: number,
     transaction: Transaction
   ): Promise<void> {
-    if (task.createdById === userId) return;
+    if ((task.controllerIds ?? [task.createdById]).includes(userId)) return;
 
     const fields = Object.entries(dto).filter(
       ([, value]) => value !== undefined
@@ -1721,6 +1776,13 @@ export class TasksService {
         transaction
       );
 
+      if (dto.controllerIds !== undefined)
+        await this.assertControllerIds(
+          projectId,
+          dto.controllerIds,
+          transaction
+        );
+
       if (dto.startDate !== undefined || dto.dueDate !== undefined) {
         this.assertTaskDateOrder(
           dto.startDate !== undefined ? dto.startDate : task.startDate,
@@ -1744,6 +1806,9 @@ export class TasksService {
               transaction
             );
       const before = {
+        controllerIds: this.normalizeIds(
+          task.controllerIds ?? [task.createdById]
+        ),
         linkedEntity: task.linkedEntity,
         title: task.title,
         description: task.description,
@@ -1778,6 +1843,8 @@ export class TasksService {
       }
 
       if (dto.title !== undefined) task.title = dto.title;
+      if (dto.controllerIds !== undefined)
+        task.controllerIds = this.normalizeIds(dto.controllerIds);
       if (dto.linkedEntity !== undefined) task.linkedEntity = dto.linkedEntity;
       if (dto.description !== undefined) task.description = dto.description;
       if (dto.priority !== undefined) task.priority = dto.priority;
@@ -1890,6 +1957,12 @@ export class TasksService {
         changedFields.assigneeIds = {
           before: before.assigneeIds,
           after: this.normalizeIds(dto.assigneeIds)
+        };
+      }
+      if (dto.controllerIds !== undefined) {
+        changedFields.controllerIds = {
+          before: before.controllerIds,
+          after: this.normalizeIds(task.controllerIds)
         };
       }
       if (dto.tagIds !== undefined) {
@@ -2159,11 +2232,12 @@ export class TasksService {
       leaving.some(
         task =>
           columns.get(task.columnId)!.movePermission ===
-            ColumnMovePermission.CreatorsOnly && task.createdById !== userId
+            ColumnMovePermission.CreatorsOnly &&
+          !(task.controllerIds ?? [task.createdById]).includes(userId)
       )
     ) {
       throw new HttpException(
-        'Из этой колонки задачу может переместить только её создатель',
+        'Из этой колонки задачу может переместить только контроллер',
         HttpStatus.FORBIDDEN
       );
     }
@@ -2218,6 +2292,17 @@ export class TasksService {
       const fromColumnId = task.columnId;
 
       if (isCrossProject) {
+        const controllerIds = [
+          ...new Set(
+            hierarchy.flatMap(item => item.controllerIds ?? [item.createdById])
+          )
+        ];
+        await this.assertControllerIds(
+          target.projectId,
+          controllerIds,
+          transaction
+        );
+
         const assignees = await this.assigneeRepository.findAll({
           attributes: ['userId'],
           where: { taskId: { [Op.in]: taskIds } },

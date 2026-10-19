@@ -19,6 +19,7 @@ import { ProjectMember } from '../../projects/model/project-member.model';
 import { CreateTaskDto } from '../dto/create-task.dto';
 import { Board } from '../../boards/model/board.model';
 import { BoardColumn } from '../../columns/model/board-column.model';
+import { ColumnMovePermission } from '../../columns/interfaces/column-move-permission.interface';
 import { Project } from '../../projects/model/project.model';
 import { ProjectAccessService } from '../../projects/project-access.service';
 import { User } from '../../users/model/users.model';
@@ -61,6 +62,7 @@ describeWithDatabase(
     const ws = {
       emitTaskCreated: jest.fn(),
       emitTaskUpdated: jest.fn(),
+      emitTaskMoved: jest.fn(),
       emitTaskActivityChanged: jest.fn()
     };
 
@@ -191,6 +193,138 @@ describeWithDatabase(
       });
       await persist(TaskAssignee.build(), { taskId: task.id, userId: user.id });
     }
+
+    it('assigns the author as controller for new tasks and subtasks', async (): Promise<void> => {
+      expect(task.controllerIds).toEqual([owner.id]);
+      for (const path of [
+        `/columns/${column.id}/tasks`,
+        `/tasks/${task.id}/subtasks`
+      ]) {
+        const result = await write('post', path, {
+          title: 'Controlled task'
+        }).expect(201);
+        expect(result.body.controllerIds).toEqual([owner.id]);
+      }
+    });
+
+    it('transfers creator permissions to controllers while retaining authorship and shared description access', async (): Promise<void> => {
+      await assignExecutor(secondExecutor);
+      await persist(ProjectMember.build(), {
+        projectId: project.id,
+        userId: owner.id
+      });
+      await write('put', `/tasks/${task.id}`, {
+        controllerIds: [owner.id, secondExecutor.id]
+      }).expect(200);
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { title: 'Controller update' },
+        'date-second-executor-token'
+      ).expect(200);
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { controllerIds: [secondExecutor.id] },
+        'date-second-executor-token'
+      ).expect(200);
+      await write('put', `/tasks/${task.id}`, {
+        title: 'Revoked author update'
+      }).expect(403);
+      await write('put', `/tasks/${task.id}`, {
+        controllerIds: [owner.id]
+      }).expect(403);
+      await write('put', `/tasks/${task.id}`, {
+        description: '<p>Shared description</p>'
+      }).expect(200);
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { dueDate: '2026-10-25T00:00:00Z' },
+        'date-second-executor-token'
+      ).expect(200);
+      await task.reload();
+      expect(task.createdById).toBe(owner.id);
+      expect(task.controllerIds).toEqual([secondExecutor.id]);
+      await column.update({
+        movePermission: ColumnMovePermission.CreatorsOnly
+      });
+      const targetColumn = await persist(BoardColumn.build(), {
+        title: 'Controller target',
+        boardId: column.boardId
+      });
+      await request(app.getHttpServer())
+        .patch(`/tasks/${task.id}/move`)
+        .auth('date-owner-token', { type: 'bearer' })
+        .send({ columnId: targetColumn.id, order: 0 })
+        .expect(403);
+      await request(app.getHttpServer())
+        .patch(`/tasks/${task.id}/move`)
+        .auth('date-second-executor-token', { type: 'bearer' })
+        .send({ columnId: targetColumn.id, order: 0 })
+        .expect(200);
+      const history = await ActivityEvent.findAll({
+        where: { entityId: String(task.id) }
+      });
+      expect(
+        history.some(event =>
+          event.changes.some(
+            change =>
+              change.field === 'controllerIds' &&
+              JSON.stringify(change.after) ===
+                JSON.stringify([secondExecutor.id])
+          )
+        )
+      ).toBe(true);
+    });
+
+    it.each([[], null, [0], [1, 1]])(
+      'rejects an invalid controller list without changing the task: %j',
+      async (controllerIds): Promise<void> => {
+        const response = await request(app.getHttpServer())
+          .put(`/tasks/${task.id}`)
+          .auth('date-owner-token', { type: 'bearer' })
+          .send({ controllerIds });
+        expect(response.status).toBe(400);
+        expect((await task.reload()).controllerIds).toEqual([owner.id]);
+      }
+    );
+
+    it('rejects controllers outside the project and an attempted self-promotion', async (): Promise<void> => {
+      await write('put', `/tasks/${task.id}`, {
+        controllerIds: [outsider.id]
+      }).expect(400);
+      await assignExecutor(secondExecutor);
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { controllerIds: [secondExecutor.id] },
+        'date-second-executor-token'
+      ).expect(403);
+      expect((await task.reload()).controllerIds).toEqual([owner.id]);
+    });
+
+    it('serializes concurrent transfers so a revoked controller cannot overwrite the winner', async (): Promise<void> => {
+      await assignExecutor(secondExecutor);
+      await persist(ProjectMember.build(), {
+        projectId: project.id,
+        userId: owner.id
+      });
+      await write('put', `/tasks/${task.id}`, {
+        controllerIds: [owner.id, secondExecutor.id]
+      }).expect(200);
+      const responses = await Promise.all([
+        write('put', `/tasks/${task.id}`, { controllerIds: [owner.id] }),
+        write(
+          'put',
+          `/tasks/${task.id}`,
+          { controllerIds: [secondExecutor.id] },
+          'date-second-executor-token'
+        )
+      ]);
+      expect(responses.map(result => result.status).sort()).toEqual([200, 403]);
+      expect((await task.reload()).controllerIds).toHaveLength(1);
+    });
 
     it.each(Object.values(TaskEntityType))(
       'persists a selected %s for tasks and subtasks, replaces it and records clearing without changing other fields',
@@ -648,6 +782,7 @@ describeWithDatabase(
         userId: outsider.id
       });
       task.createdById = outsider.id;
+      task.controllerIds = [outsider.id];
       await task.save();
       await write(
         'put',

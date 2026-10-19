@@ -10,6 +10,7 @@ import {
   IsEnum,
   MaxLength,
   ArrayMaxSize,
+  ArrayMinSize,
   Min,
   ValidateNested
 } from 'class-validator';
@@ -19,6 +20,20 @@ import { TaskEntityDto } from './task-entity.dto';
 import { TTaskAttributeValues } from 'src/modules/projects/interfaces/task-attribute.interface';
 
 export class CreateTaskDto {
+  @ApiProperty({
+    description: 'ID контроллеров, минимум один',
+    type: [Number],
+    required: false
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1, { message: 'У задачи должен быть хотя бы один контроллер' })
+  @ArrayMaxSize(500)
+  @ArrayUnique()
+  @IsInt({ each: true })
+  @Min(1, { each: true })
+  controllerIds?: number[];
+
   @ApiProperty({
     description: 'Сущность из базы продукции',
     type: TaskEntityDto,
