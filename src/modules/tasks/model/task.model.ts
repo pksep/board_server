@@ -6,7 +6,8 @@ import {
   Table,
   ForeignKey,
   BelongsTo,
-  HasMany
+  HasMany,
+  BeforeValidate
 } from 'sequelize-typescript';
 import { User } from 'src/modules/users/model/users.model';
 import { TTaskAttributeValues } from 'src/modules/projects/interfaces/task-attribute.interface';
@@ -22,6 +23,21 @@ const lazyTaskAttachment = () =>
 
 @Table({ tableName: 'tasks', paranoid: true })
 export class Task extends Model<Task> {
+  @ApiProperty({ description: 'ID контроллеров задачи', type: [Number] })
+  @Column({
+    type: DataType.ARRAY(DataType.INTEGER),
+    allowNull: false,
+    field: 'controller_ids'
+  })
+  controllerIds: number[];
+
+  /** Новые задачи и штатные импорты назначают автора, если список не передан. */
+  @BeforeValidate
+  static initializeControllers(task: Task): void {
+    if (task.isNewRecord && task.controllerIds === undefined)
+      task.controllerIds = [task.createdById];
+  }
+
   @ApiProperty({ description: 'Сущность из базы продукции', nullable: true })
   @Column({ type: DataType.JSONB, allowNull: true, field: 'linked_entity' })
   linkedEntity: TaskEntityReference | null;

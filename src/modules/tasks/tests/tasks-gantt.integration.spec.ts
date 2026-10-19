@@ -683,9 +683,9 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       { type: QueryTypes.SELECT }
     );
     await sequelize.query(
-      `INSERT INTO tasks (title, description, task_number, column_id, created_by_id, "order", start_date, due_date, "createdAt", "updatedAt")
+      `INSERT INTO tasks (title, description, task_number, column_id, created_by_id, controller_ids, "order", start_date, due_date, "createdAt", "updatedAt")
         SELECT 'Load task ' || n, repeat('Synthetic task body ', 100), n,
-          (ARRAY[:columnIds]::integer[])[(n - 1) % 20 + 1], :ownerId, n,
+          (ARRAY[:columnIds]::integer[])[(n - 1) % 20 + 1], :ownerId, ARRAY[:ownerId]::integer[], n,
           '2026-10-01'::timestamptz, '2026-10-04'::timestamptz, NOW(), NOW()
         FROM generate_series(1, 6000) n`,
       { replacements: { columnIds, ownerId: users[0].id } }
