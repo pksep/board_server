@@ -87,6 +87,7 @@ describe('TasksService.move', () => {
     };
     const root = {
       id: 1,
+      controllerIds: [7],
       taskNumber: 5,
       columnId: 10,
       parentTaskId: null,
@@ -96,6 +97,7 @@ describe('TasksService.move', () => {
     };
     const child = {
       id: 2,
+      controllerIds: [7],
       taskNumber: 6,
       columnId: 10,
       parentTaskId: 1,
@@ -147,6 +149,7 @@ describe('TasksService.move', () => {
     };
     const projectAccess = {
       assertCanRead: jest.fn(),
+      getActiveMemberIds: jest.fn().mockResolvedValue([7]),
       assertAssigneesBelongToProject: jest.fn()
     };
     const activityEvents = {

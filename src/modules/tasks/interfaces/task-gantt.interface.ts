@@ -12,6 +12,7 @@ export interface TaskGanttItem {
   boardId: number;
   columnStatus: ColumnStatus | null;
   createdById: number;
+  controllerIds: number[];
   order: number;
   updatedAt: Date | string;
   assignees: { userId: number }[];
