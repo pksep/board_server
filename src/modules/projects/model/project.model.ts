@@ -21,6 +21,15 @@ const lazyUserFavorite = () => require('./user-favorite.model').UserFavorite;
 
 @Table({ tableName: 'projects', paranoid: true })
 export class Project extends Model<Project> {
+  @ApiProperty({ default: true })
+  @Column({
+    type: DataType.BOOLEAN,
+    allowNull: false,
+    defaultValue: true,
+    field: 'attributes_owner_only'
+  })
+  attributesOwnerOnly: boolean;
+
   @ApiProperty({ example: 1, description: 'Уникальный идентификатор' })
   @Column({
     type: DataType.INTEGER,

@@ -21,6 +21,7 @@ import { Board } from '../../boards/model/board.model';
 import { BoardColumn } from '../../columns/model/board-column.model';
 import { ColumnMovePermission } from '../../columns/interfaces/column-move-permission.interface';
 import { Project } from '../../projects/model/project.model';
+import { TaskAttributeType } from '../../projects/interfaces/task-attribute.interface';
 import { ProjectAccessService } from '../../projects/project-access.service';
 import { User } from '../../users/model/users.model';
 import { ActivityEventsService } from '../../activity-events/activity-events.service';
@@ -193,6 +194,103 @@ describeWithDatabase(
       });
       await persist(TaskAssignee.build(), { taskId: task.id, userId: user.id });
     }
+
+    it('restores an empty controller list to the project owner while preserving the task author', async (): Promise<void> => {
+      const recovered = await persist(Task.build(), {
+        title: 'Recovered controllers',
+        taskNumber: 50,
+        columnId: column.id,
+        createdById: outsider.id,
+        controllerIds: []
+      });
+      expect(recovered.controllerIds).toEqual([owner.id]);
+      expect(recovered.createdById).toBe(outsider.id);
+      recovered.controllerIds = [];
+      await recovered.save();
+      expect((await recovered.reload()).controllerIds).toEqual([owner.id]);
+    });
+
+    it('keeps custom attribute values restricted by default', async (): Promise<void> => {
+      await assignExecutor(outsider);
+      expect(project.attributesOwnerOnly).toBe(true);
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { customAttributeValues: {} },
+        'date-outsider-token'
+      ).expect(403);
+    });
+
+    it('opens only custom attribute values to members when the project setting is disabled', async (): Promise<void> => {
+      await persist(ProjectMember.build(), {
+        projectId: project.id,
+        userId: outsider.id
+      });
+      project.attributesOwnerOnly = false;
+      project.taskAttributeDefinitions = [
+        { id: 'reviewed', name: 'Проверено', type: TaskAttributeType.Boolean }
+      ];
+      await project.save();
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        {
+          customAttributeValues: { reviewed: true },
+          description: '<p>Member description</p>'
+        },
+        'date-outsider-token'
+      ).expect(200);
+      expect((await task.reload()).customAttributeValues).toEqual({
+        reviewed: true
+      });
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        {
+          customAttributeValues: { reviewed: 'invalid boolean' }
+        },
+        'date-outsider-token'
+      ).expect(400);
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        {
+          customAttributeValues: {},
+          title: 'Unauthorized title'
+        },
+        'date-outsider-token'
+      ).expect(403);
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        {
+          customAttributeValues: {},
+          controllerIds: [outsider.id]
+        },
+        'date-outsider-token'
+      ).expect(403);
+      expect((await task.reload()).title).toBe('Existing task');
+      expect(task.controllerIds).toEqual([owner.id]);
+      project.attributesOwnerOnly = true;
+      await project.save();
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { customAttributeValues: {} },
+        'date-outsider-token'
+      ).expect(403);
+    });
+
+    it('does not grant project access when custom attribute editing is open', async (): Promise<void> => {
+      project.attributesOwnerOnly = false;
+      await project.save();
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { customAttributeValues: {} },
+        'date-outsider-token'
+      ).expect(404);
+    });
 
     it('assigns the author as controller for new tasks and subtasks', async (): Promise<void> => {
       expect(task.controllerIds).toEqual([owner.id]);
