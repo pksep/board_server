@@ -5,10 +5,11 @@ import { User } from './model/users.model';
 import { UsersService } from './users.service';
 import { UserSyncConsumer } from './user-sync.consumer';
 import { TaskAssignee } from '../tasks/model/task-assignee.model';
+import { UserDirectoryService } from './user-directory.service';
 
 @Module({
   controllers: [UsersController],
-  providers: [UsersService, UserSyncConsumer],
+  providers: [UsersService, UserSyncConsumer, UserDirectoryService],
   imports: [SequelizeModule.forFeature([User, TaskAssignee])],
   exports: [UsersService]
 })
