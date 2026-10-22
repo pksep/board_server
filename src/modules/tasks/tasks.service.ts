@@ -569,20 +569,39 @@ export class TasksService {
   }
 
   /** Единая область личных списков и их счётчиков, включая доступ и архив каждого уровня. */
-  private personalTaskSource(query: PersonalTaskQueryDto): string {
+  private personalTaskSource(
+    query: PersonalTaskQueryDto,
+    executorErpId?: string
+  ): string {
+    // В ERP и Board разные PK: сопоставляем только подтверждённый erp_id.
+    const executorSource = executorErpId
+      ? `JOIN users executor ON executor.erp_id = :executorErpId AND executor.ban = false`
+      : '';
+    const assignedUser = executorErpId ? 'executor.id' : ':userId';
+
     return `FROM tasks task
        JOIN board_columns col ON col.id = task.column_id AND col."deletedAt" IS NULL
        JOIN boards board ON board.id = col.board_id AND board."deletedAt" IS NULL
        JOIN projects project ON project.id = board.project_id AND project."deletedAt" IS NULL
+       ${executorSource}
        WHERE task."deletedAt" IS NULL
          AND (project.created_by_id = :userId OR EXISTS (
            SELECT 1 FROM project_members member
            WHERE member.project_id = project.id AND member.user_id = :userId
          ))
+         ${
+           executorErpId
+             ? `AND EXISTS (SELECT 1 FROM project_members executor_member
+                  WHERE executor_member.project_id = project.id
+                    AND executor_member.user_id = executor.id)
+                AND (board.members_ids IS NULL
+                  OR board.members_ids @> jsonb_build_array(executor.id))`
+             : ''
+         }
          AND ${
            query.scope === 'assigned'
              ? `EXISTS (SELECT 1 FROM task_assignees assignment
-                 WHERE assignment.task_id = task.id AND assignment.user_id = :userId)`
+                 WHERE assignment.task_id = task.id AND assignment.user_id = ${assignedUser})`
              : 'task.created_by_id = :userId'
          }`;
   }
@@ -608,10 +627,11 @@ export class TasksService {
     await this.assertTaskAccess(taskId, userId, undefined, false, true);
   }
 
-  /** Читает одну порцию личного списка без обхода всех досок и полной иерархии задач. */
+  /** Читает порцию личного списка либо назначений исполнителя ERP с общими правами читателя. */
   async getPersonalTasks(
     userId: number,
-    query: PersonalTaskQueryDto = {}
+    query: PersonalTaskQueryDto = {},
+    executorErpId?: string
   ): Promise<PersonalTaskPage> {
     const limit = query.limit ?? 50;
     const offset = query.offset ?? 0;
@@ -619,23 +639,25 @@ export class TasksService {
     // EXISTS не размножает задачу при нескольких участниках/назначениях.
     const locations = await this.sequelize.query<PersonalTaskLocation>(
       `SELECT task.id, project.id AS "projectId", project.prefix AS "projectPrefix"
-       ${this.personalTaskSource(query)}
+       ${this.personalTaskSource(query, executorErpId)}
        ORDER BY task.due_date ASC NULLS LAST, task.id ASC
        LIMIT :limit OFFSET :offset`,
       {
-        replacements: { userId, limit: limit + 1, offset },
+        replacements: { userId, executorErpId, limit: limit + 1, offset },
         type: QueryTypes.SELECT
       }
     );
     const page = locations.slice(0, limit);
     if (!page.length) return { items: [], offset, hasMore: false };
 
-    // Общие связи строки списка; файлы, HTML и дочерние карточки здесь не нужны.
+    // Не загружаем файлы и дочерние карточки; описание нужно только таблице ПЗ.
     const tasks = await this.taskRepository.findAll({
       attributes: [
         'id',
         'taskNumber',
         'title',
+        // ПЗ показывает описание задачи; прежний личный список остаётся лёгким.
+        ...(executorErpId ? ['description'] : []),
         'createdById',
         'controllerIds',
         'priority',

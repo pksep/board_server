@@ -28,11 +28,29 @@ import { TaskGanttQueryDto } from './dto/task-gantt-query.dto';
 import type { TaskGanttSnapshot } from './interfaces/task-gantt.interface';
 import { PersonalTaskQueryDto } from './dto/personal-task-query.dto';
 import type { PersonalTaskPage } from './interfaces/personal-task.interface';
+import { ExecutorTaskQueryDto } from './dto/executor-task-query.dto';
 
 @ApiTags('Задачи')
 @Controller()
 export class TasksController {
   constructor(private tasksService: TasksService) {}
+
+  /** Сохраняет права читателя проекта и использует общий список назначенных задач. */
+  @ApiOperation({
+    summary: 'Задачи исполнителя ERP с досок, в которых он участвует'
+  })
+  @Get('tasks/by-executor')
+  getExecutorTasks(
+    @Query() query: ExecutorTaskQueryDto,
+    @CurrentUser() user: IUserDataToken
+  ): Promise<PersonalTaskPage> {
+    // Пользователь сессии определяет доступ, ERP ID — только целевого исполнителя.
+    return this.tasksService.getPersonalTasks(
+      user.id,
+      { scope: 'assigned', limit: query.limit, offset: query.offset },
+      String(query.erpUserId)
+    );
+  }
 
   /** Пользователь берётся из сессии, а не из произвольного ID в фильтре. */
   @ApiOperation({ summary: 'Созданные мной или назначенные мне задачи' })

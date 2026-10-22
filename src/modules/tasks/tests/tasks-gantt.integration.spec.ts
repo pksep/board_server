@@ -267,6 +267,193 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     expect(result.total).toBe(4);
   });
 
+  it('reads ERP executor assignments across member boards, including subtasks, before pagination', async (): Promise<void> => {
+    const erpUserId = 800000 + project.id;
+    await outsider.update({ erpId: String(erpUserId) });
+    await persist(ProjectMember.build(), {
+      projectId: project.id,
+      userId: outsider.id
+    });
+    await board.update({ membersIds: [outsider.id] });
+
+    // Ещё одна доска без собственного состава наследует участников проекта.
+    const secondBoard = await persist(Board.build(), {
+      title: 'Legacy members',
+      projectId: project.id
+    });
+    const secondColumn = await persist(BoardColumn.build(), {
+      title: 'Second',
+      boardId: secondBoard.id
+    });
+    const subtask = await persist(Task.build(), {
+      title: 'Assigned subtask',
+      taskNumber: 50,
+      columnId: secondColumn.id,
+      parentTaskId: roots[2].id,
+      createdById: owner.id,
+      description: '<p>Subtask body</p>'
+    });
+    await persist(TaskAssignee.build(), {
+      taskId: subtask.id,
+      userId: outsider.id
+    });
+
+    const excludedBoard = await persist(Board.build(), {
+      title: 'Not a member',
+      projectId: project.id,
+      membersIds: []
+    });
+    const excludedColumn = await persist(BoardColumn.build(), {
+      title: 'Excluded',
+      boardId: excludedBoard.id
+    });
+    const excluded = await persist(Task.build(), {
+      title: 'Excluded assignment',
+      taskNumber: 51,
+      columnId: excludedColumn.id,
+      createdById: owner.id
+    });
+    await persist(TaskAssignee.build(), {
+      taskId: excluded.id,
+      userId: outsider.id
+    });
+
+    const first = await request(app.getHttpServer())
+      .get('/tasks/by-executor')
+      .query({ erpUserId, limit: 1 })
+      .auth('gantt-owner-token', { type: 'bearer' })
+      .expect(200);
+    expect(
+      first.body.items.map(
+        (item: PersonalTaskPage['items'][number]) => item.task.id
+      )
+    ).toEqual([roots[0].id]);
+    expect(first.body).toMatchObject({ offset: 1, hasMore: true });
+    expect(first.body.items[0].task.description).toBe(
+      '<p>Do not download this body for Gantt</p>'
+    );
+
+    const rest = await request(app.getHttpServer())
+      .get('/tasks/by-executor')
+      .query({ erpUserId, offset: first.body.offset, limit: 100 })
+      .auth('gantt-owner-token', { type: 'bearer' })
+      .expect(200);
+    expect(
+      rest.body.items.map(
+        (item: PersonalTaskPage['items'][number]) => item.task.id
+      )
+    ).toEqual([roots[1].id, subtask.id]);
+    expect(rest.body.hasMore).toBe(false);
+
+    // PK Board не является ID ERP; совпадение числа не должно раскрыть чужие назначения.
+    const wrongId = await request(app.getHttpServer())
+      .get('/tasks/by-executor')
+      .query({ erpUserId: outsider.id })
+      .auth('gantt-owner-token', { type: 'bearer' })
+      .expect(200);
+    expect(wrongId.body.items).toEqual([]);
+
+    await secondBoard.destroy();
+    await board.update({ membersIds: [] });
+    const removed = await request(app.getHttpServer())
+      .get('/tasks/by-executor')
+      .query({ erpUserId })
+      .auth('gantt-owner-token', { type: 'bearer' })
+      .expect(200);
+    expect(removed.body.items).toEqual([]);
+  });
+
+  it('keeps reader access, project membership, archives and existing personal lists independent', async (): Promise<void> => {
+    const erpUserId = 900000 + project.id;
+    await outsider.update({ erpId: String(erpUserId) });
+    // Назначения существуют, но пользователь ещё не является участником проекта.
+    const nonMember = await service.getPersonalTasks(
+      owner.id,
+      { scope: 'assigned' },
+      String(erpUserId)
+    );
+    expect(nonMember.items).toEqual([]);
+    await persist(ProjectMember.build(), {
+      projectId: project.id,
+      userId: outsider.id
+    });
+    const visible = await service.getPersonalTasks(
+      owner.id,
+      { scope: 'assigned' },
+      String(erpUserId)
+    );
+    expect(visible.items.map(item => item.task.id)).toEqual([
+      roots[0].id,
+      roots[1].id
+    ]);
+
+    const personal = await service.getPersonalTasks(owner.id, {
+      scope: 'assigned'
+    });
+    expect(personal.items.some(item => item.task.id === roots[0].id)).toBe(
+      true
+    );
+    expect(personal.items.some(item => item.task.id === roots[1].id)).toBe(
+      false
+    );
+    expect(
+      personal.items.every(item => item.task.description === undefined)
+    ).toBe(true);
+
+    await ProjectMember.destroy({
+      where: { projectId: project.id, userId: outsider.id }
+    });
+    const inaccessible = await service.getPersonalTasks(
+      outsider.id,
+      { scope: 'assigned' },
+      String(erpUserId)
+    );
+    expect(inaccessible.items).toEqual([]);
+    await persist(ProjectMember.build(), {
+      projectId: project.id,
+      userId: outsider.id
+    });
+    await roots[0].destroy();
+    await columns[1].destroy();
+    const archivedTasks = await service.getPersonalTasks(
+      owner.id,
+      { scope: 'assigned' },
+      String(erpUserId)
+    );
+    expect(archivedTasks.items).toEqual([]);
+    await project.destroy();
+    expect(
+      (
+        await service.getPersonalTasks(
+          owner.id,
+          { scope: 'assigned' },
+          String(erpUserId)
+        )
+      ).items
+    ).toEqual([]);
+  });
+
+  it('validates executor IDs and pagination and requires authentication', async (): Promise<void> => {
+    for (const query of [
+      {},
+      { erpUserId: 0 },
+      { erpUserId: 'abc' },
+      { erpUserId: 1.5 },
+      { erpUserId: 1, limit: 101 },
+      { erpUserId: 1, offset: -1 }
+    ]) {
+      await request(app.getHttpServer())
+        .get('/tasks/by-executor')
+        .query(query)
+        .auth('gantt-owner-token', { type: 'bearer' })
+        .expect(400);
+    }
+    await request(app.getHttpServer())
+      .get('/tasks/by-executor')
+      .query({ erpUserId: 1 })
+      .expect(401);
+  });
+
   it('uses OR for multiple assignees without duplicates and retains every assignment', async (): Promise<void> => {
     const result = await read({
       assigneeIds: `${owner.id},${outsider.id},${owner.id}`
