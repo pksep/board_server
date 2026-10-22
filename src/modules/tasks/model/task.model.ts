@@ -12,6 +12,7 @@ import {
 import { User } from 'src/modules/users/model/users.model';
 import { TTaskAttributeValues } from 'src/modules/projects/interfaces/task-attribute.interface';
 import type { TaskEntityReference } from '../interfaces/task-entity.interface';
+import { QueryTypes, Transaction } from 'sequelize';
 
 // Lazy requires для решения circular dependency (SWC live bindings)
 const lazyBoardColumn = () =>
@@ -31,11 +32,35 @@ export class Task extends Model<Task> {
   })
   controllerIds: number[];
 
-  /** Новые задачи и штатные импорты назначают автора, если список не передан. */
+  /** Автор назначается при создании; потерянный список восстанавливается владельцем проекта. */
   @BeforeValidate
-  static initializeControllers(task: Task): void {
+  static async initializeControllers(
+    task: Task,
+    options: { transaction?: Transaction }
+  ): Promise<void> {
     if (task.isNewRecord && task.controllerIds === undefined)
       task.controllerIds = [task.createdById];
+
+    if (task.controllerIds?.length || !task.columnId) return;
+
+    const [project] = await task.sequelize.query<{ ownerId: number }>(
+      `SELECT project.created_by_id AS "ownerId"
+       FROM board_columns col
+       JOIN boards board ON board.id = col.board_id
+       JOIN projects project ON project.id = board.project_id
+       WHERE col.id = :columnId`,
+      {
+        replacements: { columnId: task.columnId },
+        type: QueryTypes.SELECT,
+        transaction: options.transaction
+      }
+    );
+    if (!project?.ownerId)
+      throw new Error(
+        'Не найден владелец проекта для восстановления контроллера задачи'
+      );
+
+    task.controllerIds = [project.ownerId];
   }
 
   @ApiProperty({ description: 'Сущность из базы продукции', nullable: true })

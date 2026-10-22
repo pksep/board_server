@@ -741,6 +741,56 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     ).toMatchObject({ projectId: project.id, projectPrefix: project.prefix });
   });
 
+  it.each([ColumnStatus.InReview, ColumnStatus.Archived])(
+    'filters personal lists by %s before pagination and returns the column status',
+    async (status): Promise<void> => {
+      await columns[0].update({ status });
+      await columns[1].update({ status });
+      await columns[2].update({ status: ColumnStatus.Completed });
+      const first = await readPersonal({
+        scope: 'created',
+        columnStatus: status,
+        limit: '1'
+      });
+      expect(first.items).toHaveLength(1);
+      expect(first.items[0].columnStatus).toBe(status);
+      expect(first.hasMore).toBe(true);
+      const second = await readPersonal({
+        scope: 'created',
+        columnStatus: status,
+        limit: '1',
+        offset: String(first.offset)
+      });
+      expect(second.items).toHaveLength(1);
+      expect(second.items[0].columnStatus).toBe(status);
+      expect(second.items[0].task.id).not.toBe(first.items[0].task.id);
+      expect(second.hasMore).toBe(false);
+      const assigned = await readPersonal({
+        scope: 'assigned',
+        columnStatus: status
+      });
+      expect(assigned.items.map(item => item.task.id)).toEqual([roots[0].id]);
+      const completed = await readPersonal({
+        columnStatus: ColumnStatus.Completed
+      });
+      expect(
+        completed.items.every(
+          item => item.columnStatus === ColumnStatus.Completed
+        )
+      ).toBe(true);
+      expect(
+        completed.items
+          .filter(item => item.projectId === project.id)
+          .map(item => item.task.id)
+      ).toEqual([roots[2].id]);
+      expect(
+        (
+          await readPersonal({ columnStatus: ColumnStatus.Queued })
+        ).items.filter(item => item.projectId === project.id)
+      ).toEqual([]);
+    }
+  );
+
   it('personal task pages sort globally before pagination, with deterministic ties and null dates last', async (): Promise<void> => {
     roots[0].dueDate = null;
     await roots[0].save();
@@ -820,7 +870,8 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     { scope: 'wrong' },
     { limit: '101' },
     { limit: '0' },
-    { offset: '-1' }
+    { offset: '-1' },
+    { columnStatus: 'invalid-status' }
   ])('validates personal list parameters: %p', async (query): Promise<void> => {
     await request(app.getHttpServer())
       .get('/tasks/personal')

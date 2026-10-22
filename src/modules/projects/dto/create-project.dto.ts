@@ -10,13 +10,22 @@ import {
   ArrayMaxSize,
   ArrayUnique,
   IsInt,
-  Min
+  Min,
+  IsBoolean
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ValidateNested } from 'class-validator';
 import { ProjectTaskAttributeDto } from './project-task-attribute.dto';
 
 export class CreateProjectDto {
+  @ApiProperty({
+    default: true,
+    description: 'Значения атрибутов меняют только контроллеры задачи'
+  })
+  @IsOptional()
+  @IsBoolean()
+  attributesOwnerOnly?: boolean;
+
   @ApiProperty({ example: 'Мой проект', description: 'Название проекта' })
   @IsString()
   @IsNotEmpty({ message: 'Название проекта обязательно' })

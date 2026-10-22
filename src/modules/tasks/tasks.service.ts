@@ -603,7 +603,7 @@ export class TasksService {
              ? `EXISTS (SELECT 1 FROM task_assignees assignment
                  WHERE assignment.task_id = task.id AND assignment.user_id = ${assignedUser})`
              : 'task.created_by_id = :userId'
-         }`;
+         }${query.columnStatus ? ' AND col.status = :columnStatus' : ''}`;
   }
 
   /** Счётчик раздела учитывает все его задачи, а не только первую видимую страницу. */
@@ -613,7 +613,10 @@ export class TasksService {
   ): Promise<number[]> {
     const records = await this.sequelize.query<{ id: number }>(
       `SELECT task.id ${this.personalTaskSource(query)} ORDER BY task.id`,
-      { replacements: { userId }, type: QueryTypes.SELECT }
+      {
+        replacements: { userId, columnStatus: query.columnStatus },
+        type: QueryTypes.SELECT
+      }
     );
 
     return records.map(record => record.id);
@@ -638,12 +641,12 @@ export class TasksService {
     // Владелец или участник активного проекта: те же правила, что assertCanRead.
     // EXISTS не размножает задачу при нескольких участниках/назначениях.
     const locations = await this.sequelize.query<PersonalTaskLocation>(
-      `SELECT task.id, project.id AS "projectId", project.prefix AS "projectPrefix"
+      `SELECT task.id, project.id AS "projectId", project.prefix AS "projectPrefix", col.status AS "columnStatus"
        ${this.personalTaskSource(query, executorErpId)}
        ORDER BY task.due_date ASC NULLS LAST, task.id ASC
        LIMIT :limit OFFSET :offset`,
       {
-        replacements: { userId, executorErpId, limit: limit + 1, offset },
+        replacements: { userId, executorErpId, columnStatus: query.columnStatus, limit: limit + 1, offset },
         type: QueryTypes.SELECT
       }
     );
@@ -684,7 +687,8 @@ export class TasksService {
             {
               task,
               projectId: location.projectId,
-              projectPrefix: location.projectPrefix
+              projectPrefix: location.projectPrefix,
+              columnStatus: location.columnStatus
             }
           ]
         : [];
@@ -1761,6 +1765,28 @@ export class TasksService {
       ([, value]) => value !== undefined
     );
 
+    // Настройка открывает только значения пользовательских атрибутов, сохраняя остальные права.
+    if (dto.customAttributeValues !== undefined) {
+      const projectId = await this.getProjectIdByColumnId(
+        task.columnId,
+        transaction
+      );
+      const project = await this.projectAccess.assertCanRead(
+        projectId,
+        userId,
+        transaction
+      );
+
+      if (project.attributesOwnerOnly === false) {
+        const attributeIndex = fields.findIndex(
+          ([field]) => field === 'customAttributeValues'
+        );
+        fields.splice(attributeIndex, 1);
+
+        if (!fields.length) return;
+      }
+    }
+
     // Доступ к задаче уже проверен: описание не зависит от создателя или назначения.
     if (fields.length === 1 && fields[0][0] === 'description') return;
 
@@ -1780,7 +1806,7 @@ export class TasksService {
     }
 
     throw new HttpException(
-      'Изменять остальные поля задачи может только её создатель. Дату начала работ также может менять исполнитель.',
+      'Изменять остальные поля задачи может только контроллер. Дату начала работ также может менять исполнитель.',
       HttpStatus.FORBIDDEN
     );
   }
