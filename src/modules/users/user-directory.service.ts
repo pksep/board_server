@@ -88,7 +88,9 @@ export class UserDirectoryService {
     }
 
     for (const user of users) {
-      if (!user.ban) await this.userSync.synchronizeUser(user, true);
+      if (!user.ban) {
+        await this.userSync.synchronizeUser({ ...user, id: user.id }, true);
+      }
     }
   }
 }
