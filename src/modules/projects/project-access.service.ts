@@ -12,6 +12,25 @@ export class ProjectAccessService {
     @InjectModel(ProjectMember) private memberRepository: typeof ProjectMember
   ) {}
 
+  /** Возвращает проекты по тем же правилам владельца и участника, что assertCanRead. */
+  async getReadableProjectIds(userId: number): Promise<number[]> {
+    const memberships = await this.memberRepository.findAll({
+      attributes: ['projectId'],
+      where: { userId }
+    });
+    const projects = await this.projectRepository.findAll({
+      attributes: ['id'],
+      where: {
+        [Op.or]: [
+          { createdById: userId },
+          { id: { [Op.in]: memberships.map(member => member.projectId) } }
+        ]
+      }
+    });
+
+    return projects.map(project => project.id);
+  }
+
   async assertCanRead(
     projectId: number,
     userId: number,

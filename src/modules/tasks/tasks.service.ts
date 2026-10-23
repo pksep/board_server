@@ -41,6 +41,11 @@ import {
 import { CreateTaskTimeEntryDto } from './dto/create-task-time-entry.dto';
 import { TaskGanttQueryDto } from './dto/task-gantt-query.dto';
 import { PersonalTaskQueryDto } from './dto/personal-task-query.dto';
+import { TaskTimeReportQueryDto } from './dto/task-time-report-query.dto';
+import type {
+  TaskTimeReportEntry,
+  TaskTimeReportPage
+} from './interfaces/task-time-report.interface';
 import type {
   PersonalTaskLocation,
   PersonalTaskPage
@@ -1274,6 +1279,74 @@ export class TasksService {
         initial: record.actorInitial,
         login: record.actorLogin
       }
+    };
+  }
+
+  /** Читает период без загрузки каждой задачи; доступ и авторство остаются прежними. */
+  async getTimeReport(
+    userId: number,
+    query: TaskTimeReportQueryDto
+  ): Promise<TaskTimeReportPage> {
+    const start = new Date(query.start);
+    const end = new Date(query.end);
+    const span = end.getTime() - start.getTime();
+
+    if (!Number.isFinite(span) || span <= 0 || span > 32 * 86400000) {
+      throw new HttpException(
+        'Выберите период не более 32 дней',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    const projectIds = await this.projectAccess.getReadableProjectIds(userId);
+    if (!projectIds.length) return { items: [], nextCursor: null };
+
+    const limit = Math.min(Math.max(query.limit ?? 500, 1), 500);
+    const records = await this.sequelize.query<
+      TaskTimeEntryRecord & Omit<TaskTimeReportEntry, keyof TaskTimeEntry>
+    >(
+      `SELECT entry.id, entry.task_id AS "taskId", entry.user_id AS "userId",
+        entry.duration_minutes AS "durationMinutes", entry.comment, entry."createdAt",
+        actor.id AS "actorId", actor.login AS "actorLogin", actor.initial AS "actorInitial",
+        actor.image AS "actorImage", actor.erp_id AS "erpUserId", actor.service_number AS "serviceNumber",
+        task.title AS "taskTitle", task.task_number AS "taskNumber",
+        project.id AS "projectId", project.title AS "projectTitle", project.prefix AS "projectPrefix"
+       FROM task_time_entries entry
+       JOIN users actor ON actor.id = entry.user_id
+       JOIN tasks task ON task.id = entry.task_id
+       JOIN board_columns col ON col.id = task.column_id
+       JOIN boards board ON board.id = col.board_id
+       JOIN projects project ON project.id = board.project_id AND project."deletedAt" IS NULL
+       WHERE project.id IN (:projectIds)
+         AND entry."createdAt" >= :start AND entry."createdAt" < :end
+         ${query.beforeId ? 'AND entry.id < :beforeId' : ''}
+       ORDER BY entry.id DESC LIMIT :limit`,
+      {
+        replacements: {
+          projectIds,
+          start,
+          end,
+          beforeId: query.beforeId,
+          limit: limit + 1
+        },
+        type: QueryTypes.SELECT
+      }
+    );
+    const page = records.slice(0, limit);
+
+    return {
+      items: page.map(record => ({
+        ...this.mapTaskTimeEntry(record),
+        erpUserId: record.erpUserId,
+        serviceNumber: record.serviceNumber,
+        taskTitle: record.taskTitle,
+        taskNumber: Number(record.taskNumber),
+        projectId: Number(record.projectId),
+        projectTitle: record.projectTitle,
+        projectPrefix: record.projectPrefix
+      })),
+      nextCursor:
+        records.length > limit ? Number(page[page.length - 1].id) : null
     };
   }
 

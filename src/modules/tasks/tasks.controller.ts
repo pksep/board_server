@@ -29,11 +29,23 @@ import type { TaskGanttSnapshot } from './interfaces/task-gantt.interface';
 import { PersonalTaskQueryDto } from './dto/personal-task-query.dto';
 import type { PersonalTaskPage } from './interfaces/personal-task.interface';
 import { ExecutorTaskQueryDto } from './dto/executor-task-query.dto';
+import { TaskTimeReportQueryDto } from './dto/task-time-report-query.dto';
+import type { TaskTimeReportPage } from './interfaces/task-time-report.interface';
 
 @ApiTags('Задачи')
 @Controller()
 export class TasksController {
   constructor(private tasksService: TasksService) {}
+
+  /** Читает время только тех проектов, которые доступны текущему пользователю. */
+  @ApiOperation({ summary: 'Фактическое время задач за период' })
+  @Get('tasks/time-report')
+  getTimeReport(
+    @Query() query: TaskTimeReportQueryDto,
+    @CurrentUser() user: IUserDataToken
+  ): Promise<TaskTimeReportPage> {
+    return this.tasksService.getTimeReport(user.id, query);
+  }
 
   /** Сохраняет права читателя проекта и использует общий список назначенных задач. */
   @ApiOperation({
