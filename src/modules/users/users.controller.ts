@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
 import { UserId } from '../auth/user-id.decorator';
 import { ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -8,11 +8,16 @@ import { BanUserDto } from './dto/ban-user.dto';
 import { GetUsersDto } from './dto/get-users.dto';
 import { CreateUserDto } from './dto/create-user.dto';
 import { CheckTabelUniqueDto } from './dto/tabel-unique.dto';
+import { UserDirectoryService } from './user-directory.service';
+import type { IUserDirectoryRequest } from './interfaces/user-directory-request.interface';
 
 @ApiTags('Пользователи')
 @Controller('users')
 export class UsersController {
-  constructor(private userService: UsersService) {}
+  constructor(
+    private userService: UsersService,
+    private readonly directory: UserDirectoryService
+  ) {}
 
   @ApiOperation({ summary: 'Создание пользователей' })
   @ApiResponse({ status: 200, type: User })
@@ -53,7 +58,10 @@ export class UsersController {
   })
   @ApiResponse({ status: 200, type: [User] })
   @Get('/list')
-  getAllList() {
+  /** Возвращает сотрудников, включая созданных до подключения доски к ERP. */
+  async getAllList(@Req() request: IUserDirectoryRequest): Promise<User[]> {
+    await this.directory.ensureMissingUsers(request);
+
     return this.userService.getUsersList();
   }
 

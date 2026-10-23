@@ -120,7 +120,7 @@ export class UserSyncConsumer {
     try {
       switch (eventType) {
         case 'create':
-          await this.handleCreate(event as IErpUserCreateEvent);
+          await this.synchronizeUser((event as IErpUserCreateEvent).entity);
           break;
         case 'change':
           await this.handleChange(event as EntityChangeEvent);
@@ -145,11 +145,11 @@ export class UserSyncConsumer {
     }
   }
 
-  /**
-   * user.create — создать пользователя в локальной БД
-   */
-  private async handleCreate(event: IErpUserCreateEvent): Promise<void> {
-    const payload = event?.entity;
+  /** Сопоставляет ERP-пользователя; сверка справочника дополняет только отсутствующие записи. */
+  async synchronizeUser(
+    payload: IErpUserCreatePayload,
+    onlyMissing = false
+  ): Promise<void> {
     if (
       !payload ||
       (typeof payload.id !== 'number' && typeof payload.id !== 'string') ||
@@ -203,6 +203,9 @@ export class UserSyncConsumer {
             this.logger.log(`Created user from ERP: erpId=${erpId}`);
             return;
           }
+
+          // Снимок справочника не отменяет более свежие события блокировки или назначения.
+          if (onlyMissing) return;
 
           const updates = { erpId, ...userData, serviceNumber };
           const changed = (

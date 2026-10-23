@@ -88,6 +88,44 @@ describe('UserSyncConsumer user.create', () => {
     expect(repository.create).not.toHaveBeenCalled();
   });
 
+  it('добавляет старого сотрудника через тот же обработчик без входа', async (): Promise<void> => {
+    await consumer.synchronizeUser(event.entity, true);
+
+    expect(repository.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        erpId: '42',
+        serviceNumber: '0042',
+        ban: false,
+        role: '-'
+      }),
+      { transaction }
+    );
+  });
+
+  it('снимок справочника не меняет существующий Board ID, блокировку и профиль', async (): Promise<void> => {
+    const user = {
+      id: 7,
+      erpId: null,
+      serviceNumber: '0042',
+      ban: true,
+      login: 'existing',
+      save: jest.fn()
+    };
+    repository.findAll.mockResolvedValue([user]);
+
+    await consumer.synchronizeUser(event.entity, true);
+
+    expect(user).toMatchObject({
+      id: 7,
+      erpId: null,
+      ban: true,
+      login: 'existing'
+    });
+    expect(repository.create).not.toHaveBeenCalled();
+    expect(user.save).not.toHaveBeenCalled();
+    expect(usersService.saveUserAvailability).not.toHaveBeenCalled();
+  });
+
   it('после гонки INSERT перечитывает созданную запись один раз', async () => {
     const user = {
       id: 7,

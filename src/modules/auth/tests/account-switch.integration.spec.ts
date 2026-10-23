@@ -19,6 +19,8 @@ import { ProjectTag } from '../../tags/model/project-tag.model';
 import { User } from '../../users/model/users.model';
 import { UsersController } from '../../users/users.controller';
 import { UsersService } from '../../users/users.service';
+import { UserSyncConsumer } from '../../users/user-sync.consumer';
+import { UserDirectoryService } from '../../users/user-directory.service';
 import { LoggerService } from '../../logger/logger.service';
 import { WsGateway } from '../../ws/ws.gateway';
 import { TokenAuth } from '../jwt-auth.guard';
@@ -31,7 +33,7 @@ const mockErpCheck = jest.fn();
 
 jest.mock('axios', () => ({
   __esModule: true,
-  default: { post: jest.fn() }
+  default: { post: jest.fn(), get: jest.fn() }
 }));
 
 const databaseUrl = process.env.BOARD_ARCHIVE_TEST_DATABASE_URL;
@@ -115,6 +117,8 @@ describeWithDatabase(
           ProjectsService,
           ProjectAccessService,
           UsersService,
+          UserSyncConsumer,
+          UserDirectoryService,
           TokenAuth,
           AccessTokenService,
           Reflector,
@@ -170,6 +174,7 @@ describeWithDatabase(
     });
 
     beforeEach((): void => {
+      jest.mocked(axios.get).mockResolvedValue({ status: 200, data: [] });
       // Внешний ERP POST возвращает стандартный Nest HTTP 201, не только 200.
       jest.mocked(axios.post).mockImplementation(async (path, body) => ({
         status: 201,
@@ -210,6 +215,66 @@ describeWithDatabase(
     afterAll(async (): Promise<void> => {
       await app?.close();
       await sequelize?.close();
+    });
+
+    it('lists a pre-existing ERP employee who has never signed into Board, without adding project access', async (): Promise<void> => {
+      const employee = {
+        id: 9900042,
+        tabel: 'old-erp-0042',
+        login: 'Never signed into Board'
+      };
+      expect(await User.count({ where: { erpId: String(employee.id) } })).toBe(
+        0
+      );
+      jest.mocked(axios.get).mockResolvedValue({
+        status: 200,
+        data: [
+          employee,
+          { id: userA.erpId, tabel: userA.serviceNumber, login: userA.login }
+        ]
+      });
+
+      const response = await request(app.getHttpServer())
+        .get('/users/list')
+        .set('Cookie', ['access_token=erp-A'])
+        .expect(200);
+      const imported = await User.findOne({
+        where: { erpId: String(employee.id) }
+      });
+
+      expect(imported).not.toBeNull();
+      expect(response.body).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: imported!.id,
+            serviceNumber: employee.tabel,
+            login: employee.login
+          })
+        ])
+      );
+      expect(imported!.role).toBe('-');
+      expect(
+        await ProjectMember.count({ where: { userId: imported!.id } })
+      ).toBe(0);
+      expect((await projectA.reload()).createdById).toBe(userA.id);
+      expect(mockErpCheck).toHaveBeenCalledWith(expect.any(String), {
+        token: 'erp-A'
+      });
+      expect(axios.get).toHaveBeenCalledWith(
+        'http://isolated-erp.invalid/api/users/list/true/false',
+        expect.objectContaining({
+          headers: { Cookie: 'access_token=erp-A', compress: 'no-compress' },
+          maxRedirects: 0
+        })
+      );
+
+      await request(app.getHttpServer())
+        .get('/users/list')
+        .set('Cookie', ['access_token=erp-A'])
+        .expect(200);
+      expect(await User.count({ where: { erpId: String(employee.id) } })).toBe(
+        1
+      );
     });
 
     it('loads preserved projects and users after ERP confirms with HTTP 201', async (): Promise<void> => {
