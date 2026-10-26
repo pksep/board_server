@@ -225,7 +225,7 @@ describeWithDatabase(
       ).expect(403);
     });
 
-    it('opens only custom attribute values to members when the project setting is disabled', async (): Promise<void> => {
+    it('opens attribute values to members without granting task management when the project setting is disabled', async (): Promise<void> => {
       await persist(ProjectMember.build(), {
         projectId: project.id,
         userId: outsider.id
@@ -285,6 +285,79 @@ describeWithDatabase(
       ).expect(403);
     });
 
+    it('lets a regular member change standard attributes and validates them with the existing rules', async (): Promise<void> => {
+      await persist(ProjectMember.build(), {
+        projectId: project.id,
+        userId: outsider.id
+      });
+      project.attributesOwnerOnly = false;
+      await project.save();
+
+      const values: Partial<CreateTaskDto> = {
+        linkedEntity: {
+          type: TaskEntityType.Part,
+          id: 123,
+          name: 'Member part',
+          designation: ''
+        },
+        priority: 'high',
+        approvalStatus: 'yes',
+        startDate: '2026-10-11T00:00:00.000Z',
+        dueDate: '2026-10-21T00:00:00.000Z',
+        assigneeIds: [outsider.id],
+        tagIds: []
+      };
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        values,
+        'date-outsider-token'
+      ).expect(200);
+      const saved = await task.reload();
+      expect(saved.priority).toBe('high');
+      expect(saved.approvalStatus).toBe('yes');
+      expect(saved.linkedEntity?.id).toBe(123);
+      expect(saved.startDate.toISOString()).toBe(values.startDate);
+      expect(saved.dueDate.toISOString()).toBe(values.dueDate);
+      expect(
+        await TaskAssignee.count({
+          where: { taskId: task.id, userId: outsider.id }
+        })
+      ).toBe(1);
+      expect(saved.controllerIds).toEqual([owner.id]);
+      expect(ws.emitTaskUpdated).toHaveBeenCalled();
+
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { dueDate: '2026-10-01T00:00:00Z' },
+        'date-outsider-token'
+      ).expect(400);
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { assigneeIds: [secondExecutor.id] },
+        'date-outsider-token'
+      ).expect(400);
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { priority: 'low', controllerIds: [outsider.id] },
+        'date-outsider-token'
+      ).expect(403);
+      expect((await task.reload()).priority).toBe('high');
+
+      project.attributesOwnerOnly = true;
+      await project.save();
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { priority: 'low' },
+        'date-outsider-token'
+      ).expect(403);
+      await write('put', `/tasks/${task.id}`, { priority: 'low' }).expect(200);
+    });
+
     it('does not grant project access when custom attribute editing is open', async (): Promise<void> => {
       project.attributesOwnerOnly = false;
       await project.save();
@@ -292,6 +365,12 @@ describeWithDatabase(
         'put',
         `/tasks/${task.id}`,
         { customAttributeValues: {} },
+        'date-outsider-token'
+      ).expect(404);
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { priority: 'high' },
         'date-outsider-token'
       ).expect(404);
     });
