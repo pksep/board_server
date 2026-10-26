@@ -11,10 +11,11 @@ import { BoardColumn } from '../columns/model/board-column.model';
 import { Board } from '../boards/model/board.model';
 import { ProjectsModule } from '../projects/projects.module';
 import { ActivityEventsModule } from '../activity-events/activity-events.module';
+import { TimeReportPermissionGuard } from './time-report-permission.guard';
 
 @Module({
   controllers: [TasksController],
-  providers: [TasksService],
+  providers: [TasksService, TimeReportPermissionGuard],
   imports: [
     SequelizeModule.forFeature([
       Task,
