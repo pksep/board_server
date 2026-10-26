@@ -1840,14 +1840,25 @@ export class TasksService {
   ): Promise<void> {
     if ((task.controllerIds ?? [task.createdById]).includes(userId)) return;
 
-    const fields = Object.entries(dto).filter(
-      ([, value]) => value !== undefined
-    );
+    let fields = Object.entries(dto).filter(([, value]) => value !== undefined);
 
-    // Настройка открывает только значения пользовательских атрибутов, сохраняя остальные права.
+    // Открываются значения стандартных и пользовательских атрибутов, но не управление задачей.
+    const attributeFields = new Set<keyof UpdateTaskDto>([
+      'linkedEntity',
+      'dueDate',
+      'startDate',
+      'priority',
+      'approvalStatus',
+      'assigneeIds',
+      'tagIds',
+      'parentTaskId',
+      'customAttributeValues',
+      'customAttributeChanges'
+    ]);
     if (
-      dto.customAttributeValues !== undefined ||
-      dto.customAttributeChanges !== undefined
+      fields.some(([field]) =>
+        attributeFields.has(field as keyof UpdateTaskDto)
+      )
     ) {
       const projectId = await this.getProjectIdByColumnId(
         task.columnId,
@@ -1860,12 +1871,9 @@ export class TasksService {
       );
 
       if (project.attributesOwnerOnly === false) {
-        const attributeIndex = fields.findIndex(
-          ([field]) =>
-            field === 'customAttributeValues' ||
-            field === 'customAttributeChanges'
+        fields = fields.filter(
+          ([field]) => !attributeFields.has(field as keyof UpdateTaskDto)
         );
-        fields.splice(attributeIndex, 1);
 
         if (!fields.length) return;
       }

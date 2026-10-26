@@ -18,6 +18,7 @@ import { ColumnStatus } from '../interfaces/column-status.interface';
 import { BoardColumn } from '../model/board-column.model';
 import { ColumnMovePermission } from '../interfaces/column-move-permission.interface';
 import { TasksController } from '../../tasks/tasks.controller';
+import { TimeReportPermissionGuard } from '../../tasks/time-report-permission.guard';
 import { TasksService } from '../../tasks/tasks.service';
 import { Task } from '../../tasks/model/task.model';
 import { TaskAssignee } from '../../tasks/model/task-assignee.model';
@@ -126,7 +127,10 @@ describeWithDatabase('Column status API with isolated PostgreSQL', () => {
         { provide: WsGateway, useValue: ws },
         { provide: S3Service, useValue: {} }
       ]
-    }).compile();
+    })
+      .overrideGuard(TimeReportPermissionGuard)
+      .useValue({ canActivate: (): boolean => true })
+      .compile();
     app = module.createNestApplication();
     app.use(
       (
