@@ -8,7 +8,8 @@ import {
   Post,
   Query,
   Req,
-  Put
+  Put,
+  UseGuards
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -31,6 +32,7 @@ import type { PersonalTaskPage } from './interfaces/personal-task.interface';
 import { ExecutorTaskQueryDto } from './dto/executor-task-query.dto';
 import { TaskTimeReportQueryDto } from './dto/task-time-report-query.dto';
 import type { TaskTimeReportPage } from './interfaces/task-time-report.interface';
+import { TimeReportPermissionGuard } from './time-report-permission.guard';
 
 @ApiTags('Задачи')
 @Controller()
@@ -40,6 +42,7 @@ export class TasksController {
   /** Читает время только тех проектов, которые доступны текущему пользователю. */
   @ApiOperation({ summary: 'Фактическое время задач за период' })
   @Get('tasks/time-report')
+  @UseGuards(TimeReportPermissionGuard)
   getTimeReport(
     @Query() query: TaskTimeReportQueryDto,
     @CurrentUser() user: IUserDataToken

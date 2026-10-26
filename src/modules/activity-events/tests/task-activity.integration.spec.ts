@@ -12,6 +12,7 @@ import { Sequelize } from 'sequelize-typescript';
 import request = require('supertest');
 import models from '../../../configs/models';
 import { TasksController } from '../../tasks/tasks.controller';
+import { TimeReportPermissionGuard } from '../../tasks/time-report-permission.guard';
 import { TasksService } from '../../tasks/tasks.service';
 import { Task } from '../../tasks/model/task.model';
 import { Board } from '../../boards/model/board.model';
@@ -165,7 +166,10 @@ describeWithDatabase(
             }
           }
         ]
-      }).compile();
+      })
+        .overrideGuard(TimeReportPermissionGuard)
+        .useValue({ canActivate: (): boolean => true })
+        .compile();
       app = module.createNestApplication();
       app.useGlobalPipes(
         new ValidationPipe({ transform: true, whitelist: true })
