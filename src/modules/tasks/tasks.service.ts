@@ -651,7 +651,13 @@ export class TasksService {
        ORDER BY task.due_date ASC NULLS LAST, task.id ASC
        LIMIT :limit OFFSET :offset`,
       {
-        replacements: { userId, executorErpId, columnStatus: query.columnStatus, limit: limit + 1, offset },
+        replacements: {
+          userId,
+          executorErpId,
+          columnStatus: query.columnStatus,
+          limit: limit + 1,
+          offset
+        },
         type: QueryTypes.SELECT
       }
     );
@@ -1839,7 +1845,10 @@ export class TasksService {
     );
 
     // Настройка открывает только значения пользовательских атрибутов, сохраняя остальные права.
-    if (dto.customAttributeValues !== undefined) {
+    if (
+      dto.customAttributeValues !== undefined ||
+      dto.customAttributeChanges !== undefined
+    ) {
       const projectId = await this.getProjectIdByColumnId(
         task.columnId,
         transaction
@@ -1852,7 +1861,9 @@ export class TasksService {
 
       if (project.attributesOwnerOnly === false) {
         const attributeIndex = fields.findIndex(
-          ([field]) => field === 'customAttributeValues'
+          ([field]) =>
+            field === 'customAttributeValues' ||
+            field === 'customAttributeChanges'
         );
         fields.splice(attributeIndex, 1);
 
@@ -1888,6 +1899,16 @@ export class TasksService {
    * Обновить задачу
    */
   async update(id: number, dto: UpdateTaskDto, userId: number): Promise<Task> {
+    if (
+      dto.customAttributeValues !== undefined &&
+      dto.customAttributeChanges !== undefined
+    ) {
+      throw new HttpException(
+        'Передайте либо полный набор атрибутов, либо отдельные изменения',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
     const transaction = await this.sequelize.transaction();
     try {
       const task = await this.assertTaskAccess(id, userId, transaction, true);
@@ -1918,12 +1939,18 @@ export class TasksService {
           transaction
         );
       }
+      // Объединяем после блокировки задачи, чтобы не стереть параллельные изменения других полей.
+      const requestedAttributes =
+        dto.customAttributeChanges === undefined
+          ? dto.customAttributeValues
+          : { ...task.customAttributeValues, ...dto.customAttributeChanges };
+
       const customAttributeValues =
-        dto.customAttributeValues === undefined
+        requestedAttributes === undefined
           ? undefined
           : await this.normalizeCustomAttributeValues(
               projectId,
-              dto.customAttributeValues,
+              requestedAttributes,
               transaction
             );
       const before = {
