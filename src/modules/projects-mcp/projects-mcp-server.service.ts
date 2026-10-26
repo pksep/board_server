@@ -30,6 +30,8 @@ import { MoveTaskDto } from '../tasks/dto/move-task.dto';
 import { UpdateTaskDto } from '../tasks/dto/update-task.dto';
 import { PersonalTaskQueryDto } from '../tasks/dto/personal-task-query.dto';
 import { CreateTaskTimeEntryDto } from '../tasks/dto/create-task-time-entry.dto';
+import { TaskTimeReportQueryDto } from '../tasks/dto/task-time-report-query.dto';
+import { TimeReportPermissionGuard } from '../tasks/time-report-permission.guard';
 import { TaskAttributeType } from '../projects/interfaces/task-attribute.interface';
 import { TasksService } from '../tasks/tasks.service';
 import { UsersService } from '../users/users.service';
@@ -50,7 +52,8 @@ export class ProjectsMcpServerService {
     private tagsService: TagsService,
     private usersService: UsersService,
     private operations: ProjectsMcpOperationsService,
-    private taskComments: ProjectsMcpTaskCommentsService
+    private taskComments: ProjectsMcpTaskCommentsService,
+    private timeReportPermission: TimeReportPermissionGuard
   ) {}
 
   createServer(auth: ProjectsMcpAuthContext): McpServer {
@@ -251,6 +254,31 @@ export class ProjectsMcpServerService {
             }
           )
         );
+      }
+    );
+
+    server.registerTool(
+      'task_time_report_get',
+      {
+        description:
+          'Учёт фактически записанного времени задач за дату или период, как на странице /time-tracking. Начало включительно, конец не включается; передавайте ISO даты с часовым поясом. Период до 32 суток, длинный период разбивайте на части до 31 дня. Возвращает автора записи, табель, ERP ID, задачу, проект, минуты и комментарий. Это все доступные записи, не только мои: для личного отчёта сравните userId с currentUserId. Продолжайте beforeId=nextCursor до null, не выдавайте частичную сумму за полный итог. Производственные результаты работ ERP в этот источник не входят.',
+        inputSchema: {
+          start: z.iso.datetime({ offset: true }),
+          end: z.iso.datetime({ offset: true }),
+          beforeId: z.number().int().positive().optional(),
+          limit: z.number().int().min(1).max(500).default(500)
+        },
+        annotations: this.readOnlyAnnotations('Учёт времени задач за период')
+      },
+      async input => {
+        this.assertScope(auth, ProjectsMcpScope.Read);
+        await this.timeReportPermission.assertMcpAccess(auth.accessToken);
+        const page = await this.tasksService.getTimeReport(
+          auth.user.id,
+          await validateDto(TaskTimeReportQueryDto, input)
+        );
+
+        return this.toolResult({ ...page, currentUserId: auth.user.id });
       }
     );
 

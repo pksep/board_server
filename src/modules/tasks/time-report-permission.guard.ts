@@ -20,7 +20,6 @@ export class TimeReportPermissionGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<IUserDirectoryRequest>();
     const token = request.cookies?.access_token;
-    const base = this.config.get<string>(ConfigConstains.erpApiUrl);
 
     // Локальный board_token и dev fallback не заменяют разрешение роли ERP.
     if (typeof token !== 'string' || !token) {
@@ -28,6 +27,28 @@ export class TimeReportPermissionGuard implements CanActivate {
         'Для отчёта нужна действующая сессия ERP'
       );
     }
+
+    await this.assertPermissions({
+      Cookie: `access_token=${encodeURIComponent(token)}`
+    });
+
+    return true;
+  }
+
+  /** ERP проверяет личность и scope делегированного токена, затем читает текущие права. */
+  async assertMcpAccess(token: string): Promise<void> {
+    if (!token) {
+      throw new UnauthorizedException('Для отчёта нужен действующий MCP token');
+    }
+
+    await this.assertPermissions({ Authorization: `Bearer ${token}` });
+  }
+
+  private async assertPermissions(
+    authorization: { Cookie: string } | { Authorization: string }
+  ): Promise<void> {
+    const base = this.config.get<string>(ConfigConstains.erpApiUrl);
+
     if (!base) {
       throw new ServiceUnavailableException(
         'Не удалось проверить доступ к учёту времени'
@@ -43,7 +64,7 @@ export class TimeReportPermissionGuard implements CanActivate {
     try {
       const response = await axios.get<unknown>(`${apiBase}/authorization/me`, {
         headers: {
-          Cookie: `access_token=${encodeURIComponent(token)}`,
+          ...authorization,
           compress: 'no-compress'
         },
         timeout: 5000,
@@ -91,7 +112,5 @@ export class TimeReportPermissionGuard implements CanActivate {
         requirementMode: 'allOf'
       });
     }
-
-    return true;
   }
 }

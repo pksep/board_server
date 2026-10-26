@@ -1,5 +1,8 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { ConfigService } from '@nestjs/config';
+import axios from 'axios';
+import { TimeReportPermissionGuard } from '../../tasks/time-report-permission.guard';
 import { ProjectsMcpServerService } from '../projects-mcp-server.service';
 import {
   PROJECTS_MCP_SCOPES,
@@ -52,6 +55,7 @@ describe('ProjectsMcpServerService', () => {
       .fn()
       .mockResolvedValue({ items: [], nextCursor: null }),
     createTimeEntry: jest.fn(),
+    getTimeReport: jest.fn().mockResolvedValue({ items: [], nextCursor: null }),
     create: jest.fn(),
     createSubtask: jest.fn(),
     update: jest.fn(),
@@ -83,7 +87,10 @@ describe('ProjectsMcpServerService', () => {
     tagsService as any,
     usersService as any,
     operations as any,
-    taskComments as any
+    taskComments as any,
+    new TimeReportPermissionGuard(
+      new ConfigService({ erpApiUrl: 'http://erp.invalid/api' })
+    )
   );
 
   beforeEach(() => {
@@ -147,6 +154,7 @@ describe('ProjectsMcpServerService', () => {
         'task_attributes_update',
         'task_time_entries_list',
         'task_time_entries_create',
+        'task_time_report_get',
         'task_subtasks_list',
         'tasks_create',
         'tasks_delete',
@@ -346,6 +354,118 @@ describe('ProjectsMcpServerService', () => {
         limit: 20
       });
     } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('читает штатный отчёт периода и проверяет актуальные права до чтения данных', async (): Promise<void> => {
+    const auth = {
+      user: { id: 7, login: 'DA', serviceNumber: '007' },
+      clientId: 'jest',
+      audience: PROJECTS_MCP_AUDIENCE,
+      scopes: new Set(PROJECTS_MCP_SCOPES),
+      accessToken: 'mcp-token'
+    };
+    const permissions = [
+      { resource_code: 'general.time-tracking', action: 'view' },
+      { resource_code: 'general.projects', action: 'view' }
+    ];
+    const get = jest
+      .spyOn(axios, 'get')
+      .mockResolvedValue({ data: { permissions } });
+    const server = service.createServer(auth);
+    const client = new Client({ name: 'jest-report', version: '1.0.0' });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const input = {
+      start: '2026-10-26T00:00:00+03:00',
+      end: '2026-10-27T00:00:00+03:00',
+      limit: 1,
+      beforeId: 30
+    };
+    const page = {
+      items: [
+        { id: 24, userId: 8, durationMinutes: 120, comment: 'Проверил чертежи' }
+      ],
+      nextCursor: 24
+    };
+
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      tasksService.getTimeReport.mockResolvedValue(page);
+      const result = await client.callTool({
+        name: 'task_time_report_get',
+        arguments: input
+      });
+
+      expect(result.structuredContent).toEqual({
+        data: { ...page, currentUserId: 7 }
+      });
+      expect(tasksService.getTimeReport).toHaveBeenCalledWith(7, input);
+      expect(get).toHaveBeenCalledWith(
+        'http://erp.invalid/api/authorization/me',
+        expect.objectContaining({
+          headers: {
+            Authorization: 'Bearer mcp-token',
+            compress: 'no-compress'
+          },
+          maxRedirects: 0
+        })
+      );
+
+      get.mockResolvedValue({ data: { permissions: [permissions[1]] } });
+      expect(
+        (
+          await client.callTool({
+            name: 'task_time_report_get',
+            arguments: input
+          })
+        ).isError
+      ).toBe(true);
+      expect(tasksService.getTimeReport).toHaveBeenCalledTimes(1);
+      get.mockRejectedValue(new Error('ERP unavailable'));
+      expect(
+        (
+          await client.callTool({
+            name: 'task_time_report_get',
+            arguments: input
+          })
+        ).isError
+      ).toBe(true);
+      expect(tasksService.getTimeReport).toHaveBeenCalledTimes(1);
+
+      for (const invalid of [
+        { start: 'invalid' },
+        { end: '2026-10-27' },
+        { limit: 501 },
+        { beforeId: 0 }
+      ]) {
+        expect(
+          (
+            await client.callTool({
+              name: 'task_time_report_get',
+              arguments: { ...input, ...invalid }
+            })
+          ).isError
+        ).toBe(true);
+      }
+      expect(tasksService.getTimeReport).toHaveBeenCalledTimes(1);
+      auth.scopes.clear();
+      get.mockClear();
+      expect(
+        (
+          await client.callTool({
+            name: 'task_time_report_get',
+            arguments: input
+          })
+        ).isError
+      ).toBe(true);
+      expect(get).not.toHaveBeenCalled();
+      expect(operations.run).not.toHaveBeenCalled();
+    } finally {
+      get.mockRestore();
       await client.close();
       await server.close();
     }

@@ -29,6 +29,7 @@ export const PROJECTS_MCP_TOOL_SCOPES: Record<string, ProjectsMcpScope> = {
   tasks_personal_list: ProjectsMcpScope.Read,
   task_attributes_get: ProjectsMcpScope.Read,
   task_time_entries_list: ProjectsMcpScope.Read,
+  task_time_report_get: ProjectsMcpScope.Read,
   projects_create: ProjectsMcpScope.Create,
   projects_update: ProjectsMcpScope.Update,
   project_members_update: ProjectsMcpScope.Members,

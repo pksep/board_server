@@ -29,6 +29,6 @@ import { TimeReportPermissionGuard } from './time-report-permission.guard';
     ProjectsModule,
     ActivityEventsModule
   ],
-  exports: [TasksService]
+  exports: [TasksService, TimeReportPermissionGuard]
 })
 export class TasksModule {}
