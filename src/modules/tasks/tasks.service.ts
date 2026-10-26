@@ -1851,6 +1851,7 @@ export class TasksService {
       'approvalStatus',
       'assigneeIds',
       'tagIds',
+      'parentTaskId',
       'customAttributeValues'
     ]);
     if (

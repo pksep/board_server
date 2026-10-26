@@ -18,6 +18,7 @@ import { Task } from '../model/task.model';
 import { TaskAssignee } from '../model/task-assignee.model';
 import { ProjectMember } from '../../projects/model/project-member.model';
 import { CreateTaskDto } from '../dto/create-task.dto';
+import { UpdateTaskDto } from '../dto/update-task.dto';
 import { Board } from '../../boards/model/board.model';
 import { BoardColumn } from '../../columns/model/board-column.model';
 import { ColumnMovePermission } from '../../columns/interfaces/column-move-permission.interface';
@@ -181,7 +182,7 @@ describeWithDatabase(
     function write(
       method: 'post' | 'put',
       path: string,
-      payload: Partial<CreateTaskDto>,
+      payload: UpdateTaskDto,
       token = 'date-owner-token'
     ): request.Test {
       return request(app.getHttpServer())
@@ -358,7 +359,64 @@ describeWithDatabase(
       await write('put', `/tasks/${task.id}`, { priority: 'low' }).expect(200);
     });
 
-    it('does not grant project access when custom attribute editing is open', async (): Promise<void> => {
+    it('lets a member attach and detach a parent while preserving hierarchy checks and the default restriction', async (): Promise<void> => {
+      await persist(ProjectMember.build(), {
+        projectId: project.id,
+        userId: outsider.id
+      });
+      const parent = await persist(Task.build(), {
+        title: 'Parent',
+        taskNumber: 2,
+        columnId: column.id,
+        createdById: owner.id
+      });
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { parentTaskId: parent.id },
+        'date-outsider-token'
+      ).expect(403);
+      project.attributesOwnerOnly = false;
+      await project.save();
+
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { parentTaskId: task.id },
+        'date-outsider-token'
+      ).expect(400);
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { parentTaskId: parent.id },
+        'date-outsider-token'
+      ).expect(200);
+      expect((await task.reload()).parentTaskId).toBe(parent.id);
+      await write(
+        'put',
+        `/tasks/${parent.id}`,
+        { parentTaskId: task.id },
+        'date-outsider-token'
+      ).expect(400);
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { parentTaskId: null },
+        'date-outsider-token'
+      ).expect(200);
+      expect((await task.reload()).parentTaskId).toBeNull();
+      expect(task.controllerIds).toEqual([owner.id]);
+      project.attributesOwnerOnly = true;
+      await project.save();
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { parentTaskId: parent.id },
+        'date-outsider-token'
+      ).expect(403);
+    });
+
+    it('does not grant project access when attribute editing is open', async (): Promise<void> => {
       project.attributesOwnerOnly = false;
       await project.save();
       await write(
