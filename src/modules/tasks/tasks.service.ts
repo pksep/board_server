@@ -583,6 +583,11 @@ export class TasksService {
       ? `JOIN users executor ON executor.erp_id = :executorErpId AND executor.ban = false`
       : '';
     const assignedUser = executorErpId ? 'executor.id' : ':userId';
+    const statusFilter = query.columnStatuses?.length
+      ? ' AND col.status IN (:columnStatuses)'
+      : query.columnStatus
+        ? ' AND col.status = :columnStatus'
+        : '';
 
     return `FROM tasks task
        JOIN board_columns col ON col.id = task.column_id AND col."deletedAt" IS NULL
@@ -608,7 +613,7 @@ export class TasksService {
              ? `EXISTS (SELECT 1 FROM task_assignees assignment
                  WHERE assignment.task_id = task.id AND assignment.user_id = ${assignedUser})`
              : 'task.created_by_id = :userId'
-         }${query.columnStatus ? ' AND col.status = :columnStatus' : ''}`;
+         }${statusFilter}`;
   }
 
   /** Счётчик раздела учитывает все его задачи, а не только первую видимую страницу. */
@@ -619,7 +624,11 @@ export class TasksService {
     const records = await this.sequelize.query<{ id: number }>(
       `SELECT task.id ${this.personalTaskSource(query)} ORDER BY task.id`,
       {
-        replacements: { userId, columnStatus: query.columnStatus },
+        replacements: {
+          userId,
+          columnStatus: query.columnStatus,
+          columnStatuses: query.columnStatuses
+        },
         type: QueryTypes.SELECT
       }
     );
@@ -643,18 +652,22 @@ export class TasksService {
   ): Promise<PersonalTaskPage> {
     const limit = query.limit ?? 50;
     const offset = query.offset ?? 0;
+    const dateColumn =
+      query.sortBy === 'startDate' ? 'task.start_date' : 'task.due_date';
+    const direction = query.sortDirection === 'desc' ? 'DESC' : 'ASC';
     // Владелец или участник активного проекта: те же правила, что assertCanRead.
     // EXISTS не размножает задачу при нескольких участниках/назначениях.
     const locations = await this.sequelize.query<PersonalTaskLocation>(
       `SELECT task.id, project.id AS "projectId", project.prefix AS "projectPrefix", col.status AS "columnStatus"
        ${this.personalTaskSource(query, executorErpId)}
-       ORDER BY task.due_date ASC NULLS LAST, task.id ASC
+       ORDER BY ${dateColumn} ${direction} NULLS LAST, task.id ASC
        LIMIT :limit OFFSET :offset`,
       {
         replacements: {
           userId,
           executorErpId,
           columnStatus: query.columnStatus,
+          columnStatuses: query.columnStatuses,
           limit: limit + 1,
           offset
         },

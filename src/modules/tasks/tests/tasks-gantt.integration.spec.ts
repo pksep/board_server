@@ -149,9 +149,14 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
 
   beforeEach(async (): Promise<void> => {
     sequence += 1;
+    const prefixIndex = sequence - 1;
+    const prefixSuffix = String.fromCharCode(
+      65 + Math.floor(prefixIndex / 26),
+      65 + (prefixIndex % 26)
+    );
     project = await persist(Project.build(), {
       title: 'Gantt QA',
-      prefix: `GNTA${String.fromCharCode(64 + sequence)}`,
+      prefix: `GNT${prefixSuffix}`,
       createdById: owner.id
     });
     board = await persist(Board.build(), {
@@ -681,7 +686,7 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
 
   /** Личные списки проверяются тем же HTTP-контуром, без отдельного обхода авторизации. */
   async function readPersonal(
-    query: Record<string, string> = {},
+    query: Record<string, string | string[]> = {},
     token = 'gantt-owner-token'
   ): Promise<PersonalTaskPage> {
     const response = await request(app.getHttpServer())
@@ -795,8 +800,37 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     }
   );
 
+  it('combines selected personal task statuses before paginating', async (): Promise<void> => {
+    await columns[0].update({ status: ColumnStatus.InReview });
+    await columns[1].update({ status: ColumnStatus.Queued });
+    await columns[2].update({ status: ColumnStatus.Completed });
+    const columnStatuses = [ColumnStatus.InReview, ColumnStatus.Completed];
+    const unfiltered = await readPersonal({ limit: '100' });
+    const expected = unfiltered.items.filter(
+      item =>
+        item.columnStatus !== null && columnStatuses.includes(item.columnStatus)
+    );
+    const first = await readPersonal({ columnStatuses, limit: '1' });
+    const second = await readPersonal({
+      columnStatuses,
+      limit: '1',
+      offset: String(first.offset)
+    });
+
+    expect(first.hasMore).toBe(true);
+    expect(second.hasMore).toBe(expected.length > 2);
+    expect([...first.items, ...second.items].map(item => item.task.id)).toEqual(
+      expected.slice(0, 2).map(item => item.task.id)
+    );
+    const combined = await readPersonal({ columnStatuses, limit: '100' });
+    expect(combined.items.map(item => item.task.id)).toEqual(
+      expected.map(item => item.task.id)
+    );
+  });
+
   it('personal task pages sort globally before pagination, with deterministic ties and null dates last', async (): Promise<void> => {
     roots[0].dueDate = null;
+    roots[0].startDate = new Date('2030-01-01T00:00:00Z');
     await roots[0].save();
     roots[2].dueDate = new Date('2026-09-01T00:00:00Z');
     await roots[2].save();
@@ -819,6 +853,23 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       item.task.dueDate ? new Date(item.task.dueDate).getTime() : Infinity
     );
     expect(dates).toEqual([...dates].sort((left, right) => left - right));
+
+    const order = { sortBy: 'startDate', sortDirection: 'desc' };
+    const sorted = [...all.items].sort(
+      (left, right) =>
+        new Date(String(right.task.startDate)).getTime() -
+          new Date(String(left.task.startDate)).getTime() ||
+        left.task.id - right.task.id
+    );
+    const first = await readPersonal({ ...order, limit: '2' });
+    const second = await readPersonal({
+      ...order,
+      limit: '2',
+      offset: String(first.offset)
+    });
+    expect([...first.items, ...second.items].map(item => item.task.id)).toEqual(
+      sorted.slice(0, 4).map(item => item.task.id)
+    );
   });
 
   it('personal lists keep project access checks even for a creator/assignee and reject revoked/archived locations', async (): Promise<void> => {
@@ -875,7 +926,8 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     { limit: '101' },
     { limit: '0' },
     { offset: '-1' },
-    { columnStatus: 'invalid-status' }
+    { columnStatus: 'invalid-status' },
+    { columnStatuses: [ColumnStatus.Completed, 'invalid-status'] }
   ])('validates personal list parameters: %p', async (query): Promise<void> => {
     await request(app.getHttpServer())
       .get('/tasks/personal')
