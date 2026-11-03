@@ -149,9 +149,14 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
 
   beforeEach(async (): Promise<void> => {
     sequence += 1;
+    const prefixIndex = sequence - 1;
+    const prefixSuffix = String.fromCharCode(
+      65 + Math.floor(prefixIndex / 26),
+      65 + (prefixIndex % 26)
+    );
     project = await persist(Project.build(), {
       title: 'Gantt QA',
-      prefix: `GNTA${String.fromCharCode(64 + sequence)}`,
+      prefix: `GNT${prefixSuffix}`,
       createdById: owner.id
     });
     board = await persist(Board.build(), {
@@ -800,6 +805,11 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     await columns[1].update({ status: ColumnStatus.Queued });
     await columns[2].update({ status: ColumnStatus.Completed });
     const columnStatuses = [ColumnStatus.InReview, ColumnStatus.Completed];
+    const unfiltered = await readPersonal({ limit: '100' });
+    const expected = unfiltered.items.filter(
+      item =>
+        item.columnStatus !== null && columnStatuses.includes(item.columnStatus)
+    );
     const first = await readPersonal({ columnStatuses, limit: '1' });
     const second = await readPersonal({
       columnStatuses,
@@ -808,9 +818,13 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     });
 
     expect(first.hasMore).toBe(true);
-    expect(second.hasMore).toBe(false);
+    expect(second.hasMore).toBe(expected.length > 2);
     expect([...first.items, ...second.items].map(item => item.task.id)).toEqual(
-      expect.arrayContaining([roots[0].id, roots[2].id])
+      expected.slice(0, 2).map(item => item.task.id)
+    );
+    const combined = await readPersonal({ columnStatuses, limit: '100' });
+    expect(combined.items.map(item => item.task.id)).toEqual(
+      expected.map(item => item.task.id)
     );
   });
 
