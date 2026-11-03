@@ -32,4 +32,14 @@ export class PersonalTaskQueryDto extends PickType(TaskListQueryDto, [
   @ArrayMaxSize(Object.values(ColumnStatus).length)
   @IsEnum(ColumnStatus, { each: true })
   columnStatuses?: ColumnStatus[];
+
+  @ApiPropertyOptional({ enum: ['dueDate', 'startDate'], default: 'dueDate' })
+  @IsOptional()
+  @IsIn(['dueDate', 'startDate'])
+  sortBy?: 'dueDate' | 'startDate';
+
+  @ApiPropertyOptional({ enum: ['asc', 'desc'], default: 'asc' })
+  @IsOptional()
+  @IsIn(['asc', 'desc'])
+  sortDirection?: 'asc' | 'desc';
 }

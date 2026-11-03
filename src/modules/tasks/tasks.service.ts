@@ -652,12 +652,15 @@ export class TasksService {
   ): Promise<PersonalTaskPage> {
     const limit = query.limit ?? 50;
     const offset = query.offset ?? 0;
+    const dateColumn =
+      query.sortBy === 'startDate' ? 'task.start_date' : 'task.due_date';
+    const direction = query.sortDirection === 'desc' ? 'DESC' : 'ASC';
     // Владелец или участник активного проекта: те же правила, что assertCanRead.
     // EXISTS не размножает задачу при нескольких участниках/назначениях.
     const locations = await this.sequelize.query<PersonalTaskLocation>(
       `SELECT task.id, project.id AS "projectId", project.prefix AS "projectPrefix", col.status AS "columnStatus"
        ${this.personalTaskSource(query, executorErpId)}
-       ORDER BY task.due_date ASC NULLS LAST, task.id ASC
+       ORDER BY ${dateColumn} ${direction} NULLS LAST, task.id ASC
        LIMIT :limit OFFSET :offset`,
       {
         replacements: {

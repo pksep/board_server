@@ -830,6 +830,7 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
 
   it('personal task pages sort globally before pagination, with deterministic ties and null dates last', async (): Promise<void> => {
     roots[0].dueDate = null;
+    roots[0].startDate = new Date('2030-01-01T00:00:00Z');
     await roots[0].save();
     roots[2].dueDate = new Date('2026-09-01T00:00:00Z');
     await roots[2].save();
@@ -852,6 +853,23 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       item.task.dueDate ? new Date(item.task.dueDate).getTime() : Infinity
     );
     expect(dates).toEqual([...dates].sort((left, right) => left - right));
+
+    const order = { sortBy: 'startDate', sortDirection: 'desc' };
+    const sorted = [...all.items].sort(
+      (left, right) =>
+        new Date(String(right.task.startDate)).getTime() -
+          new Date(String(left.task.startDate)).getTime() ||
+        left.task.id - right.task.id
+    );
+    const first = await readPersonal({ ...order, limit: '2' });
+    const second = await readPersonal({
+      ...order,
+      limit: '2',
+      offset: String(first.offset)
+    });
+    expect([...first.items, ...second.items].map(item => item.task.id)).toEqual(
+      sorted.slice(0, 4).map(item => item.task.id)
+    );
   });
 
   it('personal lists keep project access checks even for a creator/assignee and reject revoked/archived locations', async (): Promise<void> => {
