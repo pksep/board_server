@@ -681,7 +681,7 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
 
   /** Личные списки проверяются тем же HTTP-контуром, без отдельного обхода авторизации. */
   async function readPersonal(
-    query: Record<string, string> = {},
+    query: Record<string, string | string[]> = {},
     token = 'gantt-owner-token'
   ): Promise<PersonalTaskPage> {
     const response = await request(app.getHttpServer())
@@ -795,6 +795,25 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     }
   );
 
+  it('combines selected personal task statuses before paginating', async (): Promise<void> => {
+    await columns[0].update({ status: ColumnStatus.InReview });
+    await columns[1].update({ status: ColumnStatus.Queued });
+    await columns[2].update({ status: ColumnStatus.Completed });
+    const columnStatuses = [ColumnStatus.InReview, ColumnStatus.Completed];
+    const first = await readPersonal({ columnStatuses, limit: '1' });
+    const second = await readPersonal({
+      columnStatuses,
+      limit: '1',
+      offset: String(first.offset)
+    });
+
+    expect(first.hasMore).toBe(true);
+    expect(second.hasMore).toBe(false);
+    expect([...first.items, ...second.items].map(item => item.task.id)).toEqual(
+      expect.arrayContaining([roots[0].id, roots[2].id])
+    );
+  });
+
   it('personal task pages sort globally before pagination, with deterministic ties and null dates last', async (): Promise<void> => {
     roots[0].dueDate = null;
     await roots[0].save();
@@ -875,7 +894,8 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     { limit: '101' },
     { limit: '0' },
     { offset: '-1' },
-    { columnStatus: 'invalid-status' }
+    { columnStatus: 'invalid-status' },
+    { columnStatuses: [ColumnStatus.Completed, 'invalid-status'] }
   ])('validates personal list parameters: %p', async (query): Promise<void> => {
     await request(app.getHttpServer())
       .get('/tasks/personal')
