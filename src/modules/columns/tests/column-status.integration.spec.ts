@@ -225,6 +225,22 @@ describeWithDatabase('Column status API with isolated PostgreSQL', () => {
     }
   );
 
+  it('accepts the old review status as the unified completion type on create and update', async (): Promise<void> => {
+    const created = await request(app.getHttpServer())
+      .post(`/boards/${board.id}/columns`)
+      .set('x-test-user', String(owner.id))
+      .send({ title: 'Legacy review client', status: 'in_review' })
+      .expect(201);
+    expect(created.body.status).toBe(ColumnStatus.Completed);
+    const updated = await request(app.getHttpServer())
+      .put(`/columns/${column.id}`)
+      .set('x-test-user', String(owner.id))
+      .send({ status: 'in_review' })
+      .expect(200);
+    expect(updated.body.status).toBe(ColumnStatus.Completed);
+    expect((await column.reload()).status).toBe(ColumnStatus.Completed);
+  });
+
   it('preserves status for unrelated updates and clears it only when null is sent', async (): Promise<void> => {
     await column.update({ status: ColumnStatus.InProgress });
     await request(app.getHttpServer())

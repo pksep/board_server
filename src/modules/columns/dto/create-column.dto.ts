@@ -7,7 +7,11 @@ import {
   MaxLength,
   ValidateIf
 } from 'class-validator';
-import { ColumnStatus } from '../interfaces/column-status.interface';
+import {
+  ColumnStatus,
+  normalizeLegacyColumnStatus
+} from '../interfaces/column-status.interface';
+import { Transform } from 'class-transformer';
 import { ColumnMovePermission } from '../interfaces/column-move-permission.interface';
 
 export class CreateColumnDto {
@@ -25,6 +29,7 @@ export class CreateColumnDto {
 
   @ApiProperty({ enum: ColumnStatus, required: false, nullable: true })
   @IsOptional()
+  @Transform(({ value }) => normalizeLegacyColumnStatus(value))
   @IsEnum(ColumnStatus)
   status?: ColumnStatus | null;
 
