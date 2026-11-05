@@ -67,6 +67,7 @@ describeWithDatabase(
       emitTaskCreated: jest.fn(),
       emitTaskUpdated: jest.fn(),
       emitTaskMoved: jest.fn(),
+      emitTaskRelocated: jest.fn(),
       emitTaskActivityChanged: jest.fn()
     };
 
