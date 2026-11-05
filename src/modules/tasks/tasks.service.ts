@@ -12,6 +12,7 @@ import { MoveTaskDto } from './dto/move-task.dto';
 import { Project } from '../projects/model/project.model';
 import { BoardColumn } from '../columns/model/board-column.model';
 import { ColumnMovePermission } from '../columns/interfaces/column-move-permission.interface';
+import { ColumnStatus } from '../columns/interfaces/column-status.interface';
 import { Board } from '../boards/model/board.model';
 import { User } from '../users/model/users.model';
 import { ProjectTag } from '../tags/model/project-tag.model';
@@ -452,6 +453,8 @@ export class TasksService {
   ) {
     return this.activityEvents.buildChanges({
       controllerIds: { before: [], after: task.controllerIds },
+      responsibleIds: { before: [], after: task.responsibleIds },
+      timeNormMinutes: { before: null, after: task.timeNormMinutes },
       title: { before: null, after: task.title },
       linkedEntity: { before: null, after: task.linkedEntity },
       description: { before: null, after: task.description },
@@ -528,6 +531,8 @@ export class TasksService {
           'id',
           'createdById',
           'controllerIds',
+          'responsibleIds',
+          'timeNormMinutes',
           'taskNumber',
           'title',
           'description',
@@ -687,6 +692,8 @@ export class TasksService {
         ...(executorErpId ? ['description'] : []),
         'createdById',
         'controllerIds',
+        'responsibleIds',
+        'timeNormMinutes',
         'priority',
         'approvalStatus',
         'startDate',
@@ -782,6 +789,7 @@ export class TasksService {
           task.start_date AS "startDate", task.due_date AS "dueDate",
           task.column_id AS "columnId", col.board_id AS "boardId",
           col.status AS "columnStatus", task.created_by_id AS "createdById", task.controller_ids AS "controllerIds",
+          task.responsible_ids AS "responsibleIds", task.time_norm_minutes AS "timeNormMinutes",
           task."order", task."updatedAt"
           ${source}
           ORDER BY board."order", board."createdAt", board.id, col."order", task."order", task.id`,
@@ -1520,6 +1528,13 @@ export class TasksService {
           transaction
         );
 
+      if (dto.responsibleIds !== undefined)
+        await this.assertResponsibleIds(
+          projectId,
+          dto.responsibleIds,
+          transaction
+        );
+
       const customAttributeValues = await this.normalizeCustomAttributeValues(
         projectId,
         dto.customAttributeValues,
@@ -1558,6 +1573,8 @@ export class TasksService {
           columnId,
           order: 0,
           createdById: userId,
+          responsibleIds: this.normalizeIds(dto.responsibleIds ?? []),
+          timeNormMinutes: dto.timeNormMinutes ?? null,
           controllerIds: this.normalizeIds([
             userId,
             ...(dto.controllerIds ?? [])
@@ -1665,6 +1682,13 @@ export class TasksService {
           transaction
         );
 
+      if (dto.responsibleIds !== undefined)
+        await this.assertResponsibleIds(
+          projectId,
+          dto.responsibleIds,
+          transaction
+        );
+
       const customAttributeValues = await this.normalizeCustomAttributeValues(
         projectId,
         dto.customAttributeValues,
@@ -1692,6 +1716,8 @@ export class TasksService {
           parentTaskId: parentId,
           order: 0,
           createdById: userId,
+          responsibleIds: this.normalizeIds(dto.responsibleIds ?? []),
+          timeNormMinutes: dto.timeNormMinutes ?? null,
           controllerIds: this.normalizeIds([
             userId,
             ...(dto.controllerIds ?? [])
@@ -1844,6 +1870,39 @@ export class TasksService {
       );
   }
 
+  /** Ответственные выбираются из того же действующего состава проекта, что контроллеры. */
+  private async assertResponsibleIds(
+    projectId: number,
+    ids: number[],
+    transaction: Transaction
+  ): Promise<void> {
+    if (
+      !Array.isArray(ids) ||
+      ids.length > 500 ||
+      ids.some(id => !Number.isSafeInteger(id) || id < 1) ||
+      new Set(ids).size !== ids.length
+    ) {
+      throw new HttpException(
+        'Список ответственных должен содержать уникальные ID пользователей',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    if (!ids.length) return;
+
+    const members = await this.projectAccess.getActiveMemberIds(
+      projectId,
+      transaction,
+      ids
+    );
+    if (ids.some(id => !members.includes(id))) {
+      throw new HttpException(
+        'Ответственными могут быть только активные участники проекта',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+  }
+
   /** Проверяет именно поля: отдельное перемещение сохраняет правила исходной колонки. */
   private async assertCanEditTaskFields(
     task: Task,
@@ -1855,6 +1914,19 @@ export class TasksService {
 
     let fields = Object.entries(dto).filter(([, value]) => value !== undefined);
 
+    if (fields.some(([field]) => field === 'assigneeIds')) {
+      if (!(task.responsibleIds ?? []).includes(userId)) {
+        throw new HttpException(
+          'Изменять исполнителей могут только контроллеры и ответственные',
+          HttpStatus.FORBIDDEN
+        );
+      }
+
+      fields = fields.filter(([field]) => field !== 'assigneeIds');
+    }
+
+    if (!fields.length) return;
+
     // Открываются значения стандартных и пользовательских атрибутов, но не управление задачей.
     const attributeFields = new Set<keyof UpdateTaskDto>([
       'linkedEntity',
@@ -1862,7 +1934,7 @@ export class TasksService {
       'startDate',
       'priority',
       'approvalStatus',
-      'assigneeIds',
+      'timeNormMinutes',
       'tagIds',
       'parentTaskId',
       'customAttributeValues'
@@ -1935,6 +2007,13 @@ export class TasksService {
           transaction
         );
 
+      if (dto.responsibleIds !== undefined)
+        await this.assertResponsibleIds(
+          projectId,
+          dto.responsibleIds,
+          transaction
+        );
+
       if (dto.startDate !== undefined || dto.dueDate !== undefined) {
         this.assertTaskDateOrder(
           dto.startDate !== undefined ? dto.startDate : task.startDate,
@@ -1958,6 +2037,8 @@ export class TasksService {
               transaction
             );
       const before = {
+        responsibleIds: this.normalizeIds(task.responsibleIds ?? []),
+        timeNormMinutes: task.timeNormMinutes,
         controllerIds: this.normalizeIds(
           task.controllerIds ?? [task.createdById]
         ),
@@ -1997,6 +2078,10 @@ export class TasksService {
       if (dto.title !== undefined) task.title = dto.title;
       if (dto.controllerIds !== undefined)
         task.controllerIds = this.normalizeIds(dto.controllerIds);
+      if (dto.responsibleIds !== undefined)
+        task.responsibleIds = this.normalizeIds(dto.responsibleIds);
+      if (dto.timeNormMinutes !== undefined)
+        task.timeNormMinutes = dto.timeNormMinutes;
       if (dto.linkedEntity !== undefined) task.linkedEntity = dto.linkedEntity;
       if (dto.description !== undefined) task.description = dto.description;
       if (dto.priority !== undefined) task.priority = dto.priority;
@@ -2115,6 +2200,18 @@ export class TasksService {
         changedFields.controllerIds = {
           before: before.controllerIds,
           after: this.normalizeIds(task.controllerIds)
+        };
+      }
+      if (dto.responsibleIds !== undefined) {
+        changedFields.responsibleIds = {
+          before: before.responsibleIds,
+          after: task.responsibleIds
+        };
+      }
+      if (dto.timeNormMinutes !== undefined) {
+        changedFields.timeNormMinutes = {
+          before: before.timeNormMinutes,
+          after: task.timeNormMinutes
         };
       }
       if (dto.tagIds !== undefined) {
@@ -2362,6 +2459,29 @@ export class TasksService {
     userId: number,
     transaction: Transaction
   ): Promise<void> {
+    const target = await this.columnRepository.findByPk(targetColumnId, {
+      attributes: ['id', 'status'],
+      transaction,
+      lock: Transaction.LOCK.SHARE
+    });
+    if (!target)
+      throw new HttpException('Колонка не найдена', HttpStatus.NOT_FOUND);
+
+    if (
+      target.status === ColumnStatus.Archived &&
+      tasks.some(
+        task =>
+          task.columnId !== targetColumnId &&
+          !(task.controllerIds ?? [task.createdById]).includes(userId) &&
+          !(task.responsibleIds ?? []).includes(userId)
+      )
+    ) {
+      throw new HttpException(
+        'В архив задачу могут переместить только контроллеры и ответственные',
+        HttpStatus.FORBIDDEN
+      );
+    }
+
     const leaving = tasks.filter(task => task.columnId !== targetColumnId);
     const columnIds = [...new Set(leaving.map(task => task.columnId))].sort(
       (left, right) => left - right
@@ -2452,6 +2572,14 @@ export class TasksService {
         await this.assertControllerIds(
           target.projectId,
           controllerIds,
+          transaction
+        );
+
+        await this.assertResponsibleIds(
+          target.projectId,
+          this.normalizeIds(
+            hierarchy.flatMap(item => item.responsibleIds ?? [])
+          ),
           transaction
         );
 

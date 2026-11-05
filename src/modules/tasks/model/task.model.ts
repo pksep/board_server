@@ -32,6 +32,25 @@ export class Task extends Model<Task> {
   })
   controllerIds: number[];
 
+  @ApiProperty({ description: 'ID ответственных задачи', type: [Number] })
+  @Column({
+    type: DataType.ARRAY(DataType.INTEGER),
+    allowNull: false,
+    defaultValue: [],
+    field: 'responsible_ids'
+  })
+  responsibleIds: number[];
+
+  @ApiProperty({ description: 'Норма времени в минутах', nullable: true })
+  @Column({
+    type: DataType.INTEGER,
+    allowNull: true,
+    defaultValue: null,
+    field: 'time_norm_minutes',
+    validate: { min: 1 }
+  })
+  timeNormMinutes: number | null;
+
   /** Автор назначается при создании; потерянный список восстанавливается владельцем проекта. */
   @BeforeValidate
   static async initializeControllers(

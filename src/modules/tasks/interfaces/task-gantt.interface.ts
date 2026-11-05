@@ -13,6 +13,8 @@ export interface TaskGanttItem {
   columnStatus: ColumnStatus | null;
   createdById: number;
   controllerIds: number[];
+  responsibleIds: number[];
+  timeNormMinutes: number | null;
   order: number;
   updatedAt: Date | string;
   assignees: { userId: number }[];

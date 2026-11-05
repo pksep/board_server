@@ -7,7 +7,10 @@ import {
   IsIn,
   IsOptional
 } from 'class-validator';
-import { ColumnStatus } from '../../columns/interfaces/column-status.interface';
+import {
+  ColumnStatus,
+  normalizeLegacyColumnStatus
+} from '../../columns/interfaces/column-status.interface';
 import { TaskListQueryDto } from './task-list-query.dto';
 
 /** Личные списки используют те же ограничения размера страницы, что список колонки. */
@@ -22,12 +25,17 @@ export class PersonalTaskQueryDto extends PickType(TaskListQueryDto, [
 
   @ApiPropertyOptional({ enum: ColumnStatus })
   @IsOptional()
+  @Transform(({ value }) => normalizeLegacyColumnStatus(value))
   @IsEnum(ColumnStatus)
   columnStatus?: ColumnStatus;
 
   @ApiPropertyOptional({ enum: ColumnStatus, isArray: true })
   @IsOptional()
-  @Transform(({ value }): unknown[] => (Array.isArray(value) ? value : [value]))
+  @Transform(({ value }): unknown[] => [
+    ...new Set(
+      (Array.isArray(value) ? value : [value]).map(normalizeLegacyColumnStatus)
+    )
+  ])
   @IsArray()
   @ArrayMaxSize(Object.values(ColumnStatus).length)
   @IsEnum(ColumnStatus, { each: true })

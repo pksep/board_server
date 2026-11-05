@@ -750,12 +750,17 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     ).toMatchObject({ projectId: project.id, projectPrefix: project.prefix });
   });
 
-  it.each([ColumnStatus.InReview, ColumnStatus.Archived])(
+  it.each([ColumnStatus.InProgress, ColumnStatus.Archived])(
     'filters personal lists by %s before pagination and returns the column status',
     async (status): Promise<void> => {
       await columns[0].update({ status });
       await columns[1].update({ status });
       await columns[2].update({ status: ColumnStatus.Completed });
+      const allMatching = await readPersonal({
+        scope: 'created',
+        columnStatus: status,
+        limit: '100'
+      });
       const first = await readPersonal({
         scope: 'created',
         columnStatus: status,
@@ -773,12 +778,16 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       expect(second.items).toHaveLength(1);
       expect(second.items[0].columnStatus).toBe(status);
       expect(second.items[0].task.id).not.toBe(first.items[0].task.id);
-      expect(second.hasMore).toBe(false);
+      expect(second.hasMore).toBe(allMatching.items.length > 2);
       const assigned = await readPersonal({
         scope: 'assigned',
         columnStatus: status
       });
-      expect(assigned.items.map(item => item.task.id)).toEqual([roots[0].id]);
+      expect(
+        assigned.items
+          .filter(item => item.projectId === project.id)
+          .map(item => item.task.id)
+      ).toEqual([roots[0].id]);
       const completed = await readPersonal({
         columnStatus: ColumnStatus.Completed
       });
@@ -800,11 +809,28 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     }
   );
 
+  it('maps legacy review filters and deduplicates them with the unified completion status', async (): Promise<void> => {
+    await columns[0].update({ status: ColumnStatus.Completed });
+    const current = await readPersonal({
+      columnStatus: ColumnStatus.Completed
+    });
+    const legacy = await readPersonal({ columnStatus: 'in_review' });
+    const combined = await readPersonal({
+      columnStatuses: ['in_review', ColumnStatus.Completed]
+    });
+    expect(legacy.items.map(item => item.task.id)).toEqual(
+      current.items.map(item => item.task.id)
+    );
+    expect(combined.items.map(item => item.task.id)).toEqual(
+      current.items.map(item => item.task.id)
+    );
+  });
+
   it('combines selected personal task statuses before paginating', async (): Promise<void> => {
-    await columns[0].update({ status: ColumnStatus.InReview });
+    await columns[0].update({ status: ColumnStatus.InProgress });
     await columns[1].update({ status: ColumnStatus.Queued });
     await columns[2].update({ status: ColumnStatus.Completed });
-    const columnStatuses = [ColumnStatus.InReview, ColumnStatus.Completed];
+    const columnStatuses = [ColumnStatus.InProgress, ColumnStatus.Completed];
     const unfiltered = await readPersonal({ limit: '100' });
     const expected = unfiltered.items.filter(
       item =>
