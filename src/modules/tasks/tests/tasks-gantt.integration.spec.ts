@@ -10,6 +10,7 @@ import { Test } from '@nestjs/testing';
 import { Attributes, Model, QueryTypes } from 'sequelize';
 import { Sequelize } from 'sequelize-typescript';
 import request = require('supertest');
+import type { Request } from 'express';
 import models from '../../../configs/models';
 import { TasksController } from '../tasks.controller';
 import { TimeReportPermissionGuard } from '../time-report-permission.guard';
@@ -121,9 +122,14 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
           // Подменён только внешний обмен токена; общий guard и проверка проекта остаются настоящими.
           useValue: {
             isEnabled: (): boolean => true,
-            authenticate: async (token: string): Promise<User> => {
-              if (token === 'gantt-owner-token') return owner;
-              if (token === 'gantt-outsider-token') return outsider;
+            authenticateRequest: async (
+              req: Request
+            ): Promise<{ token: string; user: User }> => {
+              const token =
+                req.headers.authorization?.replace(/^Bearer /, '') ?? '';
+              if (token === 'gantt-owner-token') return { token, user: owner };
+              if (token === 'gantt-outsider-token')
+                return { token, user: outsider };
 
               throw new UnauthorizedException();
             },
@@ -519,6 +525,149 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     await request(app.getHttpServer())
       .get('/tasks/by-executor')
       .query({ erpUserId: 1 })
+      .expect(401);
+  });
+
+  it('reads bulk workload with full norms per executor, half-open dates and the canonical access/archive rules', async (): Promise<void> => {
+    const ids = [970000 + project.id * 2, 970001 + project.id * 2];
+    await owner.update({ erpId: String(ids[0]) });
+    await outsider.update({ erpId: String(ids[1]) });
+
+    for (const user of [owner, outsider]) {
+      await persist(ProjectMember.build(), {
+        projectId: project.id,
+        userId: user.id
+      });
+    }
+
+    await roots[0].update({
+      startDate: new Date('2026-11-06T00:00:00Z'),
+      dueDate: new Date('2026-11-07T23:59:59Z'),
+      timeNormMinutes: 60
+    });
+    // Ровно правая граница не должна попасть ни по началу, ни по готовности.
+    await roots[1].update({
+      startDate: new Date('2026-11-08T00:00:00Z'),
+      dueDate: new Date('2026-11-08T12:00:00Z'),
+      timeNormMinutes: 30
+    });
+    const query = {
+      erpUserIds: ids.join(','),
+      start: '2026-11-06T00:00:00Z',
+      end: '2026-11-08T00:00:00Z'
+    };
+
+    /** Читает реальный HTTP endpoint с общей авторизацией и валидацией DTO. */
+    const readWorkload = async (): Promise<request.Response> =>
+      request(app.getHttpServer())
+        .get('/tasks/executor-workload')
+        .query(query)
+        .auth('gantt-owner-token', { type: 'bearer' })
+        .expect(200);
+
+    const visible = await readWorkload();
+    expect(visible.body).toHaveLength(2);
+    expect(visible.body).toEqual(
+      expect.arrayContaining(
+        ids.map(executorId =>
+          expect.objectContaining({
+            executorId,
+            taskId: roots[0].id,
+            timeNormMinutes: 60,
+            projectId: project.id,
+            projectName: project.title
+          })
+        )
+      )
+    );
+    expect(visible.body[0]).not.toHaveProperty('description');
+
+    // Исходный endpoint исполнителя получает настройку прав для того же календаря карточки.
+    const personal = await service.getPersonalTasks(
+      owner.id,
+      { scope: 'assigned' },
+      String(ids[0])
+    );
+    expect(
+      personal.items.find(item => item.task.id === roots[0].id)
+        ?.attributesOwnerOnly
+    ).toBe(true);
+
+    await board.update({ membersIds: [owner.id] });
+    expect((await readWorkload()).body).toHaveLength(1);
+    await board.update({ membersIds: null });
+    await outsider.update({ ban: true });
+    expect((await readWorkload()).body).toHaveLength(1);
+    await outsider.update({ ban: false });
+
+    await ProjectMember.destroy({
+      where: { projectId: project.id, userId: outsider.id }
+    });
+    const hidden = await request(app.getHttpServer())
+      .get('/tasks/executor-workload')
+      .query(query)
+      .auth('gantt-outsider-token', { type: 'bearer' })
+      .expect(200);
+    expect(hidden.body).toEqual([]);
+
+    for (const status of ['completed', 'in_review', 'archived']) {
+      // Legacy in_review присутствует в старых данных, хотя больше не предлагается в UI.
+      await sequelize.query(
+        'UPDATE board_columns SET status = :status WHERE id = :id',
+        { replacements: { status, id: columns[0].id } }
+      );
+      expect((await readWorkload()).body).toEqual([]);
+    }
+
+    await columns[0].reload();
+    await columns[0].update({ status: ColumnStatus.Queued });
+    expect((await readWorkload()).body).toHaveLength(1);
+    await roots[0].destroy();
+    expect((await readWorkload()).body).toEqual([]);
+    await roots[0].restore();
+    await columns[0].destroy();
+    expect((await readWorkload()).body).toEqual([]);
+    await columns[0].restore();
+    await board.destroy();
+    expect((await readWorkload()).body).toEqual([]);
+    await board.restore();
+    await project.destroy();
+    expect((await readWorkload()).body).toEqual([]);
+  });
+
+  it('validates bulk executor workload filters and requires authentication', async (): Promise<void> => {
+    const valid = {
+      erpUserIds: '71,72',
+      start: '2026-11-06T00:00:00Z',
+      end: '2026-11-08T00:00:00Z'
+    };
+
+    for (const invalid of [
+      { erpUserIds: '' },
+      { erpUserIds: '0' },
+      { erpUserIds: 'abc' },
+      { erpUserIds: '71,71' },
+      { erpUserIds: '1.5' },
+      {
+        erpUserIds: Array.from({ length: 501 }, (_, index) => index + 1).join(
+          ','
+        )
+      },
+      { start: 'bad' },
+      { end: valid.start },
+      { end: '2026-11-05T00:00:00Z' },
+      { end: '2027-01-01T00:00:00Z' }
+    ]) {
+      await request(app.getHttpServer())
+        .get('/tasks/executor-workload')
+        .query({ ...valid, ...invalid })
+        .auth('gantt-owner-token', { type: 'bearer' })
+        .expect(400);
+    }
+
+    await request(app.getHttpServer())
+      .get('/tasks/executor-workload')
+      .query(valid)
       .expect(401);
   });
 
