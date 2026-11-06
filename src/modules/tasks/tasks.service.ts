@@ -610,8 +610,7 @@ export class TasksService {
                   WHERE executor_member.project_id = project.id
                     AND executor_member.user_id = executor.id)
                 AND (board.members_ids IS NULL
-                  OR board.members_ids @> jsonb_build_array(executor.id))
-                AND (col.status IS NULL OR col.status NOT IN ('completed', 'in_review', 'archived'))`
+                  OR board.members_ids @> jsonb_build_array(executor.id))`
              : ''
          }
          AND ${
@@ -690,7 +689,7 @@ export class TasksService {
         'taskNumber',
         'title',
         // ПЗ показывает описание задачи; прежний личный список остаётся лёгким.
-        ...(executorErpId ? ['description', 'linkedEntity'] : []),
+        ...(executorErpId ? ['description'] : []),
         'createdById',
         'controllerIds',
         'responsibleIds',

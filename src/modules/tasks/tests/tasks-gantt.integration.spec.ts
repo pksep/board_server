@@ -372,65 +372,6 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     expect(removed.body.items).toEqual([]);
   });
 
-  it('excludes finished and archived columns only from ERP executor tasks before pagination', async (): Promise<void> => {
-    const erpUserId = 850000 + project.id;
-    await outsider.update({ erpId: String(erpUserId) });
-    await persist(ProjectMember.build(), {
-      projectId: project.id,
-      userId: outsider.id
-    });
-    await board.update({ membersIds: [outsider.id] });
-    await roots[0].update({
-      timeNormMinutes: 90,
-      linkedEntity: {
-        type: 'detal',
-        id: 17,
-        name: 'Деталь',
-        designation: 'Д-17'
-      }
-    });
-
-    // Самые ранние задачи не должны занимать первую страницу активных назначений.
-    await columns[0].update({ status: 'completed' });
-    const completed = await service.getPersonalTasks(
-      owner.id,
-      { scope: 'assigned', limit: 1 },
-      String(erpUserId)
-    );
-    expect(completed.items.map(item => item.task.id)).toEqual([roots[1].id]);
-    expect(completed.hasMore).toBe(false);
-    const personal = await service.getPersonalTasks(outsider.id, {
-      scope: 'assigned'
-    });
-    expect(personal.items.map(item => item.task.id)).toContain(roots[0].id);
-
-    await columns[0].update({ status: 'archived' });
-    const archived = await service.getPersonalTasks(
-      owner.id,
-      { scope: 'assigned' },
-      String(erpUserId)
-    );
-    expect(archived.items.map(item => item.task.id)).toEqual([roots[1].id]);
-
-    // Снятие статуса возвращает задачу с её настоящей связью и нормой времени.
-    await columns[0].update({ status: null });
-    const active = await service.getPersonalTasks(
-      owner.id,
-      { scope: 'assigned' },
-      String(erpUserId)
-    );
-    expect(active.items[0].task.timeNormMinutes).toBe(90);
-    expect(active.items[0].task.linkedEntity).toEqual({
-      type: 'detal',
-      id: 17,
-      name: 'Деталь',
-      designation: 'Д-17'
-    });
-
-    // Не оставляем назначения этого проекта доступными следующему тесту с тем же пользователем.
-    await board.update({ membersIds: [] });
-  });
-
   it('keeps reader access, project membership, archives and existing personal lists independent', async (): Promise<void> => {
     const erpUserId = 900000 + project.id;
     await outsider.update({ erpId: String(erpUserId) });
