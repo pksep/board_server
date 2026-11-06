@@ -138,13 +138,19 @@ export class WsGateway
       const cookies = cookie.parse(client.handshake.headers.cookie || '');
 
       if (this.accessTokenService.isEnabled()) {
-        const accessToken = cookies[ERP_TOKEN_COOKIE];
-        if (!accessToken) {
+        if (
+          !cookies[ERP_TOKEN_COOKIE] &&
+          !client.handshake.headers.authorization
+        ) {
           this.logger.warn(`Client ${client.id} rejected: no access_token`);
           client.disconnect(true);
           return;
         }
-        const user = await this.accessTokenService.authenticate(accessToken);
+        const { token: accessToken, user } =
+          await this.accessTokenService.authenticateRequest({
+            headers: client.handshake.headers,
+            cookies
+          });
         boardClient.user = this.accessTokenService.toUserPayload(user);
         client.data.accessToken = accessToken;
         client.data.userId = boardClient.user.id;

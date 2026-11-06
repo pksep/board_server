@@ -36,7 +36,8 @@ const argv: any = _yargs(hideBin(process.argv))
   .alias('help', 'h')
   .parse();
 
-(async () => {
+/** Applies the canonical migrations; failures must prevent container startup. */
+async function runMigrations(): Promise<void> {
   let migrationsPath = `migrations/**/**/*.js`;
 
   if (argv.name) {
@@ -73,6 +74,9 @@ const argv: any = _yargs(hideBin(process.argv))
   });
 
   try {
+    if (!(await checkFileExists(migrationsPath))) {
+      throw new Error('No migration files found; refusing application startup');
+    }
     if (argv.to === 'status') {
       const pendings = await umzug.pending();
       const pendingsList = pendings.map(el => `\n${el.name}`);
@@ -127,6 +131,19 @@ const argv: any = _yargs(hideBin(process.argv))
       );
 
       await umzug.down({ to: lastMigration.name });
+    } else if (argv.to === 'up') {
+      // Serialize concurrent container starts. Migration functions keep their
+      // existing transaction semantics; this transaction only owns the lock.
+      await sequelize.transaction(async transaction => {
+        await sequelize.query(
+          "SELECT pg_advisory_xact_lock(hashtext('board_schema_migrations'))",
+          { transaction }
+        );
+        await umzug.up();
+        if ((await umzug.pending()).length > 0) {
+          throw new Error('Pending migrations remain after migration run');
+        }
+      });
     } else {
       await umzug[argv.to]();
     }
@@ -134,5 +151,13 @@ const argv: any = _yargs(hideBin(process.argv))
     console.log(`\x1b[32m`, `${argv.to} successful implementation`, `\x1b[0m`);
   } catch (err) {
     console.error(`\x1b[31m`, err, `\x1b[0m`);
+    process.exitCode = 1;
+  } finally {
+    await sequelize.close();
   }
-})();
+}
+
+void runMigrations().catch(error => {
+  console.error('Migration runner failed', error);
+  process.exitCode = 1;
+});
