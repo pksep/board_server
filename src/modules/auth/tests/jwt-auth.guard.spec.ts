@@ -62,7 +62,10 @@ describe('TokenAuth request URL handling', () => {
 
   it('в режиме SEP Auth игнорирует board_token и проверяет access_token', async () => {
     const verify = jest.fn();
-    const authenticate = jest.fn().mockResolvedValue({ id: 7 });
+    const authenticateRequest = jest.fn().mockResolvedValue({
+      token: 'new-auth',
+      user: { id: 7 }
+    });
     const toUserPayload = jest.fn().mockReturnValue({
       id: 7,
       login: 'reader',
@@ -74,7 +77,7 @@ describe('TokenAuth request URL handling', () => {
       { findOne: jest.fn() } as never,
       {
         isEnabled: jest.fn().mockReturnValue(true),
-        authenticate,
+        authenticateRequest,
         toUserPayload
       } as never
     );
@@ -90,7 +93,8 @@ describe('TokenAuth request URL handling', () => {
 
     await expect(guard.canActivate(context)).resolves.toBe(true);
 
-    expect(authenticate).toHaveBeenCalledWith('new-auth');
+    expect(authenticateRequest).toHaveBeenCalledWith(request);
+    expect(request.cookies.access_token).toBe('new-auth');
     expect(verify).not.toHaveBeenCalled();
     expect(response.clearCookie).toHaveBeenCalledWith('board_token', {
       path: '/'

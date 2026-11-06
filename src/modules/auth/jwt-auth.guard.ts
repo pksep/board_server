@@ -80,15 +80,13 @@ export class TokenAuth implements CanActivate {
 
     // При включённом SEP Auth board_token не должен обходить отзыв общей сессии.
     if (this.accessTokenService.isEnabled()) {
-      const cookieToken = req.cookies?.[ERP_TOKEN_COOKIE];
-      const bearerToken = /^Bearer\s+(\S+)$/i.exec(
-        req.headers?.authorization || ''
-      )?.[1];
-      const accessToken = cookieToken || bearerToken;
-      if (!accessToken) {
+      if (!req.headers?.authorization && !erpToken && !req.headers?.cookie) {
         throw new UnauthorizedException('Пользователь не авторизован');
       }
-      const user = await this.accessTokenService.authenticate(accessToken);
+      const { token, user } =
+        await this.accessTokenService.authenticateRequest(req);
+      // Downstream ERP permissions/directory calls must use the same identity.
+      req.cookies = { ...req.cookies, [ERP_TOKEN_COOKIE]: token };
       if (req.cookies?.[BOARD_TOKEN_COOKIE]) {
         res.clearCookie(BOARD_TOKEN_COOKIE, { path: '/' });
       }
