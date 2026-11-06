@@ -316,14 +316,18 @@ export class ProjectsService {
         );
       }
 
-      await Promise.all(
-        requestedIds.map((projectId, order) =>
-          this.memberRepository.update(
-            { order },
-            { where: { projectId, userId }, transaction }
-          )
-        )
-      );
+      if (requestedIds.length) {
+        await this.sequelize.query(
+          'UPDATE project_members AS member ' +
+            'SET "order" = requested.position::int - 1, "updatedAt" = $updatedAt ' +
+            'FROM unnest($ids::int[]) WITH ORDINALITY AS requested(id, position) ' +
+            'WHERE member.project_id = requested.id AND member.user_id = $userId',
+          {
+            bind: { ids: requestedIds, userId, updatedAt: new Date() },
+            transaction
+          }
+        );
+      }
       await transaction.commit();
     } catch (error) {
       await transaction.rollback();

@@ -170,10 +170,24 @@ export class ColumnsService {
     const transaction = await this.sequelize.transaction();
     try {
       await this.assertBoardAccess(boardId, userId);
-      for (let i = 0; i < dto.ids.length; i++) {
-        await this.columnRepository.update(
-          { order: i },
-          { where: { id: dto.ids[i], boardId }, transaction }
+      // Старый последовательный UPDATE оставлял последнюю позицию повторного ID.
+      const orders = new Map(dto.ids.map((id, order) => [id, order]));
+      if (orders.size) {
+        await this.sequelize.query(
+          'UPDATE board_columns AS col ' +
+            'SET "order" = requested.position, "updatedAt" = $updatedAt ' +
+            'FROM unnest($ids::int[], $orders::int[]) AS requested(id, position) ' +
+            'WHERE col.id = requested.id AND col.board_id = $boardId ' +
+            'AND col."deletedAt" IS NULL',
+          {
+            bind: {
+              ids: [...orders.keys()],
+              orders: [...orders.values()],
+              boardId,
+              updatedAt: new Date()
+            },
+            transaction
+          }
         );
       }
       await transaction.commit();

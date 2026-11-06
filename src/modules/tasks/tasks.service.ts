@@ -1000,13 +1000,13 @@ export class TasksService {
   private hasStructuredTaskFilters(query: TaskListQueryDto): boolean {
     return Boolean(
       query.assigneeIds?.length ||
-      query.creatorIds?.length ||
-      query.priorities?.length ||
-      query.tagIds?.length ||
-      query.startDateFrom ||
-      query.startDateTo ||
-      query.dueDateFrom ||
-      query.dueDateTo
+        query.creatorIds?.length ||
+        query.priorities?.length ||
+        query.tagIds?.length ||
+        query.startDateFrom ||
+        query.startDateTo ||
+        query.dueDateFrom ||
+        query.dueDateTo
     );
   }
 
@@ -2388,6 +2388,42 @@ export class TasksService {
     return hierarchy;
   }
 
+  /** Сохраняет порядок одним запросом; legacy-строки проходят прежний hook. */
+  private async persistTaskOrders(
+    orders: Map<Task, number>,
+    transaction: Transaction
+  ): Promise<void> {
+    const changed = [...orders].filter(([task, order]) => task.order !== order);
+    const batch = new Map<number, number>();
+    for (const [task, order] of changed) {
+      if (!task.controllerIds?.length) {
+        // BeforeValidate восстанавливает контроллера; этот путь нельзя обойти SQL.
+        await task.update({ order }, { transaction });
+      } else {
+        batch.set(task.id, order);
+      }
+    }
+    if (!batch.size) return;
+
+    const updatedAt = new Date();
+    await this.sequelize.query(
+      'UPDATE tasks AS task SET "order" = requested.position, "updatedAt" = $updatedAt ' +
+        'FROM unnest($ids::int[], $orders::int[]) AS requested(id, position) ' +
+        'WHERE task.id = requested.id AND task."deletedAt" IS NULL',
+      {
+        bind: {
+          ids: [...batch.keys()],
+          orders: [...batch.values()],
+          updatedAt
+        },
+        transaction
+      }
+    );
+    for (const [task, order] of changed) {
+      if (batch.has(task.id)) Object.assign(task, { order, updatedAt });
+    }
+  }
+
   private async normalizeColumnWithoutTask(
     columnId: number,
     taskId: number,
@@ -2407,12 +2443,9 @@ export class TasksService {
       lock: transaction.LOCK.UPDATE
     });
 
-    await Promise.all(
-      tasks.map((task, index) =>
-        task.order === index
-          ? Promise.resolve(task)
-          : task.update({ order: index } as any, { transaction })
-      )
+    await this.persistTaskOrders(
+      new Map(tasks.map((task, index) => [task, index])),
+      transaction
     );
   }
 
@@ -2437,13 +2470,11 @@ export class TasksService {
     });
     const order = Math.max(0, Math.min(requestedOrder, tasks.length));
 
-    await Promise.all(
-      tasks.map((item, index) => {
-        const nextOrder = index < order ? index : index + 1;
-        return item.order === nextOrder
-          ? Promise.resolve(item)
-          : item.update({ order: nextOrder } as any, { transaction });
-      })
+    await this.persistTaskOrders(
+      new Map(
+        tasks.map((item, index) => [item, index < order ? index : index + 1])
+      ),
+      transaction
     );
 
     task.columnId = columnId;
