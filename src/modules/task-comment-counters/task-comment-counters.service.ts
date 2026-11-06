@@ -10,7 +10,8 @@ import { PersonalTaskQueryDto } from '../tasks/dto/personal-task-query.dto';
 import type {
   CounterRequestSession,
   ErpCommentCounter,
-  TaskCommentCounters
+  TaskCommentCounters,
+  TaskCommentSnapshot
 } from './interfaces/task-comment-counter.interface';
 
 @Injectable()
@@ -19,6 +20,36 @@ export class TaskCommentCountersService {
     private readonly tasks: TasksService,
     private readonly config: ConfigService
   ) {}
+
+  /** Дополняет уже проверенную выдачу задач и вложенных подзадач одним пакетом. */
+  async attachToTasks(
+    tasks: TaskCommentSnapshot[],
+    session: CounterRequestSession
+  ): Promise<void> {
+    const snapshots = new Set<TaskCommentSnapshot>();
+    const queue = [...tasks];
+
+    // Одна подзадача может входить и в плоскую выдачу, и в снимок родителя.
+    for (let index = 0; index < queue.length; index += 1) {
+      const task = queue[index];
+      if (snapshots.has(task)) continue;
+
+      snapshots.add(task);
+      queue.push(...(task.subtasks ?? []));
+    }
+
+    const ids = [...new Set([...snapshots].map(task => task.id))];
+    if (!ids.length) return;
+
+    const counters = await this.readCounters(ids, session, false, true);
+    const totals = new Map(
+      counters.tasks.map(counter => [counter.taskId, counter.total])
+    );
+
+    for (const task of snapshots) {
+      task.setDataValue('commentsCount', totals.get(task.id) ?? 0);
+    }
+  }
 
   /** Общая сумма по серверной области задач, независимо от клиентской пагинации. */
   async personal(
@@ -46,7 +77,8 @@ export class TaskCommentCountersService {
   private async readCounters(
     ids: number[],
     session: CounterRequestSession,
-    markRead = false
+    markRead = false,
+    totalsOnly = false
   ): Promise<TaskCommentCounters> {
     const cookie = session.cookies?.access_token;
     const authorization = session.headers.authorization;
@@ -71,7 +103,12 @@ export class TaskCommentCountersService {
         const requested = new Set(batch);
         const response = await axios.post<ErpCommentCounter[]>(
           `${base.endsWith('/api') ? base : `${base}/api`}/comments/counters`,
-          { entityType: 'tasks', entityIds: batch, markRead },
+          {
+            entityType: 'tasks',
+            entityIds: batch,
+            markRead,
+            ...(totalsOnly ? { totalsOnly: true } : {})
+          },
           {
             timeout: 15000,
             headers: {

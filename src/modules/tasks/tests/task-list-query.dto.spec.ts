@@ -88,9 +88,9 @@ describe('TaskListQueryDto', () => {
     }
   );
 
-  it.each([undefined, []])(
+  it.each([undefined, []].map(creatorIds => ({ creatorIds })))(
     'сохраняет запрос без выбранных создателей: %p',
-    async creatorIds => {
+    async ({ creatorIds }): Promise<void> => {
       const query = plainToInstance(TaskListQueryDto, { creatorIds });
 
       await expect(validate(query)).resolves.toEqual([]);

@@ -21,6 +21,7 @@ import { TaskAttachment } from '../../tasks/model/task-attachment.model';
 import { TasksController } from '../../tasks/tasks.controller';
 import { TimeReportPermissionGuard } from '../../tasks/time-report-permission.guard';
 import { TasksService } from '../../tasks/tasks.service';
+import { TaskCommentCountersService } from '../../task-comment-counters/task-comment-counters.service';
 import { ActivityEvent } from '../../activity-events/model/activity-event.model';
 import { ActivityEventsService } from '../../activity-events/activity-events.service';
 import { S3Service } from '../../s3/s3.service';
@@ -82,6 +83,10 @@ describeWithDatabase('Archive API with isolated PostgreSQL', () => {
       providers: [
         BoardsService,
         TasksService,
+        {
+          provide: TaskCommentCountersService,
+          useValue: { attachToTasks: jest.fn() }
+        },
         ProjectAccessService,
         ActivityEventsService,
         ...models.map(model => ({

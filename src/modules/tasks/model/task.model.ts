@@ -94,6 +94,13 @@ export class Task extends Model<Task> {
   })
   id: number;
 
+  @ApiProperty({
+    description: 'Количество комментариев, включая ответы',
+    minimum: 0
+  })
+  @Column({ type: DataType.VIRTUAL })
+  commentsCount?: number;
+
   @ApiProperty({ example: 1, description: 'Номер задачи в рамках проекта' })
   @Column({ type: DataType.INTEGER, allowNull: false, field: 'task_number' })
   taskNumber: number;

@@ -14,6 +14,7 @@ import models from '../../../configs/models';
 import { TasksController } from '../tasks.controller';
 import { TimeReportPermissionGuard } from '../time-report-permission.guard';
 import { TasksService } from '../tasks.service';
+import { TaskCommentCountersService } from '../../task-comment-counters/task-comment-counters.service';
 import { Task } from '../model/task.model';
 import { TaskAssignee } from '../model/task-assignee.model';
 import { TaskAttachment } from '../model/task-attachment.model';
@@ -105,6 +106,10 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       controllers: [TasksController],
       providers: [
         TasksService,
+        {
+          provide: TaskCommentCountersService,
+          useValue: { attachToTasks: jest.fn() }
+        },
         ProjectAccessService,
         ActivityEventsService,
         ...models.map(model => ({
