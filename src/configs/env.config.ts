@@ -9,7 +9,8 @@ export default function configFactory() {
     allowedOrigin: process.env.ALLOWED_ORIGIN,
     database: {
       url: process.env.DATABASE_URL!,
-      timeout: Number(process.env.CONNECT_TIMEOUT) || 120000
+      timeout: Number(process.env.CONNECT_TIMEOUT) || 120000,
+      poolMaxUses: process.env.DB_POOL_MAX_USES
     },
     privateKey: process.env.PRIVATE_KEY!,
     redisUrl: process.env.REDIS_URL!,
