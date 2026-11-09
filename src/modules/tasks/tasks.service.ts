@@ -43,6 +43,8 @@ import { CreateTaskTimeEntryDto } from './dto/create-task-time-entry.dto';
 import { TaskGanttQueryDto } from './dto/task-gantt-query.dto';
 import { PersonalTaskQueryDto } from './dto/personal-task-query.dto';
 import { TaskTimeReportQueryDto } from './dto/task-time-report-query.dto';
+import { ExecutorWorkloadQueryDto } from './dto/executor-workload-query.dto';
+import type { ExecutorWorkloadTask } from './interfaces/executor-workload.interface';
 import type {
   TaskTimeReportEntry,
   TaskTimeReportPage
@@ -581,11 +583,15 @@ export class TasksService {
   /** Единая область личных списков и их счётчиков, включая доступ и архив каждого уровня. */
   private personalTaskSource(
     query: PersonalTaskQueryDto,
-    executorErpId?: string
+    executorErpId?: string | string[]
   ): string {
     // В ERP и Board разные PK: сопоставляем только подтверждённый erp_id.
     const executorSource = executorErpId
-      ? `JOIN users executor ON executor.erp_id = :executorErpId AND executor.ban = false`
+      ? `JOIN users executor ON executor.erp_id ${
+          Array.isArray(executorErpId)
+            ? 'IN (:executorErpIds)'
+            : '= :executorErpId'
+        } AND executor.ban = false`
       : '';
     const assignedUser = executorErpId ? 'executor.id' : ':userId';
     const statusFilter = query.columnStatuses?.length
@@ -619,6 +625,54 @@ export class TasksService {
                  WHERE assignment.task_id = task.id AND assignment.user_id = ${assignedUser})`
              : 'task.created_by_id = :userId'
          }${statusFilter}`;
+  }
+
+  /** Читает нормы пакетом через общую область назначений, без карточек и побочных эффектов. */
+  async getExecutorWorkload(
+    userId: number,
+    query: ExecutorWorkloadQueryDto
+  ): Promise<ExecutorWorkloadTask[]> {
+    const start = new Date(query.start);
+    const end = new Date(query.end);
+    const span = end.getTime() - start.getTime();
+
+    if (!Number.isFinite(span) || span <= 0) {
+      throw new HttpException(
+        'Конец периода должен быть позже начала',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    const executorErpIds = [...new Set(query.erpUserIds)].map(String);
+
+    // EXISTS в общей выборке не удваивает норму при повторном назначении.
+    // Отбираем начало ИЛИ готовность: клиент относит полную норму к каждому дню.
+    return this.sequelize.query<ExecutorWorkloadTask>(
+      `SELECT executor.erp_id::int AS "executorId", task.id AS "taskId",
+         project.id AS "projectId", project.title AS "projectName",
+         task.start_date AS "startDate", task.due_date AS "dueDate",
+         task.time_norm_minutes AS "timeNormMinutes"
+       ${this.personalTaskSource({ scope: 'assigned' }, executorErpIds)}
+         AND (col.status IS NULL OR col.status NOT IN (:inactiveStatuses))
+         AND task.time_norm_minutes > 0
+         AND ((task.start_date >= :start AND task.start_date < :end)
+           OR (task.due_date >= :start AND task.due_date < :end))
+       ORDER BY task.id, executor.erp_id::int`,
+      {
+        replacements: {
+          userId,
+          executorErpIds,
+          inactiveStatuses: [
+            ColumnStatus.Completed,
+            ColumnStatus.Archived,
+            'in_review'
+          ],
+          start,
+          end
+        },
+        type: QueryTypes.SELECT
+      }
+    );
   }
 
   /** Счётчик раздела учитывает все его задачи, а не только первую видимую страницу. */
@@ -662,14 +716,38 @@ export class TasksService {
     const direction = query.sortDirection === 'desc' ? 'DESC' : 'ASC';
     // Владелец или участник активного проекта: те же правила, что assertCanRead.
     // EXISTS не размножает задачу при нескольких участниках/назначениях.
+    // Счётчики детей агрегируются только для выбранной страницы, без N+1 запросов.
+    // Личный фильтр не скрывает дочерние задачи, архив и доступ остаются прежними.
     const locations = await this.sequelize.query<PersonalTaskLocation>(
-      `SELECT task.id, project.id AS "projectId", project.prefix AS "projectPrefix", col.status AS "columnStatus"
-       ${this.personalTaskSource(query, executorErpId)}
-       ORDER BY ${dateColumn} ${direction} NULLS LAST, task.id ASC
-       LIMIT :limit OFFSET :offset`,
+      `WITH page AS MATERIALIZED (
+         SELECT task.id, project.id AS "projectId", project.prefix AS "projectPrefix",
+           col.status AS "columnStatus", ${dateColumn} AS "sortDate", COUNT(*) OVER()::int AS total
+         ${this.personalTaskSource(query, executorErpId)}
+         ORDER BY ${dateColumn} ${direction} NULLS LAST, task.id ASC
+         LIMIT :limit OFFSET :offset
+       ), subtask_counts AS (
+         SELECT child.parent_task_id AS "taskId", COUNT(*)::int AS total,
+           COUNT(*) FILTER (WHERE child_col.status = :completedStatus)::int AS completed
+         FROM tasks child
+         JOIN page parent ON parent.id = child.parent_task_id
+         JOIN board_columns child_col ON child_col.id = child.column_id AND child_col."deletedAt" IS NULL
+         JOIN boards child_board ON child_board.id = child_col.board_id AND child_board."deletedAt" IS NULL
+         JOIN projects child_project ON child_project.id = child_board.project_id AND child_project."deletedAt" IS NULL
+         WHERE child."deletedAt" IS NULL
+           AND (child_project.created_by_id = :userId OR EXISTS (
+             SELECT 1 FROM project_members member
+             WHERE member.project_id = child_project.id AND member.user_id = :userId
+           ))
+         GROUP BY child.parent_task_id
+       )
+       SELECT page.*, COALESCE(subtask_counts.total, 0) AS "subtasksTotal",
+         COALESCE(subtask_counts.completed, 0) AS "subtasksCompleted"
+       FROM page LEFT JOIN subtask_counts ON subtask_counts."taskId" = page.id
+       ORDER BY page."sortDate" ${direction} NULLS LAST, page.id ASC`,
       {
         replacements: {
           userId,
+          completedStatus: ColumnStatus.Completed,
           executorErpId,
           columnStatus: query.columnStatus,
           columnStatuses: query.columnStatuses,
@@ -680,7 +758,26 @@ export class TasksService {
       }
     );
     const page = locations.slice(0, limit);
-    if (!page.length) return { items: [], offset, hasMore: false };
+    if (!page.length) {
+      // Смещение за концом списка не превращает его общее число в ноль.
+      const [count] =
+        offset > 0
+          ? await this.sequelize.query<{ total: number }>(
+              `SELECT COUNT(*)::int AS total ${this.personalTaskSource(query, executorErpId)}`,
+              {
+                replacements: {
+                  userId,
+                  executorErpId,
+                  columnStatus: query.columnStatus,
+                  columnStatuses: query.columnStatuses
+                },
+                type: QueryTypes.SELECT
+              }
+            )
+          : [];
+
+      return { items: [], total: count?.total ?? 0, offset, hasMore: false };
+    }
 
     // Не загружаем файлы и дочерние карточки; описание нужно только таблице ПЗ.
     const tasks = await this.taskRepository.findAll({
@@ -719,7 +816,11 @@ export class TasksService {
               task,
               projectId: location.projectId,
               projectPrefix: location.projectPrefix,
-              columnStatus: location.columnStatus
+              columnStatus: location.columnStatus,
+              subtaskCounter: {
+                total: location.subtasksTotal,
+                completed: location.subtasksCompleted
+              }
             }
           ]
         : [];
@@ -727,6 +828,7 @@ export class TasksService {
 
     return {
       items,
+      total: Number(locations[0].total),
       offset: offset + page.length,
       hasMore: locations.length > limit
     };
@@ -788,7 +890,8 @@ export class TasksService {
         `SELECT task.id, task.task_number AS "taskNumber", task.title, task.priority,
           task.start_date AS "startDate", task.due_date AS "dueDate",
           task.column_id AS "columnId", col.board_id AS "boardId",
-          col.status AS "columnStatus", task.created_by_id AS "createdById", task.controller_ids AS "controllerIds",
+          col.status AS "columnStatus", col.color AS "columnColor",
+          task.created_by_id AS "createdById", task.controller_ids AS "controllerIds",
           task.responsible_ids AS "responsibleIds", task.time_norm_minutes AS "timeNormMinutes",
           task."order", task."updatedAt"
           ${source}

@@ -30,6 +30,8 @@ import type { TaskGanttSnapshot } from './interfaces/task-gantt.interface';
 import { PersonalTaskQueryDto } from './dto/personal-task-query.dto';
 import type { PersonalTaskPage } from './interfaces/personal-task.interface';
 import { ExecutorTaskQueryDto } from './dto/executor-task-query.dto';
+import { ExecutorWorkloadQueryDto } from './dto/executor-workload-query.dto';
+import type { ExecutorWorkloadTask } from './interfaces/executor-workload.interface';
 import { TaskTimeReportQueryDto } from './dto/task-time-report-query.dto';
 import type { TaskTimeReportPage } from './interfaces/task-time-report.interface';
 import { TimeReportPermissionGuard } from './time-report-permission.guard';
@@ -65,6 +67,19 @@ export class TasksController {
       { scope: 'assigned', limit: query.limit, offset: query.offset },
       String(query.erpUserId)
     );
+  }
+
+  /** Статический маршрут предшествует tasks/:id и сохраняет доступ читателя сессии. */
+  @ApiOperation({
+    summary: 'Нормы задач исполнителей ERP за календарный период'
+  })
+  @Get('tasks/executor-workload')
+  getExecutorWorkload(
+    @Query() query: ExecutorWorkloadQueryDto,
+    @CurrentUser() user: IUserDataToken
+  ): Promise<ExecutorWorkloadTask[]> {
+    // ERP ID выбирают ресурсы, но не подменяют текущего пользователя.
+    return this.tasksService.getExecutorWorkload(user.id, query);
   }
 
   /** Пользователь берётся из сессии, а не из произвольного ID в фильтре. */

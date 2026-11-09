@@ -11,6 +11,7 @@ export interface TaskGanttItem {
   columnId: number;
   boardId: number;
   columnStatus: ColumnStatus | null;
+  columnColor: string | null;
   createdById: number;
   controllerIds: number[];
   responsibleIds: number[];
