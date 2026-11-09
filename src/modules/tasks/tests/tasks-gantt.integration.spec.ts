@@ -10,6 +10,7 @@ import { Test } from '@nestjs/testing';
 import { Attributes, Model, QueryTypes } from 'sequelize';
 import { Sequelize } from 'sequelize-typescript';
 import request = require('supertest');
+import type { Request } from 'express';
 import models from '../../../configs/models';
 import { TasksController } from '../tasks.controller';
 import { TimeReportPermissionGuard } from '../time-report-permission.guard';
@@ -122,9 +123,14 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
           // Подменён только внешний обмен токена; общий guard и проверка проекта остаются настоящими.
           useValue: {
             isEnabled: (): boolean => true,
-            authenticate: async (token: string): Promise<User> => {
-              if (token === 'gantt-owner-token') return owner;
-              if (token === 'gantt-outsider-token') return outsider;
+            authenticateRequest: async (
+              req: Request
+            ): Promise<{ token: string; user: User }> => {
+              const token =
+                req.headers.authorization?.replace(/^Bearer /, '') ?? '';
+              if (token === 'gantt-owner-token') return { token, user: owner };
+              if (token === 'gantt-outsider-token')
+                return { token, user: outsider };
 
               throw new UnauthorizedException();
             },
@@ -403,6 +409,65 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       .auth('gantt-owner-token', { type: 'bearer' })
       .expect(200);
     expect(removed.body.items).toEqual([]);
+  });
+
+  it('excludes finished and archived columns only from ERP executor tasks before pagination', async (): Promise<void> => {
+    const erpUserId = 850000 + project.id;
+    await outsider.update({ erpId: String(erpUserId) });
+    await persist(ProjectMember.build(), {
+      projectId: project.id,
+      userId: outsider.id
+    });
+    await board.update({ membersIds: [outsider.id] });
+    await roots[0].update({
+      timeNormMinutes: 90,
+      linkedEntity: {
+        type: 'detal',
+        id: 17,
+        name: 'Деталь',
+        designation: 'Д-17'
+      }
+    });
+
+    // Самые ранние задачи не должны занимать первую страницу активных назначений.
+    await columns[0].update({ status: 'completed' });
+    const completed = await service.getPersonalTasks(
+      owner.id,
+      { scope: 'assigned', limit: 1 },
+      String(erpUserId)
+    );
+    expect(completed.items.map(item => item.task.id)).toEqual([roots[1].id]);
+    expect(completed.hasMore).toBe(false);
+    const personal = await service.getPersonalTasks(outsider.id, {
+      scope: 'assigned'
+    });
+    expect(personal.items.map(item => item.task.id)).toContain(roots[0].id);
+
+    await columns[0].update({ status: 'archived' });
+    const archived = await service.getPersonalTasks(
+      owner.id,
+      { scope: 'assigned' },
+      String(erpUserId)
+    );
+    expect(archived.items.map(item => item.task.id)).toEqual([roots[1].id]);
+
+    // Снятие статуса возвращает задачу с её настоящей связью и нормой времени.
+    await columns[0].update({ status: null });
+    const active = await service.getPersonalTasks(
+      owner.id,
+      { scope: 'assigned' },
+      String(erpUserId)
+    );
+    expect(active.items[0].task.timeNormMinutes).toBe(90);
+    expect(active.items[0].task.linkedEntity).toEqual({
+      type: 'detal',
+      id: 17,
+      name: 'Деталь',
+      designation: 'Д-17'
+    });
+
+    // Не оставляем назначения этого проекта доступными следующему тесту с тем же пользователем.
+    await board.update({ membersIds: [] });
   });
 
   it('keeps reader access, project membership, archives and existing personal lists independent', async (): Promise<void> => {
@@ -711,6 +776,113 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
           Array.from({ length: 250 }, (_, index) => 710000 + index)
         )
       ).toEqual([]);
+    });
+
+    it('reads bulk workload with full norms per executor, half-open dates and the canonical access/archive rules', async (): Promise<void> => {
+      const ids = [970000 + project.id * 2, 970001 + project.id * 2];
+      await owner.update({ erpId: String(ids[0]) });
+      await outsider.update({ erpId: String(ids[1]) });
+
+      for (const user of [owner, outsider]) {
+        await persist(ProjectMember.build(), {
+          projectId: project.id,
+          userId: user.id
+        });
+      }
+
+      await roots[0].update({
+        startDate: new Date('2026-11-06T00:00:00Z'),
+        dueDate: new Date('2026-11-07T23:59:59Z'),
+        timeNormMinutes: 60
+      });
+      // Ровно правая граница не должна попасть ни по началу, ни по готовности.
+      await roots[1].update({
+        startDate: new Date('2026-11-08T00:00:00Z'),
+        dueDate: new Date('2026-11-08T12:00:00Z'),
+        timeNormMinutes: 30
+      });
+      const query = {
+        erpUserIds: ids.join(','),
+        start: '2026-11-06T00:00:00Z',
+        end: '2026-11-08T00:00:00Z'
+      };
+
+      /** Читает реальный HTTP endpoint с общей авторизацией и валидацией DTO. */
+      const readWorkload = async (): Promise<request.Response> =>
+        request(app.getHttpServer())
+          .get('/tasks/executor-workload')
+          .query(query)
+          .auth('gantt-owner-token', { type: 'bearer' })
+          .expect(200);
+
+      const visible = await readWorkload();
+      expect(visible.body).toHaveLength(2);
+      expect(visible.body).toEqual(
+        expect.arrayContaining(
+          ids.map(executorId =>
+            expect.objectContaining({
+              executorId,
+              taskId: roots[0].id,
+              timeNormMinutes: 60,
+              projectId: project.id,
+              projectName: project.title
+            })
+          )
+        )
+      );
+      expect(visible.body[0]).not.toHaveProperty('description');
+
+      // Исходный endpoint исполнителя получает настройку прав для того же календаря карточки.
+      const personal = await service.getPersonalTasks(
+        owner.id,
+        { scope: 'assigned' },
+        String(ids[0])
+      );
+      expect(
+        personal.items.find(item => item.task.id === roots[0].id)
+          ?.attributesOwnerOnly
+      ).toBe(true);
+
+      await board.update({ membersIds: [owner.id] });
+      expect((await readWorkload()).body).toHaveLength(1);
+      await board.update({ membersIds: null });
+      await outsider.update({ ban: true });
+      expect((await readWorkload()).body).toHaveLength(1);
+      await outsider.update({ ban: false });
+
+      await ProjectMember.destroy({
+        where: { projectId: project.id, userId: outsider.id }
+      });
+      const hidden = await request(app.getHttpServer())
+        .get('/tasks/executor-workload')
+        .query(query)
+        .auth('gantt-outsider-token', { type: 'bearer' })
+        .expect(200);
+      expect(hidden.body).toEqual([]);
+
+      for (const status of ['completed', 'in_review', 'archived']) {
+        // Legacy in_review присутствует в старых данных, хотя больше не предлагается в UI.
+        await sequelize.query(
+          'UPDATE board_columns SET status = :status WHERE id = :id',
+          { replacements: { status, id: columns[0].id } }
+        );
+        expect((await readWorkload()).body).toEqual([]);
+      }
+
+      await columns[0].reload();
+      await columns[0].update({ status: ColumnStatus.Queued });
+      expect((await readWorkload()).body).toHaveLength(1);
+      await roots[0].destroy();
+      expect((await readWorkload()).body).toEqual([]);
+      await roots[0].restore();
+      await columns[0].destroy();
+      expect((await readWorkload()).body).toEqual([]);
+      await columns[0].restore();
+      await board.destroy();
+      expect((await readWorkload()).body).toEqual([]);
+      await board.restore();
+      await project.destroy();
+      expect((await readWorkload()).body).toEqual([]);
     });
   });
 

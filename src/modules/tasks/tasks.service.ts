@@ -42,9 +42,9 @@ import {
 import { CreateTaskTimeEntryDto } from './dto/create-task-time-entry.dto';
 import { TaskGanttQueryDto } from './dto/task-gantt-query.dto';
 import { PersonalTaskQueryDto } from './dto/personal-task-query.dto';
-import { TaskTimeReportQueryDto } from './dto/task-time-report-query.dto';
 import { ExecutorWorkloadQueryDto } from './dto/executor-workload-query.dto';
 import type { ExecutorWorkloadTask } from './interfaces/executor-workload.interface';
+import { TaskTimeReportQueryDto } from './dto/task-time-report-query.dto';
 import type {
   TaskTimeReportEntry,
   TaskTimeReportPage
@@ -616,7 +616,8 @@ export class TasksService {
                   WHERE executor_member.project_id = project.id
                     AND executor_member.user_id = executor.id)
                 AND (board.members_ids IS NULL
-                  OR board.members_ids @> jsonb_build_array(executor.id))`
+                  OR board.members_ids @> jsonb_build_array(executor.id))
+                AND (col.status IS NULL OR col.status NOT IN ('completed', 'in_review', 'archived'))`
              : ''
          }
          AND ${
@@ -721,6 +722,7 @@ export class TasksService {
     const locations = await this.sequelize.query<PersonalTaskLocation>(
       `WITH page AS MATERIALIZED (
          SELECT task.id, project.id AS "projectId", project.prefix AS "projectPrefix",
+           project.attributes_owner_only AS "attributesOwnerOnly",
            col.status AS "columnStatus", ${dateColumn} AS "sortDate", COUNT(*) OVER()::int AS total
          ${this.personalTaskSource(query, executorErpId)}
          ORDER BY ${dateColumn} ${direction} NULLS LAST, task.id ASC
@@ -786,7 +788,7 @@ export class TasksService {
         'taskNumber',
         'title',
         // ПЗ показывает описание задачи; прежний личный список остаётся лёгким.
-        ...(executorErpId ? ['description'] : []),
+        ...(executorErpId ? ['description', 'linkedEntity'] : []),
         'createdById',
         'controllerIds',
         'responsibleIds',
@@ -820,7 +822,10 @@ export class TasksService {
               subtaskCounter: {
                 total: location.subtasksTotal,
                 completed: location.subtasksCompleted
-              }
+              },
+              ...(executorErpId
+                ? { attributesOwnerOnly: location.attributesOwnerOnly }
+                : {})
             }
           ]
         : [];

@@ -44,7 +44,9 @@ COPY package.json /app/board_server/package.json
 COPY env/${ENV_FILE} /app/board_server/env/.production.env
 COPY migrations /app/board_server/migrations
 COPY seeders /app/board_server/seeders
+COPY docker-entrypoint.sh /app/board_server/docker-entrypoint.sh
 
 EXPOSE 5000
 
+ENTRYPOINT ["/bin/sh", "/app/board_server/docker-entrypoint.sh"]
 CMD ["node", "dist/main.js"]

@@ -58,16 +58,17 @@ describe('WsGateway connection authentication', () => {
   });
 
   it('disconnects an already connected central session after device revocation', async (): Promise<void> => {
-    const authenticate = jest
-      .fn()
-      .mockResolvedValueOnce({ id: 7 })
-      .mockRejectedValue(new Error('revoked'));
+    const authenticate = jest.fn().mockRejectedValue(new Error('revoked'));
     const gateway = new WsGateway(
       {} as any,
       {} as any,
       {} as any,
       {
         isEnabled: () => true,
+        authenticateRequest: jest.fn().mockResolvedValue({
+          token: 'central',
+          user: { id: 7 }
+        }),
         authenticate,
         toUserPayload: () => ({ id: 7 })
       } as any
@@ -80,7 +81,7 @@ describe('WsGateway connection authentication', () => {
     await gateway.handleConnection(client);
     await gateway.revalidateConnections();
 
-    expect(authenticate).toHaveBeenNthCalledWith(2, 'central');
+    expect(authenticate).toHaveBeenCalledWith('central');
     expect(client.disconnect).toHaveBeenCalledWith(true);
   });
 
@@ -254,14 +255,17 @@ describe('WsGateway connection authentication', () => {
 
   it('в режиме SEP Auth проверяет access_token даже при наличии board_token', async () => {
     const verify = jest.fn();
-    const authenticate = jest.fn().mockResolvedValue({ id: 8 });
+    const authenticateRequest = jest.fn().mockResolvedValue({
+      token: 'new-auth',
+      user: { id: 8 }
+    });
     const gateway = new WsGateway(
       { verify } as any,
       {} as any,
       {} as any,
       {
         isEnabled: jest.fn().mockReturnValue(true),
-        authenticate,
+        authenticateRequest,
         toUserPayload: jest.fn().mockReturnValue({
           id: 8,
           login: 'editor',
@@ -273,7 +277,10 @@ describe('WsGateway connection authentication', () => {
 
     await gateway.handleConnection(client);
 
-    expect(authenticate).toHaveBeenCalledWith('new-auth');
+    expect(authenticateRequest).toHaveBeenCalledWith({
+      headers: client.handshake.headers,
+      cookies: { board_token: 'old-board', access_token: 'new-auth' }
+    });
     expect(verify).not.toHaveBeenCalled();
     expect(client.user.id).toBe(8);
     expect(client.join).toHaveBeenCalledWith('user:8');

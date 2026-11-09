@@ -23,6 +23,7 @@
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test": "cross-env NODE_ENV=test jest --config ./jest.config.js --no-cache --verbose",
     "test:unit": "cross-env NODE_ENV=test jest --config ./jest.spec.config.js --verbose",
+    "test:docker:migrations": "node scripts/verify-docker-migrations.cjs",
     "test:e2e": "cross-env NODE_ENV=test jest --config ./jest.e2e.config.js ",
     "test:k6": "k6 run --compatibility-mode=base ./src/tests/k6/k6.test.ts",
     "migrate:up": "cross-env NODE_ENV=production ts-node ./src/scripts/migrations/umzug.ts --to=up",
