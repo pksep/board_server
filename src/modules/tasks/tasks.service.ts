@@ -580,7 +580,15 @@ export class TasksService {
     ];
   }
 
-  /** Единая область личных списков и их счётчиков, включая доступ и архив каждого уровня. */
+  /** Та же проверка владельца/участника, что ProjectAccessService.assertCanRead. */
+  private taskProjectReaderAccess(): string {
+    return `(project.created_by_id = :userId OR EXISTS (
+      SELECT 1 FROM project_members member
+      WHERE member.project_id = project.id AND member.user_id = :userId
+    ))`;
+  }
+
+  /** Общие назначения и архивы; планирование не ограничивается проектами читателя. */
   private personalTaskSource(
     query: PersonalTaskQueryDto,
     hasExecutor = false
@@ -602,10 +610,7 @@ export class TasksService {
        JOIN projects project ON project.id = board.project_id AND project."deletedAt" IS NULL
        ${executorSource}
        WHERE task."deletedAt" IS NULL
-         AND (project.created_by_id = :userId OR EXISTS (
-           SELECT 1 FROM project_members member
-           WHERE member.project_id = project.id AND member.user_id = :userId
-         ))
+         ${hasExecutor ? '' : `AND ${this.taskProjectReaderAccess()}`}
          ${
            hasExecutor
              ? `AND EXISTS (SELECT 1 FROM project_members executor_member
@@ -624,7 +629,7 @@ export class TasksService {
          }${statusFilter}`;
   }
 
-  /** Возвращает лёгкие факты загрузки одной выборкой, сохраняя общую область доступа. */
+  /** Возвращает факты загрузки всех проектов после проверки права планирования в guard. */
   async getExecutorWorkload(
     userId: number,
     query: ExecutorWorkloadQueryDto
@@ -694,7 +699,7 @@ export class TasksService {
     await this.assertTaskAccess(taskId, userId, undefined, false, true);
   }
 
-  /** Читает порцию личного списка либо назначений исполнителя ERP с общими правами читателя. */
+  /** Личный список сохраняет доступ проекта; планирование возвращает его отдельным признаком. */
   async getPersonalTasks(
     userId: number,
     query: PersonalTaskQueryDto = {},
@@ -705,10 +710,19 @@ export class TasksService {
     const dateColumn =
       query.sortBy === 'startDate' ? 'task.start_date' : 'task.due_date';
     const direction = query.sortDirection === 'desc' ? 'DESC' : 'ASC';
-    // Владелец или участник активного проекта: те же правила, что assertCanRead.
-    // EXISTS не размножает задачу при нескольких участниках/назначениях.
+    // EXISTS не размножает задачу; права карточки не отсекают нагрузку до пагинации.
     const locations = await this.sequelize.query<PersonalTaskLocation>(
-      `SELECT task.id, project.id AS "projectId", project.prefix AS "projectPrefix", project.attributes_owner_only AS "attributesOwnerOnly", col.status AS "columnStatus"
+      `SELECT task.id, project.id AS "projectId", project.prefix AS "projectPrefix", project.attributes_owner_only AS "attributesOwnerOnly", col.status AS "columnStatus",
+         ${this.taskProjectReaderAccess()} AS "canReadTask"
+         ${
+           executorErpId
+             ? `, jsonb_build_object(
+           'projectTitle', project.title, 'boardId', board.id,
+           'boardTitle', board.title, 'columnTitle', col.title,
+           'taskAttributeDefinitions', project.task_attribute_definitions
+         ) AS "displayContext"`
+             : ''
+         }
        ${this.personalTaskSource(query, !!executorErpId)}
        ORDER BY ${dateColumn} ${direction} NULLS LAST, task.id ASC
        LIMIT :limit OFFSET :offset`,
@@ -734,7 +748,9 @@ export class TasksService {
         'taskNumber',
         'title',
         // ПЗ показывает описание задачи; прежний личный список остаётся лёгким.
-        ...(executorErpId ? ['description', 'linkedEntity'] : []),
+        ...(executorErpId
+          ? ['description', 'linkedEntity', 'customAttributeValues']
+          : []),
         'createdById',
         'controllerIds',
         'responsibleIds',
@@ -755,6 +771,38 @@ export class TasksService {
       )
     });
     const byId = new Map(tasks.map(task => [task.id, task]));
+    // Подписи контроллеров/ответственных берём одним пакетом только для этих задач.
+    const participantIds = executorErpId
+      ? [
+          ...new Set(
+            tasks.flatMap(task => [
+              ...(task.controllerIds ?? [task.createdById]),
+              ...(task.responsibleIds ?? []),
+              ...task.assignees.map(assignment => assignment.userId),
+              ...Object.values(task.customAttributeValues ?? {}).flatMap(
+                value => (Array.isArray(value) ? value.map(Number) : [])
+              )
+            ])
+          )
+        ].filter(id => Number.isSafeInteger(id) && id > 0)
+      : [];
+    const parentIds = executorErpId
+      ? tasks.flatMap(task => (task.parentTaskId ? [task.parentTaskId] : []))
+      : [];
+    const [participants, parents] = await Promise.all([
+      participantIds.length
+        ? User.findAll({
+            attributes: ['id', 'login', 'initial', 'image'],
+            where: { id: { [Op.in]: participantIds } }
+          })
+        : Promise.resolve([]),
+      parentIds.length
+        ? this.taskRepository.findAll({
+            attributes: ['id', 'title', 'taskNumber', 'parentTaskId'],
+            where: { id: { [Op.in]: parentIds } }
+          })
+        : Promise.resolve([])
+    ]);
     const items = page.flatMap(location => {
       const task = byId.get(location.id);
 
@@ -766,7 +814,37 @@ export class TasksService {
               projectPrefix: location.projectPrefix,
               columnStatus: location.columnStatus,
               ...(executorErpId
-                ? { attributesOwnerOnly: location.attributesOwnerOnly }
+                ? {
+                    attributesOwnerOnly: location.attributesOwnerOnly,
+                    canReadTask: location.canReadTask,
+                    ...(location.displayContext
+                      ? {
+                          displayContext: {
+                            ...location.displayContext,
+                            users: participants.filter(
+                              user =>
+                                (
+                                  task.controllerIds ?? [task.createdById]
+                                ).includes(user.id) ||
+                                task.responsibleIds?.includes(user.id) ||
+                                task.assignees.some(
+                                  assignment => assignment.userId === user.id
+                                ) ||
+                                Object.values(
+                                  task.customAttributeValues ?? {}
+                                ).some(
+                                  value =>
+                                    Array.isArray(value) &&
+                                    value.some(id => Number(id) === user.id)
+                                )
+                            ),
+                            parentTask: parents.find(
+                              parent => parent.id === task.parentTaskId
+                            )
+                          }
+                        }
+                      : {})
+                  }
                 : {})
             }
           ]

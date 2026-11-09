@@ -14,6 +14,7 @@ import type { Request } from 'express';
 import models from '../../../configs/models';
 import { TasksController } from '../tasks.controller';
 import { TimeReportPermissionGuard } from '../time-report-permission.guard';
+import { ExecutorPlanningPermissionGuard } from '../executor-planning-permission.guard';
 import { TasksService } from '../tasks.service';
 import { Task } from '../model/task.model';
 import { TaskAssignee } from '../model/task-assignee.model';
@@ -142,6 +143,8 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
         }
       ]
     })
+      .overrideGuard(ExecutorPlanningPermissionGuard)
+      .useValue({ canActivate: (): boolean => true })
       .overrideGuard(TimeReportPermissionGuard)
       .useValue({ canActivate: (): boolean => true })
       .compile();
@@ -608,7 +611,9 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       .query(query)
       .auth('gantt-outsider-token', { type: 'bearer' })
       .expect(200);
-    expect(hidden.body).toEqual([]);
+    // Читатель вне проекта всё равно видит нагрузку оставшегося участника.
+    expect(hidden.body).toEqual((await readWorkload()).body);
+    expect(hidden.body.map(item => item.executorId)).toEqual([ids[0]]);
 
     for (const status of ['completed', 'in_review', 'archived']) {
       // Legacy in_review присутствует в старых данных, хотя больше не предлагается в UI.
@@ -669,6 +674,119 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       .get('/tasks/executor-workload')
       .query(valid)
       .expect(401);
+  });
+
+  it('includes other projects in executor planning without opening cards, personal lists or writes', async (): Promise<void> => {
+    const erpUserId = 980000 + project.id;
+    await outsider.update({ erpId: String(erpUserId) });
+    const repair = await persist(Project.build(), {
+      title: 'РЕМОНТ',
+      prefix: `R${project.prefix}`,
+      createdById: outsider.id,
+      attributesOwnerOnly: false
+    });
+    await persist(ProjectMember.build(), {
+      projectId: repair.id,
+      userId: outsider.id
+    });
+    const repairBoard = await persist(Board.build(), {
+      projectId: repair.id,
+      title: 'РЕМОНТ',
+      membersIds: [outsider.id]
+    });
+    const repairColumn = await persist(BoardColumn.build(), {
+      boardId: repairBoard.id,
+      title: 'В работе',
+      status: ColumnStatus.InProgress
+    });
+    const repairTask = await persist(Task.build(), {
+      title: 'Починить станок',
+      taskNumber: 1,
+      columnId: repairColumn.id,
+      createdById: outsider.id,
+      timeNormMinutes: 60,
+      startDate: new Date('2026-11-09T08:00:00Z'),
+      dueDate: new Date('2026-11-09T09:00:00Z')
+    });
+    await persist(TaskAssignee.build(), {
+      taskId: repairTask.id,
+      userId: outsider.id
+    });
+
+    // Viewer не состоит ни в проекте, ни в доске РЕМОНТ; роли производства проверены guard.
+    const assignments = await request(app.getHttpServer())
+      .get('/tasks/by-executor')
+      .query({ erpUserId, limit: 1 })
+      .auth('gantt-owner-token', { type: 'bearer' })
+      .expect(200);
+    expect(assignments.body).toMatchObject({ hasMore: false, offset: 1 });
+    expect(assignments.body.items).toEqual([
+      expect.objectContaining({
+        projectId: repair.id,
+        canReadTask: false,
+        displayContext: expect.objectContaining({
+          projectTitle: 'РЕМОНТ',
+          boardId: repairBoard.id,
+          boardTitle: 'РЕМОНТ',
+          columnTitle: repairColumn.title,
+          users: [
+            expect.objectContaining({ id: outsider.id, login: outsider.login })
+          ]
+        }),
+        task: expect.objectContaining({
+          id: repairTask.id,
+          timeNormMinutes: 60
+        })
+      })
+    ]);
+    const workload = await request(app.getHttpServer())
+      .get('/tasks/executor-workload')
+      .query({
+        erpUserIds: String(erpUserId),
+        start: '2026-11-09T00:00:00Z',
+        end: '2026-11-10T00:00:00Z'
+      })
+      .auth('gantt-owner-token', { type: 'bearer' })
+      .expect(200);
+    expect(workload.body).toEqual([
+      expect.objectContaining({
+        executorId: erpUserId,
+        projectName: 'РЕМОНТ',
+        taskId: repairTask.id,
+        timeNormMinutes: 60
+      })
+    ]);
+    const personal = await service.getPersonalTasks(owner.id, {
+      scope: 'assigned'
+    });
+    const personalIds = await service.getPersonalTaskIds(owner.id, {
+      scope: 'assigned'
+    });
+    expect(personal.items.map(item => item.task.id)).not.toContain(
+      repairTask.id
+    );
+    expect(personalIds).not.toContain(repairTask.id);
+    await request(app.getHttpServer())
+      .get(`/tasks/${repairTask.id}`)
+      .auth('gantt-owner-token', { type: 'bearer' })
+      .expect(404);
+    await request(app.getHttpServer())
+      .put(`/tasks/${repairTask.id}`)
+      .send({ startDate: '2026-11-09T07:00:00Z' })
+      .auth('gantt-owner-token', { type: 'bearer' })
+      .expect(404);
+    await repairTask.reload();
+    expect(repairTask.startDate.toISOString()).toBe('2026-11-09T08:00:00.000Z');
+
+    // Владелец того же проекта получает прежнюю карточку и явный признак доступа.
+    const memberView = await service.getPersonalTasks(
+      outsider.id,
+      { scope: 'assigned' },
+      String(erpUserId)
+    );
+    expect(
+      memberView.items.find(item => item.task.id === repairTask.id)?.canReadTask
+    ).toBe(true);
   });
 
   it('uses OR for multiple assignees without duplicates and retains every assignment', async (): Promise<void> => {

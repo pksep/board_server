@@ -12,10 +12,15 @@ import { Board } from '../boards/model/board.model';
 import { ProjectsModule } from '../projects/projects.module';
 import { ActivityEventsModule } from '../activity-events/activity-events.module';
 import { TimeReportPermissionGuard } from './time-report-permission.guard';
+import { ExecutorPlanningPermissionGuard } from './executor-planning-permission.guard';
 
 @Module({
   controllers: [TasksController],
-  providers: [TasksService, TimeReportPermissionGuard],
+  providers: [
+    TasksService,
+    TimeReportPermissionGuard,
+    ExecutorPlanningPermissionGuard
+  ],
   imports: [
     SequelizeModule.forFeature([
       Task,

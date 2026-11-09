@@ -35,17 +35,19 @@ import type { ExecutorWorkloadTask } from './interfaces/executor-workload.interf
 import { TaskTimeReportQueryDto } from './dto/task-time-report-query.dto';
 import type { TaskTimeReportPage } from './interfaces/task-time-report.interface';
 import { TimeReportPermissionGuard } from './time-report-permission.guard';
+import { ExecutorPlanningPermissionGuard } from './executor-planning-permission.guard';
 
 @ApiTags('Задачи')
 @Controller()
 export class TasksController {
   constructor(private tasksService: TasksService) {}
 
-  /** Читает нормы задач с теми же правами и назначениями, что список ПЗ исполнителя. */
+  /** Планирование учитывает все действующие назначения независимо от участия читателя. */
   @ApiOperation({
     summary: 'Загрузка исполнителей ERP по задачам досок за период'
   })
   @Get('tasks/executor-workload')
+  @UseGuards(ExecutorPlanningPermissionGuard)
   getExecutorWorkload(
     @Query() query: ExecutorWorkloadQueryDto,
     @CurrentUser() user: IUserDataToken
@@ -64,16 +66,17 @@ export class TasksController {
     return this.tasksService.getTimeReport(user.id, query);
   }
 
-  /** Сохраняет права читателя проекта и использует общий список назначенных задач. */
+  /** Показывает назначения в планировании; доступ к карточке возвращается отдельно. */
   @ApiOperation({
     summary: 'Задачи исполнителя ERP с досок, в которых он участвует'
   })
   @Get('tasks/by-executor')
+  @UseGuards(ExecutorPlanningPermissionGuard)
   getExecutorTasks(
     @Query() query: ExecutorTaskQueryDto,
     @CurrentUser() user: IUserDataToken
   ): Promise<PersonalTaskPage> {
-    // Пользователь сессии определяет доступ, ERP ID — только целевого исполнителя.
+    // ERP ID определяет исполнителя, сессия — возможность открыть его карточки.
     return this.tasksService.getPersonalTasks(
       user.id,
       { scope: 'assigned', limit: query.limit, offset: query.offset },
