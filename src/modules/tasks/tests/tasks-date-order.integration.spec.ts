@@ -10,6 +10,7 @@ import { Test } from '@nestjs/testing';
 import { Attributes, Model } from 'sequelize';
 import { Sequelize } from 'sequelize-typescript';
 import request = require('supertest');
+import type { Request } from 'express';
 import models from '../../../configs/models';
 import { TasksController } from '../tasks.controller';
 import { TimeReportPermissionGuard } from '../time-report-permission.guard';
@@ -126,11 +127,16 @@ describeWithDatabase(
             // Внешний обмен токена подменён; guard и права проекта настоящие.
             useValue: {
               isEnabled: (): boolean => true,
-              authenticate: async (token: string): Promise<User> => {
-                if (token === 'date-owner-token') return owner;
-                if (token === 'date-outsider-token') return outsider;
+              authenticateRequest: async (
+                req: Request
+              ): Promise<{ token: string; user: User }> => {
+                const token =
+                  req.headers.authorization?.replace(/^Bearer /, '') ?? '';
+                if (token === 'date-owner-token') return { token, user: owner };
+                if (token === 'date-outsider-token')
+                  return { token, user: outsider };
                 if (token === 'date-second-executor-token')
-                  return secondExecutor;
+                  return { token, user: secondExecutor };
 
                 throw new UnauthorizedException();
               },

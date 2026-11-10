@@ -11,14 +11,48 @@ import { Task } from '../tasks/model/task.model';
 import { WsGateway } from '../ws/ws.gateway';
 
 describe('BoardsService.getByProject', () => {
+  it.each([undefined, 'archived'] as const)(
+    'сохраняет columns и нулевые счётчики для пустых досок (%s)',
+    async archive => {
+      const plain = { id: 1, title: 'Пустая доска', columns: [] };
+      const boardRepository = {
+        count: jest.fn().mockResolvedValue(1),
+        findAll: jest.fn().mockResolvedValue([{ ...plain, toJSON: () => plain }])
+      };
+      const columnRepository = { findAll: jest.fn() };
+      const taskRepository = { findAll: jest.fn() };
+      const service = new BoardsService(
+        boardRepository as any,
+        columnRepository as any,
+        taskRepository as any,
+        {} as any,
+        { assertCanRead: jest.fn().mockResolvedValue(undefined) } as any
+      );
+
+      await expect(
+        service.getByProject(7, 42, { limit: 20, archive })
+      ).resolves.toEqual({
+        items: [{ ...plain, tasksCount: 0 }],
+        total: 1,
+        limit: 20,
+        offset: 0,
+        hasMore: false
+      });
+      expect(taskRepository.findAll).not.toHaveBeenCalled();
+      expect(columnRepository.findAll).not.toHaveBeenCalled();
+    }
+  );
+
   it('сохраняет проверку доступа и считает только верхнеуровневые задачи', async () => {
     const boards = [
       {
         id: 1,
+        columns: [{ id: 10 }, { id: 11 }],
         toJSON: () => ({ id: 1, title: 'Первая доска' })
       },
       {
         id: 2,
+        columns: [{ id: 20 }],
         toJSON: () => ({ id: 2, title: 'Вторая доска' })
       }
     ];
@@ -58,6 +92,7 @@ describe('BoardsService.getByProject', () => {
       { id: 2, title: 'Вторая доска', tasksCount: 3 }
     ]);
     expect(projectAccess.assertCanRead).toHaveBeenCalledWith(7, 42);
+    expect(columnRepository.findAll).not.toHaveBeenCalled();
     expect(taskRepository.findAll).toHaveBeenCalledWith(
       expect.objectContaining({
         where: {
@@ -74,6 +109,7 @@ describe('BoardsService.getByProject', () => {
     const boards = [
       {
         id: 2,
+        columns: [{ id: 20 }],
         toJSON: () => ({ id: 2, title: 'Вторая доска' })
       }
     ];

@@ -30,6 +30,8 @@ import type { TaskGanttSnapshot } from './interfaces/task-gantt.interface';
 import { PersonalTaskQueryDto } from './dto/personal-task-query.dto';
 import type { PersonalTaskPage } from './interfaces/personal-task.interface';
 import { ExecutorTaskQueryDto } from './dto/executor-task-query.dto';
+import { ExecutorWorkloadQueryDto } from './dto/executor-workload-query.dto';
+import type { ExecutorWorkloadTask } from './interfaces/executor-workload.interface';
 import { TaskTimeReportQueryDto } from './dto/task-time-report-query.dto';
 import type { TaskTimeReportPage } from './interfaces/task-time-report.interface';
 import { TimeReportPermissionGuard } from './time-report-permission.guard';
@@ -44,6 +46,18 @@ export class TasksController {
     private tasksService: TasksService,
     private readonly commentCounters: TaskCommentCountersService
   ) {}
+
+  /** Читает нормы задач с теми же правами и назначениями, что список ПЗ исполнителя. */
+  @ApiOperation({
+    summary: 'Загрузка исполнителей ERP по задачам досок за период'
+  })
+  @Get('tasks/executor-workload')
+  getExecutorWorkload(
+    @Query() query: ExecutorWorkloadQueryDto,
+    @CurrentUser() user: IUserDataToken
+  ): Promise<ExecutorWorkloadTask[]> {
+    return this.tasksService.getExecutorWorkload(user.id, query);
+  }
 
   /** Читает время только тех проектов, которые доступны текущему пользователю. */
   @ApiOperation({ summary: 'Фактическое время задач за период' })
