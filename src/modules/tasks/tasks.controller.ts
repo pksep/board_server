@@ -47,18 +47,6 @@ export class TasksController {
     private readonly commentCounters: TaskCommentCountersService
   ) {}
 
-  /** Читает нормы задач с теми же правами и назначениями, что список ПЗ исполнителя. */
-  @ApiOperation({
-    summary: 'Загрузка исполнителей ERP по задачам досок за период'
-  })
-  @Get('tasks/executor-workload')
-  getExecutorWorkload(
-    @Query() query: ExecutorWorkloadQueryDto,
-    @CurrentUser() user: IUserDataToken
-  ): Promise<ExecutorWorkloadTask[]> {
-    return this.tasksService.getExecutorWorkload(user.id, query);
-  }
-
   /** Читает время только тех проектов, которые доступны текущему пользователю. */
   @ApiOperation({ summary: 'Фактическое время задач за период' })
   @Get('tasks/time-report')
@@ -92,6 +80,19 @@ export class TasksController {
     );
 
     return page;
+  }
+
+  /** Статический маршрут предшествует tasks/:id и сохраняет доступ читателя сессии. */
+  @ApiOperation({
+    summary: 'Нормы задач исполнителей ERP за календарный период'
+  })
+  @Get('tasks/executor-workload')
+  getExecutorWorkload(
+    @Query() query: ExecutorWorkloadQueryDto,
+    @CurrentUser() user: IUserDataToken
+  ): Promise<ExecutorWorkloadTask[]> {
+    // ERP ID выбирают ресурсы, но не подменяют текущего пользователя.
+    return this.tasksService.getExecutorWorkload(user.id, query);
   }
 
   /** Пользователь берётся из сессии, а не из произвольного ID в фильтре. */
