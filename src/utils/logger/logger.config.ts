@@ -1,5 +1,10 @@
 import { Params } from 'nestjs-pino';
-import { randomUUID } from 'crypto';
+import {
+  beginHttpRequest,
+  getAuthDuration,
+  getHttpDuration,
+  getHttpRoute
+} from './http-performance';
 
 const isProd = process.env.NODE_ENV === 'production';
 const ignoredEndpoints = ['/health', '/metrics', '/favicon.ico'];
@@ -18,8 +23,7 @@ const loggerConfig: Params = {
     serializers: {
       req: req => ({
         id: req.id,
-        method: req.method,
-        url: req.url
+        method: req.method
       }),
       res: res => ({
         statusCode: res.statusCode
@@ -31,7 +35,23 @@ const loggerConfig: Params = {
       })
     },
     timestamp: () => `,"time":"${new Date().toISOString()}"`,
-    genReqId: req => req.headers['x-request-id'] || randomUUID(),
+    genReqId: beginHttpRequest,
+    customLogLevel: (req, res, error) =>
+      error || res.statusCode >= 500
+        ? 'error'
+        : res.statusCode >= 400 || getHttpDuration(req) >= 1000
+          ? 'warn'
+          : 'info',
+    customSuccessObject: (req, _res, value) => ({
+      ...value,
+      route: getHttpRoute(req),
+      authDuration: getAuthDuration(req)
+    }),
+    customErrorObject: (req, _res, _error, value) => ({
+      ...value,
+      route: getHttpRoute(req),
+      authDuration: getAuthDuration(req)
+    }),
     customProps: () => ({
       context: 'HTTP'
     }),
