@@ -6,6 +6,7 @@ export interface PersonalTaskLocation {
   projectId: number;
   projectPrefix: string;
   columnStatus: ColumnStatus | null;
+  attributesOwnerOnly?: boolean;
 }
 
 export interface PersonalTaskItem {
@@ -13,6 +14,7 @@ export interface PersonalTaskItem {
   projectId: number;
   projectPrefix: string;
   columnStatus: ColumnStatus | null;
+  attributesOwnerOnly?: boolean;
 }
 
 export interface PersonalTaskPage {

@@ -42,6 +42,8 @@ import {
 import { CreateTaskTimeEntryDto } from './dto/create-task-time-entry.dto';
 import { TaskGanttQueryDto } from './dto/task-gantt-query.dto';
 import { PersonalTaskQueryDto } from './dto/personal-task-query.dto';
+import { ExecutorWorkloadQueryDto } from './dto/executor-workload-query.dto';
+import type { ExecutorWorkloadTask } from './interfaces/executor-workload.interface';
 import { TaskTimeReportQueryDto } from './dto/task-time-report-query.dto';
 import type {
   TaskTimeReportEntry,
@@ -581,13 +583,13 @@ export class TasksService {
   /** Единая область личных списков и их счётчиков, включая доступ и архив каждого уровня. */
   private personalTaskSource(
     query: PersonalTaskQueryDto,
-    executorErpId?: string
+    hasExecutor = false
   ): string {
     // В ERP и Board разные PK: сопоставляем только подтверждённый erp_id.
-    const executorSource = executorErpId
-      ? `JOIN users executor ON executor.erp_id = :executorErpId AND executor.ban = false`
+    const executorSource = hasExecutor
+      ? `JOIN users executor ON executor.erp_id IN (:executorErpIds) AND executor.ban = false`
       : '';
-    const assignedUser = executorErpId ? 'executor.id' : ':userId';
+    const assignedUser = hasExecutor ? 'executor.id' : ':userId';
     const statusFilter = query.columnStatuses?.length
       ? ' AND col.status IN (:columnStatuses)'
       : query.columnStatus
@@ -605,12 +607,13 @@ export class TasksService {
            WHERE member.project_id = project.id AND member.user_id = :userId
          ))
          ${
-           executorErpId
+           hasExecutor
              ? `AND EXISTS (SELECT 1 FROM project_members executor_member
                   WHERE executor_member.project_id = project.id
                     AND executor_member.user_id = executor.id)
                 AND (board.members_ids IS NULL
-                  OR board.members_ids @> jsonb_build_array(executor.id))`
+                  OR board.members_ids @> jsonb_build_array(executor.id))
+                AND (col.status IS NULL OR col.status NOT IN ('completed', 'in_review', 'archived'))`
              : ''
          }
          AND ${
@@ -619,6 +622,48 @@ export class TasksService {
                  WHERE assignment.task_id = task.id AND assignment.user_id = ${assignedUser})`
              : 'task.created_by_id = :userId'
          }${statusFilter}`;
+  }
+
+  /** Возвращает лёгкие факты загрузки одной выборкой, сохраняя общую область доступа. */
+  async getExecutorWorkload(
+    userId: number,
+    query: ExecutorWorkloadQueryDto
+  ): Promise<ExecutorWorkloadTask[]> {
+    const start = new Date(query.start).getTime();
+    const end = new Date(query.end).getTime();
+
+    // Ограничиваем выборку периодом; полночь следующего дня не входит в текущую страницу.
+    if (
+      !Number.isFinite(start) ||
+      !Number.isFinite(end) ||
+      end <= start ||
+      end - start > 31 * 86400000
+    ) {
+      throw new HttpException(
+        'Период загрузки должен быть от 1 до 31 дня',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    return this.sequelize.query<ExecutorWorkloadTask>(
+      `SELECT executor.erp_id::integer AS "executorId", task.id AS "taskId",
+         project.id AS "projectId", project.title AS "projectName",
+         task.start_date AS "startDate", task.due_date AS "dueDate",
+         task.time_norm_minutes AS "timeNormMinutes"
+       ${this.personalTaskSource({ scope: 'assigned' }, true)}
+         AND ((task.start_date >= :start AND task.start_date < :end)
+           OR (task.due_date >= :start AND task.due_date < :end))
+       ORDER BY executor.erp_id, project.id, task.id`,
+      {
+        replacements: {
+          userId,
+          executorErpIds: query.erpUserIds.map(String),
+          start: new Date(start),
+          end: new Date(end)
+        },
+        type: QueryTypes.SELECT
+      }
+    );
   }
 
   /** Счётчик раздела учитывает все его задачи, а не только первую видимую страницу. */
@@ -663,14 +708,14 @@ export class TasksService {
     // Владелец или участник активного проекта: те же правила, что assertCanRead.
     // EXISTS не размножает задачу при нескольких участниках/назначениях.
     const locations = await this.sequelize.query<PersonalTaskLocation>(
-      `SELECT task.id, project.id AS "projectId", project.prefix AS "projectPrefix", col.status AS "columnStatus"
-       ${this.personalTaskSource(query, executorErpId)}
+      `SELECT task.id, project.id AS "projectId", project.prefix AS "projectPrefix", project.attributes_owner_only AS "attributesOwnerOnly", col.status AS "columnStatus"
+       ${this.personalTaskSource(query, !!executorErpId)}
        ORDER BY ${dateColumn} ${direction} NULLS LAST, task.id ASC
        LIMIT :limit OFFSET :offset`,
       {
         replacements: {
           userId,
-          executorErpId,
+          executorErpIds: executorErpId ? [executorErpId] : [],
           columnStatus: query.columnStatus,
           columnStatuses: query.columnStatuses,
           limit: limit + 1,
@@ -689,7 +734,7 @@ export class TasksService {
         'taskNumber',
         'title',
         // ПЗ показывает описание задачи; прежний личный список остаётся лёгким.
-        ...(executorErpId ? ['description'] : []),
+        ...(executorErpId ? ['description', 'linkedEntity'] : []),
         'createdById',
         'controllerIds',
         'responsibleIds',
@@ -719,7 +764,10 @@ export class TasksService {
               task,
               projectId: location.projectId,
               projectPrefix: location.projectPrefix,
-              columnStatus: location.columnStatus
+              columnStatus: location.columnStatus,
+              ...(executorErpId
+                ? { attributesOwnerOnly: location.attributesOwnerOnly }
+                : {})
             }
           ]
         : [];
