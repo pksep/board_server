@@ -38,6 +38,15 @@ export class ExecutorWorkloadQueryDto {
   start: string;
 
   @ApiProperty({
+    description:
+      'Начало всего выбранного периода: более ранние назначения включаются как задолженность',
+    required: false
+  })
+  @IsOptional()
+  @IsDateString({ strict: true })
+  debtBefore?: string;
+
+  @ApiProperty({
     description: 'Конец периода исключительно, ISO с часовым поясом'
   })
   @IsDateString({ strict: true })

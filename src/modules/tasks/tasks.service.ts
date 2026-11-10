@@ -643,13 +643,18 @@ export class TasksService {
   ): Promise<ExecutorWorkloadTask[]> {
     const start = new Date(query.start).getTime();
     const end = new Date(query.end).getTime();
+    const debtBefore = query.debtBefore
+      ? new Date(query.debtBefore).getTime()
+      : null;
 
     // Ограничиваем выборку периодом; полночь следующего дня не входит в текущую страницу.
     if (
       !Number.isFinite(start) ||
       !Number.isFinite(end) ||
       end <= start ||
-      end - start > 31 * 86400000
+      end - start > 31 * 86400000 ||
+      (debtBefore !== null &&
+        (!Number.isFinite(debtBefore) || debtBefore > start))
     ) {
       throw new HttpException(
         'Период загрузки должен быть от 1 до 31 дня',
@@ -661,17 +666,20 @@ export class TasksService {
       `SELECT executor.erp_id::integer AS "executorId", task.id AS "taskId",
          project.id AS "projectId", project.title AS "projectName",
          task.start_date AS "startDate", task.due_date AS "dueDate",
-         task.time_norm_minutes AS "timeNormMinutes"
+         task.time_norm_minutes AS "timeNormMinutes",
+         COALESCE(task.start_date < :debtBefore, false) AS "isDebt"
        ${this.personalTaskSource({ scope: 'assigned' }, true, !query.erpUserIds)}
          AND ((task.start_date >= :start AND task.start_date < :end)
-           OR (task.due_date >= :start AND task.due_date < :end))
+           OR (task.due_date >= :start AND task.due_date < :end)
+           OR task.start_date < :debtBefore)
        ORDER BY executor.erp_id, project.id, task.id`,
       {
         replacements: {
           userId,
           executorErpIds: query.erpUserIds?.map(String) ?? [],
           start: new Date(start),
-          end: new Date(end)
+          end: new Date(end),
+          debtBefore: debtBefore === null ? null : new Date(debtBefore)
         },
         type: QueryTypes.SELECT
       }

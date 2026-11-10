@@ -718,6 +718,81 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     );
   });
 
+  it('includes active debt before the selected range without turning earlier calendar pages into new debt', async (): Promise<void> => {
+    const erpUserId = 995000 + project.id;
+    await outsider.update({ erpId: String(erpUserId) });
+    await persist(ProjectMember.build(), {
+      projectId: project.id,
+      userId: outsider.id
+    });
+    await roots[0].update({
+      startDate: new Date('2026-11-01T09:00:00Z'),
+      dueDate: new Date('2026-11-02T18:00:00Z'),
+      timeNormMinutes: null
+    });
+    await roots[1].update({
+      startDate: new Date('2026-11-10T00:00:00Z'),
+      dueDate: new Date('2026-11-12T18:00:00Z')
+    });
+    const query = {
+      erpUserIds: String(erpUserId),
+      start: '2026-11-10T00:00:00Z',
+      end: '2026-11-24T00:00:00Z'
+    };
+
+    /** Читает долг через тот же HTTP endpoint и его настоящую валидацию. */
+    const readDebt = async (
+      start = query.start,
+      end = query.end
+    ): Promise<request.Response> =>
+      request(app.getHttpServer())
+        .get('/tasks/executor-workload')
+        .query({ ...query, start, end, debtBefore: query.start })
+        .auth('gantt-owner-token', { type: 'bearer' })
+        .expect(200);
+
+    const withoutDebt = await request(app.getHttpServer())
+      .get('/tasks/executor-workload')
+      .query(query)
+      .auth('gantt-owner-token', { type: 'bearer' })
+      .expect(200);
+    expect(withoutDebt.body.map(task => task.taskId)).toEqual([roots[1].id]);
+    expect(withoutDebt.body[0].isDebt).toBe(false);
+    const withDebt = await readDebt();
+    expect(withDebt.body.map(task => [task.taskId, task.isDebt])).toEqual([
+      [roots[0].id, true],
+      [roots[1].id, false]
+    ]);
+    const laterPage = await readDebt(
+      '2026-11-24T00:00:00Z',
+      '2026-12-08T00:00:00Z'
+    );
+    expect(laterPage.body.map(task => task.taskId)).toEqual([roots[0].id]);
+
+    // Долг не возвращает завершённые задачи, архивы и неактивных исполнителей.
+    for (const status of ['completed', 'in_review', 'archived']) {
+      await sequelize.query(
+        'UPDATE board_columns SET status = :status WHERE id = :id',
+        {
+          replacements: { status, id: columns[0].id }
+        }
+      );
+      expect((await readDebt()).body.map(task => task.taskId)).toEqual([
+        roots[1].id
+      ]);
+    }
+    await columns[0].reload();
+    await columns[0].update({ status: ColumnStatus.Queued });
+    await roots[0].destroy();
+    expect((await readDebt()).body.map(task => task.taskId)).toEqual([
+      roots[1].id
+    ]);
+    await roots[0].restore();
+    await outsider.update({ ban: true });
+    expect((await readDebt()).body).toEqual([]);
+    await outsider.update({ ban: false });
+  });
+
   it('validates bulk executor workload filters and requires authentication', async (): Promise<void> => {
     const valid = {
       erpUserIds: '71,72',
@@ -737,6 +812,8 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
         )
       },
       { start: 'bad' },
+      { debtBefore: 'bad' },
+      { debtBefore: '2026-11-07T00:00:00Z' },
       { end: valid.start },
       { end: '2026-11-05T00:00:00Z' },
       { end: '2027-01-01T00:00:00Z' }
