@@ -157,6 +157,9 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
   });
 
   beforeEach(async (): Promise<void> => {
+    // Общий пользователь меняет ERP ID между сценариями; старые проекты не относятся к новой фикстуре.
+    await ProjectMember.destroy({ where: { userId: outsider.id } });
+
     sequence += 1;
     const prefixIndex = sequence - 1;
     const prefixSuffix = String.fromCharCode(
@@ -285,7 +288,7 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     expect(result.total).toBe(4);
   });
 
-  it('reads ERP executor assignments across member boards, including subtasks, before pagination', async (): Promise<void> => {
+  it('reads ERP executor assignments across project boards, including subtasks, before pagination', async (): Promise<void> => {
     const erpUserId = 800000 + project.id;
     await outsider.update({ erpId: String(erpUserId) });
     await persist(ProjectMember.build(), {
@@ -317,7 +320,7 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     });
 
     const excludedBoard = await persist(Board.build(), {
-      title: 'Not a member',
+      title: 'Separate board roster',
       projectId: project.id,
       membersIds: []
     });
@@ -360,7 +363,7 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       rest.body.items.map(
         (item: PersonalTaskPage['items'][number]) => item.task.id
       )
-    ).toEqual([roots[1].id, subtask.id]);
+    ).toEqual([roots[1].id, subtask.id, excluded.id]);
     expect(rest.body.hasMore).toBe(false);
 
     // PK Board не является ID ERP; совпадение числа не должно раскрыть чужие назначения.
@@ -378,7 +381,15 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       .query({ erpUserId })
       .auth('gantt-owner-token', { type: 'bearer' })
       .expect(200);
-    expect(removed.body.items).toEqual([]);
+    expect(removed.body.items.map(item => item.task.id)).toEqual([
+      roots[0].id,
+      roots[1].id,
+      excluded.id
+    ]);
+
+    await ProjectMember.destroy({
+      where: { projectId: project.id, userId: outsider.id }
+    });
   });
 
   it('excludes finished and archived columns only from ERP executor tasks before pagination', async (): Promise<void> => {
@@ -436,8 +447,10 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       designation: 'Д-17'
     });
 
-    // Не оставляем назначения этого проекта доступными следующему тесту с тем же пользователем.
-    await board.update({ membersIds: [] });
+    // Следующий тест меняет ERP ID того же пользователя: убираем участие в старом проекте.
+    await ProjectMember.destroy({
+      where: { projectId: project.id, userId: outsider.id }
+    });
   });
 
   it('keeps reader access, project membership, archives and existing personal lists independent', async (): Promise<void> => {
@@ -604,8 +617,9 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
         ?.attributesOwnerOnly
     ).toBe(true);
 
+    // Состав доски не отменяет действующие назначения участников проекта.
     await board.update({ membersIds: [owner.id] });
-    expect((await readWorkload()).body).toHaveLength(1);
+    expect((await readWorkload()).body).toHaveLength(2);
     await board.update({ membersIds: null });
     await outsider.update({ ban: true });
     expect((await readWorkload()).body).toHaveLength(1);
@@ -646,6 +660,62 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     await board.restore();
     await project.destroy();
     expect((await readWorkload()).body).toEqual([]);
+  });
+
+  it('includes an assigned project member outside the board roster when start and due dates fall on different calendar pages', async (): Promise<void> => {
+    const erpUserId = 990000 + project.id;
+    await outsider.update({ erpId: String(erpUserId) });
+    await persist(ProjectMember.build(), {
+      projectId: project.id,
+      userId: outsider.id
+    });
+    await board.update({ membersIds: [owner.id] });
+    await roots[0].update({
+      startDate: new Date('2026-11-11T21:00:00Z'),
+      dueDate: new Date('2026-11-27T21:00:00Z'),
+      timeNormMinutes: 2640
+    });
+
+    // Назначение допустимо по каноническим правилам создания задачи.
+    await app
+      .get(ProjectAccessService)
+      .assertAssigneesBelongToProject(project.id, [outsider.id]);
+
+    for (const [start, end] of [
+      ['2026-11-09T21:00:00Z', '2026-11-23T21:00:00Z'],
+      ['2026-11-23T21:00:00Z', '2026-12-07T21:00:00Z']
+    ]) {
+      for (const filter of [{}, { erpUserIds: String(erpUserId) }]) {
+        const workload = await request(app.getHttpServer())
+          .get('/tasks/executor-workload')
+          .query({ start, end, ...filter })
+          .auth('gantt-owner-token', { type: 'bearer' })
+          .expect(200);
+        expect(workload.body).toEqual([
+          expect.objectContaining({
+            executorId: erpUserId,
+            taskId: roots[0].id,
+            projectId: project.id,
+            projectName: project.title,
+            timeNormMinutes: 2640
+          })
+        ]);
+      }
+    }
+
+    const executorTasks = await request(app.getHttpServer())
+      .get('/tasks/by-executor')
+      .query({ erpUserId })
+      .auth('gantt-owner-token', { type: 'bearer' })
+      .expect(200);
+    expect(executorTasks.body.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          projectId: project.id,
+          task: expect.objectContaining({ id: roots[0].id })
+        })
+      ])
+    );
   });
 
   it('validates bulk executor workload filters and requires authentication', async (): Promise<void> => {

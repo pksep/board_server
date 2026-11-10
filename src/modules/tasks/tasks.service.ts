@@ -611,6 +611,8 @@ export class TasksService {
         ? ' AND col.status = :columnStatus'
         : '';
 
+    // Назначение разрешено участнику проекта независимо от состава конкретной доски.
+    // Иначе созданная штатным API задача исчезает из загрузки и списка ПЗ исполнителя.
     return `FROM tasks task
        JOIN board_columns col ON col.id = task.column_id AND col."deletedAt" IS NULL
        JOIN boards board ON board.id = col.board_id AND board."deletedAt" IS NULL
@@ -623,8 +625,6 @@ export class TasksService {
              ? `AND EXISTS (SELECT 1 FROM project_members executor_member
                   WHERE executor_member.project_id = project.id
                     AND executor_member.user_id = executor.id)
-                AND (board.members_ids IS NULL
-                  OR board.members_ids @> jsonb_build_array(executor.id))
                 AND (col.status IS NULL OR col.status NOT IN ('completed', 'in_review', 'archived'))`
              : ''
          }
