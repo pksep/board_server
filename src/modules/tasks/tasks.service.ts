@@ -662,17 +662,39 @@ export class TasksService {
     const direction = query.sortDirection === 'desc' ? 'DESC' : 'ASC';
     // Владелец или участник активного проекта: те же правила, что assertCanRead.
     // EXISTS не размножает задачу при нескольких участниках/назначениях.
+    // Прогресс считаем для страницы в том же запросе, без фильтрации дочерних карточек по автору или назначению.
     const locations = await this.sequelize.query<PersonalTaskLocation>(
-      `SELECT task.id, project.id AS "projectId", project.prefix AS "projectPrefix", col.status AS "columnStatus"
-       ${this.personalTaskSource(query, executorErpId)}
-       ORDER BY ${dateColumn} ${direction} NULLS LAST, task.id ASC
-       LIMIT :limit OFFSET :offset`,
+      `WITH page AS (
+         SELECT task.id, task.parent_task_id AS "parentTaskId",
+           project.id AS "projectId", project.prefix AS "projectPrefix",
+           col.status AS "columnStatus", ${dateColumn} AS "sortDate"
+         ${this.personalTaskSource(query, executorErpId)}
+         ORDER BY ${dateColumn} ${direction} NULLS LAST, task.id ASC
+         LIMIT :limit OFFSET :offset
+       ), subtask_counts AS (
+         SELECT child.parent_task_id,
+           COUNT(*)::int AS total,
+           COUNT(*) FILTER (WHERE col.status = :completedStatus)::int AS completed
+         FROM tasks child
+         JOIN page parent ON parent.id = child.parent_task_id AND parent."parentTaskId" IS NULL
+         JOIN board_columns col ON col.id = child.column_id AND col."deletedAt" IS NULL
+         JOIN boards board ON board.id = col.board_id AND board."deletedAt" IS NULL
+         WHERE child."deletedAt" IS NULL
+         GROUP BY child.parent_task_id
+       )
+       SELECT page.id, page."projectId", page."projectPrefix", page."columnStatus",
+         json_build_object('total', COALESCE(counter.total, 0),
+           'completed', COALESCE(counter.completed, 0)) AS "subtaskCounter"
+       FROM page
+       LEFT JOIN subtask_counts counter ON counter.parent_task_id = page.id
+       ORDER BY page."sortDate" ${direction} NULLS LAST, page.id ASC`,
       {
         replacements: {
           userId,
           executorErpId,
           columnStatus: query.columnStatus,
           columnStatuses: query.columnStatuses,
+          completedStatus: ColumnStatus.Completed,
           limit: limit + 1,
           offset
         },
@@ -719,7 +741,8 @@ export class TasksService {
               task,
               projectId: location.projectId,
               projectPrefix: location.projectPrefix,
-              columnStatus: location.columnStatus
+              columnStatus: location.columnStatus,
+              subtaskCounter: location.subtaskCounter
             }
           ]
         : [];
