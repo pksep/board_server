@@ -6,6 +6,7 @@ import cookieParser = require('cookie-parser');
 import request = require('supertest');
 import { TasksController } from '../tasks.controller';
 import { TasksService } from '../tasks.service';
+import { TaskCommentCountersService } from '../../task-comment-counters/task-comment-counters.service';
 
 describe('Time report HTTP role permission', () => {
   let app: INestApplication;
@@ -21,6 +22,10 @@ describe('Time report HTTP role permission', () => {
       controllers: [TasksController],
       providers: [
         { provide: TasksService, useValue: { getTimeReport: report } },
+        {
+          provide: TaskCommentCountersService,
+          useValue: { attachToTasks: jest.fn() }
+        },
         {
           provide: ConfigService,
           useValue: new ConfigService({ erpApiUrl: 'http://erp.invalid/api/' })

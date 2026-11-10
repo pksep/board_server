@@ -100,6 +100,52 @@ describe('task comment counter gateway', () => {
     });
   });
 
+  it('embeds totals into every authorized task snapshot and nested child with one batch', async (): Promise<void> => {
+    const child = { id: 64, setDataValue: jest.fn() };
+    const parent = {
+      id: 151,
+      subtasks: [child],
+      setDataValue: jest.fn()
+    };
+    const flatChild = { id: 64, setDataValue: jest.fn() };
+    post.mockResolvedValue({
+      data: [
+        { entityId: 151, total: 5, unread: 0 },
+        { entityId: 64, total: 0, unread: 0 }
+      ]
+    });
+
+    await service.attachToTasks([parent, flatChild], session);
+
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0][1]).toEqual({
+      entityType: 'tasks',
+      entityIds: [151, 64],
+      markRead: false,
+      totalsOnly: true
+    });
+    expect(parent.setDataValue).toHaveBeenCalledWith('commentsCount', 5);
+    expect(child.setDataValue).toHaveBeenCalledWith('commentsCount', 0);
+    expect(flatChild.setDataValue).toHaveBeenCalledWith('commentsCount', 0);
+    // Канонический список уже проверил доступ; повторного чтения каждой задачи нет.
+    expect(tasks.assertCanReadTaskComments).not.toHaveBeenCalled();
+  });
+
+  it('does not query counters for an empty task page', async (): Promise<void> => {
+    await service.attachToTasks([], session);
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('does not fill task snapshots with zero when the count service fails', async (): Promise<void> => {
+    const task = { id: 151, setDataValue: jest.fn() };
+    post.mockRejectedValue(new Error('Unavailable'));
+
+    await expect(service.attachToTasks([task], session)).rejects.toMatchObject({
+      status: 503
+    });
+    expect(task.setDataValue).not.toHaveBeenCalled();
+  });
+
   it('checks access before marking, so a forged task ID cannot clear any state', async (): Promise<void> => {
     tasks.assertCanReadTaskComments.mockRejectedValue(
       new Error('Access denied')

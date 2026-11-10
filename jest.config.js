@@ -9,7 +9,7 @@ module.exports = {
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
   rootDir: './',
   roots: ['<rootDir>/src'],
-  testRegex: ['app.e2e-spec.ts', '.*\\.spec\\.ts$'],
+  testRegex: '.*\\.spec\\.ts$',
   transformIgnorePatterns: ['node_modules/(?!(mime)/)'],
   transform: {
     '^.+\\.(t|j)s$': [

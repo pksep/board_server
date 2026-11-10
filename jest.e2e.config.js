@@ -10,7 +10,7 @@ module.exports = {
   rootDir: './',
   roots: ['<rootDir>/src'],
   maxWorkers: '30%',
-  testRegex: 'app.e2e-spec.ts',
+  testRegex: '.*\\.integration\\.spec\\.ts$',
   transform: {
     '^.+\\.(t|j)s$': 'ts-jest'
   },
