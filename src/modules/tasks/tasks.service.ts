@@ -591,12 +591,19 @@ export class TasksService {
   /** Общие назначения и архивы; планирование не ограничивается проектами читателя. */
   private personalTaskSource(
     query: PersonalTaskQueryDto,
-    hasExecutor = false
+    hasExecutor = false,
+    allExecutors = false
   ): string {
     // В ERP и Board разные PK: сопоставляем только подтверждённый erp_id.
-    const executorSource = hasExecutor
-      ? `JOIN users executor ON executor.erp_id IN (:executorErpIds) AND executor.ban = false`
-      : '';
+    const executorSource = allExecutors
+      ? `JOIN task_assignees workload_assignment ON workload_assignment.task_id = task.id
+         JOIN users executor ON executor.id = workload_assignment.user_id
+           AND executor.ban = false
+           AND CASE WHEN executor.erp_id ~ '^[1-9][0-9]{0,9}$'
+             THEN executor.erp_id::bigint <= 2147483647 ELSE false END`
+      : hasExecutor
+        ? `JOIN users executor ON executor.erp_id IN (:executorErpIds) AND executor.ban = false`
+        : '';
     const assignedUser = hasExecutor ? 'executor.id' : ':userId';
     const statusFilter = query.columnStatuses?.length
       ? ' AND col.status IN (:columnStatuses)'
@@ -655,14 +662,14 @@ export class TasksService {
          project.id AS "projectId", project.title AS "projectName",
          task.start_date AS "startDate", task.due_date AS "dueDate",
          task.time_norm_minutes AS "timeNormMinutes"
-       ${this.personalTaskSource({ scope: 'assigned' }, true)}
+       ${this.personalTaskSource({ scope: 'assigned' }, true, !query.erpUserIds)}
          AND ((task.start_date >= :start AND task.start_date < :end)
            OR (task.due_date >= :start AND task.due_date < :end))
        ORDER BY executor.erp_id, project.id, task.id`,
       {
         replacements: {
           userId,
-          executorErpIds: query.erpUserIds.map(String),
+          executorErpIds: query.erpUserIds?.map(String) ?? [],
           start: new Date(start),
           end: new Date(end)
         },

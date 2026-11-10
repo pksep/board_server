@@ -7,25 +7,29 @@ import {
   IsArray,
   IsDateString,
   IsInt,
+  IsOptional,
   Min
 } from 'class-validator';
 
 /** Пакетное чтение загрузки ERP без запроса полного графа задач для каждого сотрудника. */
 export class ExecutorWorkloadQueryDto {
   @ApiProperty({
-    description: 'ERP ID исполнителей через запятую',
-    example: '39,71'
+    description:
+      'ERP ID исполнителей через запятую; без фильтра — все назначения за период',
+    example: '39,71',
+    required: false
   })
   @Transform(({ value }) =>
     typeof value === 'string' ? value.split(',').map(Number) : value
   )
+  @IsOptional()
   @IsArray()
   @ArrayNotEmpty()
   @ArrayMaxSize(500)
   @ArrayUnique()
   @IsInt({ each: true })
   @Min(1, { each: true })
-  erpUserIds: number[];
+  erpUserIds?: number[];
 
   @ApiProperty({
     description: 'Начало периода включительно, ISO с часовым поясом'

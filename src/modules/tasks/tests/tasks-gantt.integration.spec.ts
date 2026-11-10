@@ -585,6 +585,14 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     );
     expect(visible.body[0]).not.toHaveProperty('description');
 
+    // Нет списка ERP ID: планирование должно найти также сотрудников без ПЗ.
+    const allExecutors = await request(app.getHttpServer())
+      .get('/tasks/executor-workload')
+      .query({ start: query.start, end: query.end })
+      .auth('gantt-owner-token', { type: 'bearer' })
+      .expect(200);
+    expect(allExecutors.body).toEqual(visible.body);
+
     // Исходный endpoint исполнителя получает настройку прав для того же календаря карточки.
     const personal = await service.getPersonalTasks(
       owner.id,
@@ -756,6 +764,12 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
         timeNormMinutes: 60
       })
     ]);
+    const unfiltered = await request(app.getHttpServer())
+      .get('/tasks/executor-workload')
+      .query({ start: '2026-11-09T00:00:00Z', end: '2026-11-10T00:00:00Z' })
+      .auth('gantt-owner-token', { type: 'bearer' })
+      .expect(200);
+    expect(unfiltered.body).toEqual(workload.body);
     const personal = await service.getPersonalTasks(owner.id, {
       scope: 'assigned'
     });
