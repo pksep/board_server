@@ -721,7 +721,8 @@ export class TasksService {
     // Личный фильтр не скрывает дочерние задачи, архив и доступ остаются прежними.
     const locations = await this.sequelize.query<PersonalTaskLocation>(
       `WITH page AS MATERIALIZED (
-         SELECT task.id, project.id AS "projectId", project.prefix AS "projectPrefix",
+         SELECT task.id, task.parent_task_id AS "parentTaskId",
+           project.id AS "projectId", project.prefix AS "projectPrefix",
            project.attributes_owner_only AS "attributesOwnerOnly",
            col.status AS "columnStatus", ${dateColumn} AS "sortDate", COUNT(*) OVER()::int AS total
          ${this.personalTaskSource(query, executorErpId)}
@@ -731,7 +732,7 @@ export class TasksService {
          SELECT child.parent_task_id AS "taskId", COUNT(*)::int AS total,
            COUNT(*) FILTER (WHERE child_col.status = :completedStatus)::int AS completed
          FROM tasks child
-         JOIN page parent ON parent.id = child.parent_task_id
+         JOIN page parent ON parent.id = child.parent_task_id AND parent."parentTaskId" IS NULL
          JOIN board_columns child_col ON child_col.id = child.column_id AND child_col."deletedAt" IS NULL
          JOIN boards child_board ON child_board.id = child_col.board_id AND child_board."deletedAt" IS NULL
          JOIN projects child_project ON child_project.id = child_board.project_id AND child_project."deletedAt" IS NULL

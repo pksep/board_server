@@ -12,17 +12,18 @@ export interface PersonalTaskLocation {
   attributesOwnerOnly?: boolean;
 }
 
+/** Прогресс активных подзадач для общего компонента карточки. */
 export interface PersonalTaskSubtaskCounter {
   total: number;
   completed: number;
 }
 
 export interface PersonalTaskItem {
-  subtaskCounter: PersonalTaskSubtaskCounter;
   task: Task;
   projectId: number;
   projectPrefix: string;
   columnStatus: ColumnStatus | null;
+  subtaskCounter: PersonalTaskSubtaskCounter;
   attributesOwnerOnly?: boolean;
 }
 

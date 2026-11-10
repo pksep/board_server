@@ -15,6 +15,7 @@ import models from '../../../configs/models';
 import { TasksController } from '../tasks.controller';
 import { TimeReportPermissionGuard } from '../time-report-permission.guard';
 import { TasksService } from '../tasks.service';
+import { TaskCommentCountersService } from '../../task-comment-counters/task-comment-counters.service';
 import { Task } from '../model/task.model';
 import { TaskAssignee } from '../model/task-assignee.model';
 import { TaskAttachment } from '../model/task-attachment.model';
@@ -107,6 +108,10 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       controllers: [TasksController],
       providers: [
         TasksService,
+        {
+          provide: TaskCommentCountersService,
+          useValue: { attachToTasks: jest.fn() }
+        },
         ProjectAccessService,
         ActivityEventsService,
         ...models.map(model => ({
@@ -1120,6 +1125,67 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
 
     return response.body;
   }
+
+  it.each(['created', 'assigned'] as const)(
+    'returns subtask progress in the %s list independently of child ownership and filters',
+    async (scope): Promise<void> => {
+      for (let index = 0; index < 10; index += 1) {
+        await persist(Task.build(), {
+          title: `Progress child ${index}`,
+          taskNumber: 100 + index,
+          columnId: columns[index < 3 ? 2 : 0].id,
+          createdById: outsider.id,
+          parentTaskId: roots[0].id
+        });
+      }
+
+      // Архивные карточки и колонки не входят в прогресс активных подзадач.
+      const archivedChild = await persist(Task.build(), {
+        title: 'Archived child',
+        taskNumber: 110,
+        columnId: columns[2].id,
+        createdById: outsider.id,
+        parentTaskId: roots[0].id
+      });
+      await archivedChild.destroy();
+      const archivedColumn = await persist(BoardColumn.build(), {
+        boardId: board.id,
+        title: 'Archived progress column',
+        status: ColumnStatus.Completed
+      });
+      await persist(Task.build(), {
+        title: 'Child in archived column',
+        taskNumber: 111,
+        columnId: archivedColumn.id,
+        createdById: outsider.id,
+        parentTaskId: roots[0].id
+      });
+      await archivedColumn.destroy();
+
+      const page = await readPersonal({
+        scope,
+        limit: '100',
+        columnStatuses: [ColumnStatus.Queued]
+      });
+      const root = page.items.find(item => item.task.id === roots[0].id);
+      expect(root?.subtaskCounter).toEqual({ total: 10, completed: 3 });
+      expect(root?.task).not.toHaveProperty('subtasks');
+      expect(root?.task).not.toHaveProperty('attachments');
+
+      // Статус дочерней колонки определяет завершение, даже если она скрыта фильтром.
+      await columns[2].update({ status: ColumnStatus.InProgress });
+      const updated = await readPersonal({ scope, limit: '100' });
+      expect(
+        updated.items.find(item => item.task.id === roots[0].id)?.subtaskCounter
+      ).toEqual({ total: 10, completed: 0 });
+      if (scope === 'created') {
+        expect(
+          updated.items.find(item => item.task.id === roots[1].id)
+            ?.subtaskCounter
+        ).toEqual({ total: 0, completed: 0 });
+      }
+    }
+  );
 
   it('personal lists separate creator and assignee, include subtasks/undated/completed tasks and omit bodies/files', async (): Promise<void> => {
     roots[0].dueDate = null;

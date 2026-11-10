@@ -5,6 +5,7 @@ import { Sequelize } from 'sequelize-typescript';
 import request = require('supertest');
 import models from '../../../configs/models';
 import { TasksService } from '../tasks.service';
+import { TaskCommentCountersService } from '../../task-comment-counters/task-comment-counters.service';
 import { TasksController } from '../tasks.controller';
 import { TimeReportPermissionGuard } from '../time-report-permission.guard';
 import { ProjectAccessService } from '../../projects/project-access.service';
@@ -55,6 +56,10 @@ describeWithDatabase('Persisted task time report and project access', () => {
       controllers: [TasksController],
       providers: [
         TasksService,
+        {
+          provide: TaskCommentCountersService,
+          useValue: { attachToTasks: jest.fn() }
+        },
         ProjectAccessService,
         ...models.map(model => ({
           provide: getModelToken(model),
