@@ -23,6 +23,10 @@ export const getSequelizeConfig = ({
     const dbUrl = parseDatabaseUrl(
       configService.get<string>(ConfigConstains.database.url)
     );
+    const maxUses = Number(
+      configService.get<string>(ConfigConstains.database.poolMaxUses)
+    );
+
     return {
       dialect: 'postgres',
       host: dbUrl.host,
@@ -46,7 +50,7 @@ export const getSequelizeConfig = ({
         acquire: 60000,
         idle: 30000,
         evict: 10000,
-        maxUses: 30
+        maxUses: Number.isInteger(maxUses) && maxUses > 0 ? maxUses : 10000
       },
       retry: {
         max: 0

@@ -14,6 +14,8 @@ import { LoggerService } from './modules/logger/logger.service';
 import { AllExceptionsFilter } from './modules/logger/filters/all-exceptions.filter';
 import { json, urlencoded } from 'express';
 import { RedisIoAdapter } from './modules/ws/redis-io.adapter';
+import { HttpPerformanceInterceptor } from './modules/logger/http-performance.interceptor';
+import { HTTP_PERFORMANCE_EXPOSED_HEADERS } from './utils/logger/http-performance';
 
 (async () => {
   const app = await NestFactory.create(AppModule, {
@@ -48,7 +50,11 @@ import { RedisIoAdapter } from './modules/ws/redis-io.adapter';
   app.use(urlencoded({ extended: true, limit: '50mb' }));
 
   app.enableCors({
-    exposedHeaders: ['Content-Encoding', 'WWW-Authenticate'],
+    exposedHeaders: [
+      'Content-Encoding',
+      'WWW-Authenticate',
+      ...HTTP_PERFORMANCE_EXPOSED_HEADERS
+    ],
     origin: (origin, callback) => {
       if (isAllowAll) {
         callback(null, true);
@@ -83,6 +89,7 @@ import { RedisIoAdapter } from './modules/ws/redis-io.adapter';
 
   const logger = app.get(LoggerService);
   app.useGlobalFilters(new AllExceptionsFilter(logger));
+  app.useGlobalInterceptors(new HttpPerformanceInterceptor());
 
   app.useGlobalPipes(
     new ValidationPipe({

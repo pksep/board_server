@@ -11,28 +11,22 @@ import { UsersService } from './users.service';
 import { Public } from '../auth/public.decorator';
 import type {
   IBoardUserSyncData,
-  IErpUserCreateEvent,
   IErpUserCreatePayload
 } from './interfaces/erp-user-create-event.interface';
 
-const { ERP, wildcard } = require('@pksep/contracts');
-
-type EntityChangeEvent = any;
-type EntityDeleteEvent = any;
-type EntityBanEvent = any;
-type SyncableUserField =
-  | 'initial'
-  | 'login'
-  | 'serviceNumber'
-  | 'image'
-  | 'ban'
-  | 'role';
+import { ERP, wildcard } from '@pksep/contracts';
+import type {
+  IErpUserEvent,
+  IErpUserChangeEvent,
+  SyncableUserField
+} from './interfaces/erp-user-event.interface';
+import { isEventRecord, normalizeErpUserEvent } from './utils/erp-user-event';
 
 /**
  * Маппинг имён полей из ERP → Board User model.
  * ERP entity events содержат changeFields[].fieldName — названия полей в ERP.
  */
-const ERP_FIELD_MAP: Record<string, string> = {
+const ERP_FIELD_MAP: Record<string, SyncableUserField> = {
   initials: 'initial',
   initial: 'initial',
   nickname: 'login',
@@ -103,36 +97,38 @@ export class UserSyncConsumer {
     errorBehavior: MessageHandlerErrorBehavior.NACK
   })
   async handleUserEvent(
-    event:
-      | IErpUserCreateEvent
-      | EntityChangeEvent
-      | EntityDeleteEvent
-      | EntityBanEvent,
+    event: unknown,
     amqpMsg: { fields: { routingKey: string } }
   ): Promise<void> {
     // ERP публикует NestJS-конверт { pattern, data }; старые события приходят напрямую.
-    const routingKey = amqpMsg?.fields?.routingKey || event?.pattern || '';
-    event = event?.data ?? event;
+    const envelope = isEventRecord(event) ? event : {};
+    const routingKey =
+      amqpMsg?.fields?.routingKey ||
+      (typeof envelope.pattern === 'string' ? envelope.pattern : '');
+    event = envelope.data ?? event;
     const eventType = routingKey.split('.').pop(); // create | change | delete | ban
 
     this.logger.log(`Received user event: ${routingKey}`);
 
     try {
-      switch (eventType) {
+      if (!['create', 'change', 'delete', 'ban'].includes(eventType)) {
+        this.logger.warn(`Unknown user event type: ${eventType}`);
+        return;
+      }
+      const normalized = normalizeErpUserEvent(event, eventType);
+      switch (normalized.type) {
         case 'create':
-          await this.synchronizeUser((event as IErpUserCreateEvent).entity);
+          await this.synchronizeUser(normalized.entity);
           break;
         case 'change':
-          await this.handleChange(event as EntityChangeEvent);
+          await this.handleChange(normalized);
           break;
         case 'delete':
-          await this.handleDelete(event as EntityDeleteEvent);
+          await this.handleDelete(normalized);
           break;
         case 'ban':
-          await this.handleBan(event as EntityBanEvent);
+          await this.handleBan(normalized);
           break;
-        default:
-          this.logger.warn(`Unknown user event type: ${eventType}`);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -242,10 +238,9 @@ export class UserSyncConsumer {
   /**
    * user.change — обновить изменённые поля
    */
-  private async handleChange(event: EntityChangeEvent): Promise<void> {
+  private async handleChange(event: IErpUserChangeEvent): Promise<void> {
     const { id } = event.entity;
-    const changeFields =
-      event.entity.changedFields ?? event.entity.changeFields ?? [];
+    const changeFields = event.entity.changeFields;
     const erpId = String(id);
 
     const user = await this.userRepository.findOne({ where: { erpId } });
@@ -256,14 +251,12 @@ export class UserSyncConsumer {
 
     let changed = false;
     for (const field of changeFields) {
-      const boardField = ERP_FIELD_MAP[field.fieldName] as
-        | SyncableUserField
-        | undefined;
+      const boardField = ERP_FIELD_MAP[field.fieldName];
       if (!boardField) {
         continue;
       }
 
-      let nextValue: string | boolean | null = field.currentValue;
+      let nextValue: string | boolean | null;
 
       if (boardField === 'ban') {
         nextValue = getBoolean(field.currentValue);
@@ -275,9 +268,16 @@ export class UserSyncConsumer {
         continue;
       }
 
-      if ((user as any)[boardField] !== nextValue) {
-        (user as any)[boardField] = nextValue;
-        changed = true;
+      if (boardField === 'ban' && typeof nextValue === 'boolean') {
+        if (user.ban !== nextValue) {
+          user.ban = nextValue;
+          changed = true;
+        }
+      } else if (boardField !== 'ban' && typeof nextValue === 'string') {
+        if (user[boardField] !== nextValue) {
+          user[boardField] = nextValue;
+          changed = true;
+        }
       }
     }
 
@@ -294,7 +294,9 @@ export class UserSyncConsumer {
   /**
    * user.delete — soft delete пользователя
    */
-  private async handleDelete(event: EntityDeleteEvent): Promise<void> {
+  private async handleDelete(
+    event: Extract<IErpUserEvent, { type: 'delete' }>
+  ): Promise<void> {
     const erpId = String(event.entity.id);
 
     const user = await this.userRepository.findOne({ where: { erpId } });
@@ -313,7 +315,9 @@ export class UserSyncConsumer {
   /**
    * user.ban — переключить блокировку
    */
-  private async handleBan(event: EntityBanEvent): Promise<void> {
+  private async handleBan(
+    event: Extract<IErpUserEvent, { type: 'ban' }>
+  ): Promise<void> {
     const erpId = String(event.entity.id);
 
     const user = await this.userRepository.findOne({ where: { erpId } });
@@ -322,8 +326,7 @@ export class UserSyncConsumer {
       return;
     }
 
-    const banned =
-      getBoolean(event.entity.banned) ?? getBoolean(event.entity.ban);
+    const banned = event.entity.banned;
     if (banned === null)
       throw new Error('User ban event must contain a boolean state');
     user.ban = banned;
