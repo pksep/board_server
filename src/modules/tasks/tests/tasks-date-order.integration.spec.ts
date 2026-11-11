@@ -14,6 +14,7 @@ import type { Request } from 'express';
 import models from '../../../configs/models';
 import { TasksController } from '../tasks.controller';
 import { TimeReportPermissionGuard } from '../time-report-permission.guard';
+import { ExecutorPlanningPermissionGuard } from '../executor-planning-permission.guard';
 import { TasksService } from '../tasks.service';
 import { TaskCommentCountersService } from '../../task-comment-counters/task-comment-counters.service';
 import { Task } from '../model/task.model';
@@ -149,6 +150,8 @@ describeWithDatabase(
           }
         ]
       })
+        .overrideGuard(ExecutorPlanningPermissionGuard)
+        .useValue({ canActivate: (): boolean => true })
         .overrideGuard(TimeReportPermissionGuard)
         .useValue({ canActivate: (): boolean => true })
         .compile();

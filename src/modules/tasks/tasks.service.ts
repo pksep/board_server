@@ -580,43 +580,51 @@ export class TasksService {
     ];
   }
 
-  /** Единая область личных списков и их счётчиков, включая доступ и архив каждого уровня. */
+  /** Та же проверка владельца/участника, что ProjectAccessService.assertCanRead. */
+  private taskProjectReaderAccess(): string {
+    return `(project.created_by_id = :userId OR EXISTS (
+      SELECT 1 FROM project_members member
+      WHERE member.project_id = project.id AND member.user_id = :userId
+    ))`;
+  }
+
+  /** Общие назначения и архивы; планирование не ограничивается проектами читателя. */
   private personalTaskSource(
     query: PersonalTaskQueryDto,
-    executorErpId?: string | string[]
+    hasExecutor = false,
+    allExecutors = false
   ): string {
     // В ERP и Board разные PK: сопоставляем только подтверждённый erp_id.
-    const executorSource = executorErpId
-      ? `JOIN users executor ON executor.erp_id ${
-          Array.isArray(executorErpId)
-            ? 'IN (:executorErpIds)'
-            : '= :executorErpId'
-        } AND executor.ban = false`
-      : '';
-    const assignedUser = executorErpId ? 'executor.id' : ':userId';
+    const executorSource = allExecutors
+      ? `JOIN task_assignees workload_assignment ON workload_assignment.task_id = task.id
+         JOIN users executor ON executor.id = workload_assignment.user_id
+           AND executor.ban = false
+           AND CASE WHEN executor.erp_id ~ '^[1-9][0-9]{0,9}$'
+             THEN executor.erp_id::bigint <= 2147483647 ELSE false END`
+      : hasExecutor
+        ? `JOIN users executor ON executor.erp_id IN (:executorErpIds) AND executor.ban = false`
+        : '';
+    const assignedUser = hasExecutor ? 'executor.id' : ':userId';
     const statusFilter = query.columnStatuses?.length
       ? ' AND col.status IN (:columnStatuses)'
       : query.columnStatus
         ? ' AND col.status = :columnStatus'
         : '';
 
+    // Назначение разрешено участнику проекта независимо от состава конкретной доски.
+    // Иначе созданная штатным API задача исчезает из загрузки и списка ПЗ исполнителя.
     return `FROM tasks task
        JOIN board_columns col ON col.id = task.column_id AND col."deletedAt" IS NULL
        JOIN boards board ON board.id = col.board_id AND board."deletedAt" IS NULL
        JOIN projects project ON project.id = board.project_id AND project."deletedAt" IS NULL
        ${executorSource}
        WHERE task."deletedAt" IS NULL
-         AND (project.created_by_id = :userId OR EXISTS (
-           SELECT 1 FROM project_members member
-           WHERE member.project_id = project.id AND member.user_id = :userId
-         ))
+         ${hasExecutor ? '' : `AND ${this.taskProjectReaderAccess()}`}
          ${
-           executorErpId
+           hasExecutor
              ? `AND EXISTS (SELECT 1 FROM project_members executor_member
                   WHERE executor_member.project_id = project.id
                     AND executor_member.user_id = executor.id)
-                AND (board.members_ids IS NULL
-                  OR board.members_ids @> jsonb_build_array(executor.id))
                 AND (col.status IS NULL OR col.status NOT IN ('completed', 'in_review', 'archived'))`
              : ''
          }
@@ -628,23 +636,33 @@ export class TasksService {
          }${statusFilter}`;
   }
 
-  /** Читает нормы пакетом через общую область назначений, без карточек и побочных эффектов. */
+  /** Возвращает факты загрузки всех проектов после проверки права планирования в guard. */
   async getExecutorWorkload(
     userId: number,
     query: ExecutorWorkloadQueryDto
   ): Promise<ExecutorWorkloadTask[]> {
-    const start = new Date(query.start);
-    const end = new Date(query.end);
-    const span = end.getTime() - start.getTime();
+    const start = new Date(query.start).getTime();
+    const end = new Date(query.end).getTime();
+    const debtBefore = query.debtBefore
+      ? new Date(query.debtBefore).getTime()
+      : null;
 
-    if (!Number.isFinite(span) || span <= 0) {
+    // Ограничиваем выборку периодом; полночь следующего дня не входит в текущую страницу.
+    if (
+      !Number.isFinite(start) ||
+      !Number.isFinite(end) ||
+      end <= start ||
+      end - start > 31 * 86400000 ||
+      (debtBefore !== null &&
+        (!Number.isFinite(debtBefore) || debtBefore > start))
+    ) {
       throw new HttpException(
         'Конец периода должен быть позже начала',
         HttpStatus.BAD_REQUEST
       );
     }
 
-    const executorErpIds = [...new Set(query.erpUserIds)].map(String);
+    const executorErpIds = [...new Set(query.erpUserIds ?? [])].map(String);
 
     // EXISTS в общей выборке не удваивает норму при повторном назначении.
     // Отбираем начало ИЛИ готовность: клиент относит полную норму к каждому дню.
@@ -652,24 +670,21 @@ export class TasksService {
       `SELECT executor.erp_id::int AS "executorId", task.id AS "taskId",
          project.id AS "projectId", project.title AS "projectName",
          task.start_date AS "startDate", task.due_date AS "dueDate",
-         task.time_norm_minutes AS "timeNormMinutes"
-       ${this.personalTaskSource({ scope: 'assigned' }, executorErpIds)}
-         AND (col.status IS NULL OR col.status NOT IN (:inactiveStatuses))
-         AND task.time_norm_minutes > 0
+         task.time_norm_minutes AS "timeNormMinutes",
+         COALESCE(task.start_date < :debtBefore, false) AS "isDebt"
+       ${this.personalTaskSource({ scope: 'assigned' }, true, !query.erpUserIds)}
          AND ((task.start_date >= :start AND task.start_date < :end)
-           OR (task.due_date >= :start AND task.due_date < :end))
+           OR (task.due_date >= :start AND task.due_date < :end)
+           OR task.start_date < :debtBefore)
+         AND (task.time_norm_minutes > 0 OR task.start_date < :debtBefore)
        ORDER BY task.id, executor.erp_id::int`,
       {
         replacements: {
           userId,
           executorErpIds,
-          inactiveStatuses: [
-            ColumnStatus.Completed,
-            ColumnStatus.Archived,
-            'in_review'
-          ],
-          start,
-          end
+          start: new Date(start),
+          end: new Date(end),
+          debtBefore: debtBefore === null ? null : new Date(debtBefore)
         },
         type: QueryTypes.SELECT
       }
@@ -704,7 +719,7 @@ export class TasksService {
     await this.assertTaskAccess(taskId, userId, undefined, false, true);
   }
 
-  /** Читает порцию личного списка либо назначений исполнителя ERP с общими правами читателя. */
+  /** Личный список сохраняет доступ проекта; планирование возвращает его отдельным признаком. */
   async getPersonalTasks(
     userId: number,
     query: PersonalTaskQueryDto = {},
@@ -724,8 +739,18 @@ export class TasksService {
          SELECT task.id, task.parent_task_id AS "parentTaskId",
            project.id AS "projectId", project.prefix AS "projectPrefix",
            project.attributes_owner_only AS "attributesOwnerOnly",
-           col.status AS "columnStatus", ${dateColumn} AS "sortDate", COUNT(*) OVER()::int AS total
-         ${this.personalTaskSource(query, executorErpId)}
+           col.status AS "columnStatus", ${dateColumn} AS "sortDate", COUNT(*) OVER()::int AS total,
+           ${this.taskProjectReaderAccess()} AS "canReadTask"
+           ${
+             executorErpId
+               ? `, jsonb_build_object(
+             'projectTitle', project.title, 'boardId', board.id,
+             'boardTitle', board.title, 'columnTitle', col.title,
+             'taskAttributeDefinitions', project.task_attribute_definitions
+           ) AS "displayContext"`
+               : ''
+           }
+         ${this.personalTaskSource(query, !!executorErpId)}
          ORDER BY ${dateColumn} ${direction} NULLS LAST, task.id ASC
          LIMIT :limit OFFSET :offset
        ), subtask_counts AS (
@@ -751,7 +776,7 @@ export class TasksService {
         replacements: {
           userId,
           completedStatus: ColumnStatus.Completed,
-          executorErpId,
+          executorErpIds: executorErpId ? [executorErpId] : [],
           columnStatus: query.columnStatus,
           columnStatuses: query.columnStatuses,
           limit: limit + 1,
@@ -766,11 +791,11 @@ export class TasksService {
       const [count] =
         offset > 0
           ? await this.sequelize.query<{ total: number }>(
-              `SELECT COUNT(*)::int AS total ${this.personalTaskSource(query, executorErpId)}`,
+              `SELECT COUNT(*)::int AS total ${this.personalTaskSource(query, !!executorErpId)}`,
               {
                 replacements: {
                   userId,
-                  executorErpId,
+                  executorErpIds: executorErpId ? [executorErpId] : [],
                   columnStatus: query.columnStatus,
                   columnStatuses: query.columnStatuses
                 },
@@ -789,7 +814,9 @@ export class TasksService {
         'taskNumber',
         'title',
         // ПЗ показывает описание задачи; прежний личный список остаётся лёгким.
-        ...(executorErpId ? ['description', 'linkedEntity'] : []),
+        ...(executorErpId
+          ? ['description', 'linkedEntity', 'customAttributeValues']
+          : []),
         'createdById',
         'controllerIds',
         'responsibleIds',
@@ -810,6 +837,38 @@ export class TasksService {
       )
     });
     const byId = new Map(tasks.map(task => [task.id, task]));
+    // Подписи контроллеров/ответственных берём одним пакетом только для этих задач.
+    const participantIds = executorErpId
+      ? [
+          ...new Set(
+            tasks.flatMap(task => [
+              ...(task.controllerIds ?? [task.createdById]),
+              ...(task.responsibleIds ?? []),
+              ...task.assignees.map(assignment => assignment.userId),
+              ...Object.values(task.customAttributeValues ?? {}).flatMap(
+                value => (Array.isArray(value) ? value.map(Number) : [])
+              )
+            ])
+          )
+        ].filter(id => Number.isSafeInteger(id) && id > 0)
+      : [];
+    const parentIds = executorErpId
+      ? tasks.flatMap(task => (task.parentTaskId ? [task.parentTaskId] : []))
+      : [];
+    const [participants, parents] = await Promise.all([
+      participantIds.length
+        ? User.findAll({
+            attributes: ['id', 'login', 'initial', 'image'],
+            where: { id: { [Op.in]: participantIds } }
+          })
+        : Promise.resolve([]),
+      parentIds.length
+        ? this.taskRepository.findAll({
+            attributes: ['id', 'title', 'taskNumber', 'parentTaskId'],
+            where: { id: { [Op.in]: parentIds } }
+          })
+        : Promise.resolve([])
+    ]);
     const items = page.flatMap(location => {
       const task = byId.get(location.id);
 
@@ -825,7 +884,37 @@ export class TasksService {
                 completed: location.subtasksCompleted
               },
               ...(executorErpId
-                ? { attributesOwnerOnly: location.attributesOwnerOnly }
+                ? {
+                    attributesOwnerOnly: location.attributesOwnerOnly,
+                    canReadTask: location.canReadTask,
+                    ...(location.displayContext
+                      ? {
+                          displayContext: {
+                            ...location.displayContext,
+                            users: participants.filter(
+                              user =>
+                                (
+                                  task.controllerIds ?? [task.createdById]
+                                ).includes(user.id) ||
+                                task.responsibleIds?.includes(user.id) ||
+                                task.assignees.some(
+                                  assignment => assignment.userId === user.id
+                                ) ||
+                                Object.values(
+                                  task.customAttributeValues ?? {}
+                                ).some(
+                                  value =>
+                                    Array.isArray(value) &&
+                                    value.some(id => Number(id) === user.id)
+                                )
+                            ),
+                            parentTask: parents.find(
+                              parent => parent.id === task.parentTaskId
+                            )
+                          }
+                        }
+                      : {})
+                  }
                 : {})
             }
           ]
