@@ -21,6 +21,7 @@ import { TasksController } from '../../tasks/tasks.controller';
 import { TimeReportPermissionGuard } from '../../tasks/time-report-permission.guard';
 import { ExecutorPlanningPermissionGuard } from '../../tasks/executor-planning-permission.guard';
 import { TasksService } from '../../tasks/tasks.service';
+import { TaskCommentCountersService } from '../../task-comment-counters/task-comment-counters.service';
 import { Task } from '../../tasks/model/task.model';
 import { TaskAssignee } from '../../tasks/model/task-assignee.model';
 import { ActivityEventsService } from '../../activity-events/activity-events.service';
@@ -119,6 +120,10 @@ describeWithDatabase('Column status API with isolated PostgreSQL', () => {
         BoardsService,
         ProjectAccessService,
         TasksService,
+        {
+          provide: TaskCommentCountersService,
+          useValue: { attachToTasks: jest.fn() }
+        },
         ActivityEventsService,
         ...models.map(model => ({
           provide: getModelToken(model),

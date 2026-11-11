@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 import { SequelizeModule } from '@nestjs/sequelize';
 import { TasksController } from './tasks.controller';
 import { TasksService } from './tasks.service';
@@ -13,15 +14,18 @@ import { ProjectsModule } from '../projects/projects.module';
 import { ActivityEventsModule } from '../activity-events/activity-events.module';
 import { TimeReportPermissionGuard } from './time-report-permission.guard';
 import { ExecutorPlanningPermissionGuard } from './executor-planning-permission.guard';
+import { TaskCommentCountersService } from '../task-comment-counters/task-comment-counters.service';
 
 @Module({
   controllers: [TasksController],
   providers: [
     TasksService,
     TimeReportPermissionGuard,
-    ExecutorPlanningPermissionGuard
+    ExecutorPlanningPermissionGuard,
+    TaskCommentCountersService
   ],
   imports: [
+    ConfigModule,
     SequelizeModule.forFeature([
       Task,
       TaskAssignee,
@@ -34,6 +38,6 @@ import { ExecutorPlanningPermissionGuard } from './executor-planning-permission.
     ProjectsModule,
     ActivityEventsModule
   ],
-  exports: [TasksService]
+  exports: [TasksService, TaskCommentCountersService]
 })
 export class TasksModule {}

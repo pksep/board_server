@@ -15,6 +15,7 @@ import { TasksController } from '../../tasks/tasks.controller';
 import { TimeReportPermissionGuard } from '../../tasks/time-report-permission.guard';
 import { ExecutorPlanningPermissionGuard } from '../../tasks/executor-planning-permission.guard';
 import { TasksService } from '../../tasks/tasks.service';
+import { TaskCommentCountersService } from '../../task-comment-counters/task-comment-counters.service';
 import { Task } from '../../tasks/model/task.model';
 import { Board } from '../../boards/model/board.model';
 import { BoardColumn } from '../../columns/model/board-column.model';
@@ -135,6 +136,10 @@ describeWithDatabase(
         controllers: [TasksController, TaskActivityController],
         providers: [
           TasksService,
+          {
+            provide: TaskCommentCountersService,
+            useValue: { attachToTasks: jest.fn() }
+          },
           ProjectAccessService,
           ActivityEventsService,
           TaskActivityService,

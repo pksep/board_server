@@ -6,6 +6,7 @@ import cookieParser = require('cookie-parser');
 import request = require('supertest');
 import { TasksController } from '../tasks.controller';
 import { TasksService } from '../tasks.service';
+import { TaskCommentCountersService } from '../../task-comment-counters/task-comment-counters.service';
 
 describe('Executor planning HTTP role permission', () => {
   let app: INestApplication;
@@ -20,6 +21,10 @@ describe('Executor planning HTTP role permission', () => {
     const module = await Test.createTestingModule({
       controllers: [TasksController],
       providers: [
+        {
+          provide: TaskCommentCountersService,
+          useValue: { attachToTasks: jest.fn() }
+        },
         {
           provide: TasksService,
           useValue: {

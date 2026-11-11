@@ -3,15 +3,15 @@ import { Transform } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayNotEmpty,
-  ArrayUnique,
   IsArray,
-  IsDateString,
   IsInt,
   IsOptional,
+  IsISO8601,
   Min
 } from 'class-validator';
+import { parseNumberQueryList } from './task-list-query.dto';
 
-/** Пакетное чтение загрузки ERP без запроса полного графа задач для каждого сотрудника. */
+/** Пакет ресурсов ERP и полуоткрытый период видимых календарных дней. */
 export class ExecutorWorkloadQueryDto {
   @ApiProperty({
     description:
@@ -19,22 +19,17 @@ export class ExecutorWorkloadQueryDto {
     example: '39,71',
     required: false
   })
-  @Transform(({ value }) =>
-    typeof value === 'string' ? value.split(',').map(Number) : value
-  )
+  @Transform(({ value }) => parseNumberQueryList(value))
   @IsOptional()
   @IsArray()
   @ArrayNotEmpty()
-  @ArrayMaxSize(500)
-  @ArrayUnique()
+  @ArrayMaxSize(250)
   @IsInt({ each: true })
   @Min(1, { each: true })
   erpUserIds?: number[];
 
-  @ApiProperty({
-    description: 'Начало периода включительно, ISO с часовым поясом'
-  })
-  @IsDateString({ strict: true })
+  @ApiProperty({ description: 'Начало периода включительно, ISO 8601' })
+  @IsISO8601({ strict: true })
   start: string;
 
   @ApiProperty({
@@ -43,12 +38,12 @@ export class ExecutorWorkloadQueryDto {
     required: false
   })
   @IsOptional()
-  @IsDateString({ strict: true })
+  @IsISO8601({ strict: true })
   debtBefore?: string;
 
   @ApiProperty({
     description: 'Конец периода исключительно, ISO с часовым поясом'
   })
-  @IsDateString({ strict: true })
+  @IsISO8601({ strict: true })
   end: string;
 }
