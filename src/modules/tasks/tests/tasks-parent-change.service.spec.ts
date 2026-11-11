@@ -1,4 +1,4 @@
-import { HttpException, HttpStatus } from '@nestjs/common';
+import { HttpStatus } from '@nestjs/common';
 import { TasksService } from '../tasks.service';
 
 interface TestContextOptions {
@@ -129,7 +129,7 @@ describe('TasksService.update parent task', () => {
         { parentTaskId: context.parentTask.id },
         7
       )
-    ).rejects.toMatchObject<HttpException>({
+    ).rejects.toMatchObject({
       status: HttpStatus.BAD_REQUEST
     });
 
@@ -146,7 +146,7 @@ describe('TasksService.update parent task', () => {
         { parentTaskId: context.parentTask.id },
         7
       )
-    ).rejects.toMatchObject<HttpException>({
+    ).rejects.toMatchObject({
       status: HttpStatus.BAD_REQUEST
     });
 

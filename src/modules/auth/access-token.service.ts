@@ -15,6 +15,12 @@ import type { ICentralJwtHeader } from './interfaces/central-jwt-header.interfac
 import type { IErpCheckResponse } from './interfaces/erp-check-response.interface';
 import type { IExternalAuthUser } from './interfaces/external-auth-user.interface';
 import type { IUserDataToken } from './interfaces/interface';
+import type {
+  IAccessTokenRequest,
+  IAuthenticatedAccessToken,
+  IVerifiedAccessToken
+} from './interfaces/access-token-request.interface';
+import { getAccessTokenCandidates } from './utils/access-token-candidates';
 
 /** Проверяет общие access-токены и синхронизирует пользователя в Board. */
 @Injectable()
@@ -37,15 +43,70 @@ export class AccessTokenService {
     }
 
     const isCentral = this.isCentralToken(token);
-    const externalUser = isCentral
+    const externalUser = await this.verifyExternalUser(token, isCentral);
+
+    return this.syncBoardUser(externalUser, isCentral);
+  }
+
+  /** Selects the only locally verified credential, independently of cookie order. */
+  async authenticateRequest(
+    request: IAccessTokenRequest
+  ): Promise<IAuthenticatedAccessToken> {
+    const tokens = getAccessTokenCandidates(request);
+    let selected: IVerifiedAccessToken | undefined;
+
+    for (const token of tokens) {
+      // ERP and central access credentials are JWTs. A broken cookie cannot
+      // require an unrelated legacy authority just to establish it is invalid.
+      if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)) {
+        continue;
+      }
+
+      const isCentral = this.isCentralToken(token);
+      let externalUser: IExternalAuthUser;
+
+      try {
+        // Signature, issuer, audience, expiry and live session stay with the
+        // configured local authority. Decoded JWT claims never choose a user.
+        externalUser = await this.verifyExternalUser(token, isCentral);
+      } catch (error) {
+        if (error instanceof UnauthorizedException) continue;
+        // An unavailable authority cannot establish that a candidate is invalid.
+        throw error;
+      }
+
+      if (selected) {
+        throw new UnauthorizedException('Ambiguous access token cookies');
+      }
+
+      selected = { token, externalUser, isCentral };
+    }
+
+    if (!selected) {
+      throw new UnauthorizedException('Invalid or expired token');
+    }
+
+    // Resolve ambiguity before synchronizing any Board identity.
+    const user = await this.syncBoardUser(
+      selected.externalUser,
+      selected.isCentral
+    );
+
+    return { token: selected.token, user };
+  }
+
+  /** Reuses existing authority checks without updating a candidate's identity. */
+  private async verifyExternalUser(
+    token: string,
+    isCentral: boolean
+  ): Promise<IExternalAuthUser> {
+    const user = isCentral
       ? await this.introspectCentral(token)
       : await this.checkLegacyErp(token);
 
-    if (externalUser.ban) {
-      throw new UnauthorizedException('User is banned');
-    }
+    if (user.ban) throw new UnauthorizedException('User is banned');
 
-    return this.syncBoardUser(externalUser, isCentral);
+    return user;
   }
 
   toUserPayload(user: User): IUserDataToken {

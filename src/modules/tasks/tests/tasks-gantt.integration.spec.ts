@@ -10,10 +10,12 @@ import { Test } from '@nestjs/testing';
 import { Attributes, Model, QueryTypes } from 'sequelize';
 import { Sequelize } from 'sequelize-typescript';
 import request = require('supertest');
+import type { Request } from 'express';
 import models from '../../../configs/models';
 import { TasksController } from '../tasks.controller';
 import { TimeReportPermissionGuard } from '../time-report-permission.guard';
 import { TasksService } from '../tasks.service';
+import { TaskCommentCountersService } from '../../task-comment-counters/task-comment-counters.service';
 import { Task } from '../model/task.model';
 import { TaskAssignee } from '../model/task-assignee.model';
 import { TaskAttachment } from '../model/task-attachment.model';
@@ -30,6 +32,7 @@ import { AccessTokenService } from '../../auth/access-token.service';
 import type { IUserDataToken } from '../../auth/interfaces/interface';
 import type { TaskGanttSnapshot } from '../interfaces/task-gantt.interface';
 import type { PersonalTaskPage } from '../interfaces/personal-task.interface';
+import type { ExecutorWorkloadTask } from '../interfaces/executor-workload.interface';
 import { S3Service } from '../../s3/s3.service';
 import { WsGateway } from '../../ws/ws.gateway';
 
@@ -105,6 +108,10 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       controllers: [TasksController],
       providers: [
         TasksService,
+        {
+          provide: TaskCommentCountersService,
+          useValue: { attachToTasks: jest.fn() }
+        },
         ProjectAccessService,
         ActivityEventsService,
         ...models.map(model => ({
@@ -121,9 +128,14 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
           // Подменён только внешний обмен токена; общий guard и проверка проекта остаются настоящими.
           useValue: {
             isEnabled: (): boolean => true,
-            authenticate: async (token: string): Promise<User> => {
-              if (token === 'gantt-owner-token') return owner;
-              if (token === 'gantt-outsider-token') return outsider;
+            authenticateRequest: async (
+              req: Request
+            ): Promise<{ token: string; user: User }> => {
+              const token =
+                req.headers.authorization?.replace(/^Bearer /, '') ?? '';
+              if (token === 'gantt-owner-token') return { token, user: owner };
+              if (token === 'gantt-outsider-token')
+                return { token, user: outsider };
 
               throw new UnauthorizedException();
             },
@@ -149,9 +161,14 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
 
   beforeEach(async (): Promise<void> => {
     sequence += 1;
+    const prefixIndex = sequence - 1;
+    const prefixSuffix = String.fromCharCode(
+      65 + Math.floor(prefixIndex / 26),
+      65 + (prefixIndex % 26)
+    );
     project = await persist(Project.build(), {
       title: 'Gantt QA',
-      prefix: `GNTA${String.fromCharCode(64 + sequence)}`,
+      prefix: `GNT${prefixSuffix}`,
       createdById: owner.id
     });
     board = await persist(Board.build(), {
@@ -271,6 +288,38 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     expect(result.total).toBe(4);
   });
 
+  it('returns the current column color after task moves, color changes and clearing', async (): Promise<void> => {
+    await columns[0].update({ color: 'var(--calendar-pink-stroke)' });
+    await columns[1].update({ color: 'var(--taskboard-blue-bg)' });
+
+    let result = await read();
+    expect(
+      result.items.find(item => item.id === roots[0].id)?.columnColor
+    ).toBe('var(--calendar-pink-stroke)');
+    expect(
+      result.items.find(item => item.id === roots[2].id)?.columnColor
+    ).toBeNull();
+
+    // Цвет берётся из текущей колонки, а не копируется в задачу при её создании.
+    await roots[0].update({ columnId: columns[1].id });
+    result = await read();
+    expect(
+      result.items.find(item => item.id === roots[0].id)?.columnColor
+    ).toBe('var(--taskboard-blue-bg)');
+
+    await columns[1].update({ color: 'var(--status-warning)' });
+    result = await read();
+    expect(
+      result.items.find(item => item.id === roots[0].id)?.columnColor
+    ).toBe('var(--status-warning)');
+
+    await columns[1].update({ color: '' });
+    result = await read();
+    expect(
+      result.items.find(item => item.id === roots[0].id)?.columnColor
+    ).toBe('');
+  });
+
   it('reads ERP executor assignments across member boards, including subtasks, before pagination', async (): Promise<void> => {
     const erpUserId = 800000 + project.id;
     await outsider.update({ erpId: String(erpUserId) });
@@ -367,6 +416,65 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     expect(removed.body.items).toEqual([]);
   });
 
+  it('excludes finished and archived columns only from ERP executor tasks before pagination', async (): Promise<void> => {
+    const erpUserId = 850000 + project.id;
+    await outsider.update({ erpId: String(erpUserId) });
+    await persist(ProjectMember.build(), {
+      projectId: project.id,
+      userId: outsider.id
+    });
+    await board.update({ membersIds: [outsider.id] });
+    await roots[0].update({
+      timeNormMinutes: 90,
+      linkedEntity: {
+        type: 'detal',
+        id: 17,
+        name: 'Деталь',
+        designation: 'Д-17'
+      }
+    });
+
+    // Самые ранние задачи не должны занимать первую страницу активных назначений.
+    await columns[0].update({ status: 'completed' });
+    const completed = await service.getPersonalTasks(
+      owner.id,
+      { scope: 'assigned', limit: 1 },
+      String(erpUserId)
+    );
+    expect(completed.items.map(item => item.task.id)).toEqual([roots[1].id]);
+    expect(completed.hasMore).toBe(false);
+    const personal = await service.getPersonalTasks(outsider.id, {
+      scope: 'assigned'
+    });
+    expect(personal.items.map(item => item.task.id)).toContain(roots[0].id);
+
+    await columns[0].update({ status: 'archived' });
+    const archived = await service.getPersonalTasks(
+      owner.id,
+      { scope: 'assigned' },
+      String(erpUserId)
+    );
+    expect(archived.items.map(item => item.task.id)).toEqual([roots[1].id]);
+
+    // Снятие статуса возвращает задачу с её настоящей связью и нормой времени.
+    await columns[0].update({ status: null });
+    const active = await service.getPersonalTasks(
+      owner.id,
+      { scope: 'assigned' },
+      String(erpUserId)
+    );
+    expect(active.items[0].task.timeNormMinutes).toBe(90);
+    expect(active.items[0].task.linkedEntity).toEqual({
+      type: 'detal',
+      id: 17,
+      name: 'Деталь',
+      designation: 'Д-17'
+    });
+
+    // Не оставляем назначения этого проекта доступными следующему тесту с тем же пользователем.
+    await board.update({ membersIds: [] });
+  });
+
   it('keeps reader access, project membership, archives and existing personal lists independent', async (): Promise<void> => {
     const erpUserId = 900000 + project.id;
     await outsider.update({ erpId: String(erpUserId) });
@@ -456,6 +564,331 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       .get('/tasks/by-executor')
       .query({ erpUserId: 1 })
       .expect(401);
+  });
+
+  describe('Executor workload API', () => {
+    afterEach(async (): Promise<void> => {
+      // Пакет охватывает все проекты: изолируем нормы предыдущего сценария.
+      await project.destroy();
+      await outsider.update({ ban: false });
+    });
+
+    /** Читает пакет загрузки через настоящие маршрутизацию, авторизацию и SQL. */
+    async function readExecutorWorkload(
+      erpUserIds: number[],
+      userToken = 'gantt-owner-token'
+    ): Promise<ExecutorWorkloadTask[]> {
+      const response = await request(app.getHttpServer())
+        .get('/tasks/executor-workload')
+        .query({
+          erpUserIds: erpUserIds.join(','),
+          start: '2026-10-01T00:00:00Z',
+          end: '2026-10-05T00:00:00Z'
+        })
+        .auth(userToken, { type: 'bearer' })
+        .expect(200);
+
+      return response.body;
+    }
+
+    it('executor workload returns ERP assignments once per task, including subtasks and all selected executors', async (): Promise<void> => {
+      const erpIds = [700001, 700002];
+      await owner.update({ erpId: String(erpIds[0]) });
+      await outsider.update({ erpId: String(erpIds[1]) });
+      for (const user of [owner, outsider]) {
+        await persist(ProjectMember.build(), {
+          projectId: project.id,
+          userId: user.id
+        });
+      }
+      await roots[0].update({ timeNormMinutes: 60 });
+      await roots[1].update({ timeNormMinutes: 90 });
+      await roots[2].update({ timeNormMinutes: 120 });
+      const child = await persist(Task.build(), {
+        title: 'Workload subtask',
+        taskNumber: 52,
+        columnId: columns[0].id,
+        parentTaskId: roots[2].id,
+        createdById: owner.id,
+        startDate: new Date('2026-10-02T00:00:00Z'),
+        dueDate: null,
+        timeNormMinutes: 30
+      });
+      await persist(TaskAssignee.build(), {
+        taskId: child.id,
+        userId: outsider.id
+      });
+      // Повторное назначение не должно удваивать норму в календаре.
+      await persist(TaskAssignee.build(), {
+        taskId: roots[0].id,
+        userId: outsider.id
+      });
+
+      const result = await readExecutorWorkload([...erpIds, erpIds[1]]);
+      expect(result).toEqual([
+        {
+          executorId: erpIds[0],
+          taskId: roots[0].id,
+          projectId: project.id,
+          projectName: project.title,
+          startDate: '2026-10-01T00:00:00.000Z',
+          dueDate: '2026-10-04T00:00:00.000Z',
+          timeNormMinutes: 60
+        },
+        {
+          executorId: erpIds[1],
+          taskId: roots[0].id,
+          projectId: project.id,
+          projectName: project.title,
+          startDate: '2026-10-01T00:00:00.000Z',
+          dueDate: '2026-10-04T00:00:00.000Z',
+          timeNormMinutes: 60
+        },
+        expect.objectContaining({
+          executorId: erpIds[1],
+          taskId: roots[1].id,
+          timeNormMinutes: 90
+        }),
+        expect.objectContaining({
+          executorId: erpIds[1],
+          taskId: child.id,
+          dueDate: null,
+          timeNormMinutes: 30
+        })
+      ]);
+    });
+
+    it('executor workload preserves reader access, ERP mapping, project and board membership and banned-user filtering', async (): Promise<void> => {
+      const erpId = 700003;
+      await outsider.update({ erpId: String(erpId) });
+      await roots[0].update({ timeNormMinutes: 60 });
+      expect(await readExecutorWorkload([erpId])).toEqual([]);
+      const membership = await persist(ProjectMember.build(), {
+        projectId: project.id,
+        userId: outsider.id
+      });
+      expect(await readExecutorWorkload([erpId])).toHaveLength(1);
+      expect(
+        await service.getExecutorWorkload(0, {
+          erpUserIds: [erpId],
+          start: '2026-10-01T00:00:00Z',
+          end: '2026-10-05T00:00:00Z'
+        })
+      ).toEqual([]);
+      expect(await readExecutorWorkload([outsider.id])).toEqual([]);
+      await membership.destroy();
+      expect(
+        await readExecutorWorkload([erpId], 'gantt-outsider-token')
+      ).toEqual([]);
+      await persist(ProjectMember.build(), {
+        projectId: project.id,
+        userId: outsider.id
+      });
+      await board.update({ membersIds: [] });
+      expect(await readExecutorWorkload([erpId])).toEqual([]);
+      await board.update({ membersIds: [outsider.id] });
+      expect(await readExecutorWorkload([erpId])).toHaveLength(1);
+      await outsider.update({ ban: true });
+      expect(await readExecutorWorkload([erpId])).toEqual([]);
+      await outsider.update({ ban: false });
+    });
+
+    it('executor workload includes either date inside the half-open range and excludes inactive statuses and absent norms', async (): Promise<void> => {
+      const erpId = 700004;
+      await outsider.update({ erpId: String(erpId) });
+      await persist(ProjectMember.build(), {
+        projectId: project.id,
+        userId: outsider.id
+      });
+      await roots[0].update({
+        timeNormMinutes: 60,
+        startDate: new Date('2026-09-30T23:59:59Z'),
+        dueDate: new Date('2026-10-01T00:00:00Z')
+      });
+      expect(await readExecutorWorkload([erpId])).toHaveLength(1);
+      await roots[0].update({
+        startDate: new Date('2026-10-05T00:00:00Z'),
+        dueDate: null
+      });
+      expect(await readExecutorWorkload([erpId])).toEqual([]);
+      await roots[0].update({ startDate: new Date('2026-10-01T00:00:00Z') });
+      expect(await readExecutorWorkload([erpId])).toHaveLength(1);
+      for (const status of ['completed', 'in_review', 'archived']) {
+        // Старое значение могло остаться в БД, но уже запрещено моделью записи.
+        await sequelize.query(
+          'UPDATE board_columns SET status = :status WHERE id = :id',
+          { replacements: { status, id: columns[0].id } }
+        );
+        expect(await readExecutorWorkload([erpId])).toEqual([]);
+      }
+      await columns[0].update({ status: null });
+      expect(await readExecutorWorkload([erpId])).toHaveLength(1);
+      await roots[0].update({ timeNormMinutes: null });
+      expect(await readExecutorWorkload([erpId])).toEqual([]);
+    });
+
+    it('executor workload excludes archived tasks, columns, boards and projects', async (): Promise<void> => {
+      const erpId = 700005;
+      await outsider.update({ erpId: String(erpId) });
+      await persist(ProjectMember.build(), {
+        projectId: project.id,
+        userId: outsider.id
+      });
+      await roots[0].update({ timeNormMinutes: 60 });
+      for (const record of [roots[0], columns[0], board, project]) {
+        expect(await readExecutorWorkload([erpId])).toHaveLength(1);
+        await record.destroy();
+        expect(await readExecutorWorkload([erpId])).toEqual([]);
+        await record.restore();
+      }
+    });
+
+    it('executor workload validates IDs and dates, supports a full batch and requires authentication', async (): Promise<void> => {
+      const query = {
+        erpUserIds: '700006',
+        start: '2026-11-08T19:00:00.000Z',
+        end: '2026-11-22T19:00:00.000Z'
+      };
+      for (const invalid of [
+        { erpUserIds: '' },
+        { erpUserIds: '0' },
+        { erpUserIds: 'abc' },
+        { erpUserIds: '1.5' },
+        { erpUserIds: Array.from({ length: 251 }, (_, i) => i + 1).join(',') },
+        { start: '' },
+        { start: '2026-02-30T00:00:00Z' },
+        { end: 'invalid' },
+        { end: query.start },
+        { end: '2026-11-01T00:00:00Z' }
+      ]) {
+        await request(app.getHttpServer())
+          .get('/tasks/executor-workload')
+          .query({ ...query, ...invalid })
+          .auth('gantt-owner-token', { type: 'bearer' })
+          .expect(400);
+      }
+      await request(app.getHttpServer())
+        .get('/tasks/executor-workload')
+        .query({ start: query.start, end: query.end })
+        .auth('gantt-owner-token', { type: 'bearer' })
+        .expect(400);
+      await request(app.getHttpServer())
+        .get('/tasks/executor-workload')
+        .query(query)
+        .expect(401);
+      expect(
+        await readExecutorWorkload(
+          Array.from({ length: 250 }, (_, index) => 710000 + index)
+        )
+      ).toEqual([]);
+    });
+
+    it('reads bulk workload with full norms per executor, half-open dates and the canonical access/archive rules', async (): Promise<void> => {
+      const ids = [970000 + project.id * 2, 970001 + project.id * 2];
+      await owner.update({ erpId: String(ids[0]) });
+      await outsider.update({ erpId: String(ids[1]) });
+
+      for (const user of [owner, outsider]) {
+        await persist(ProjectMember.build(), {
+          projectId: project.id,
+          userId: user.id
+        });
+      }
+
+      await roots[0].update({
+        startDate: new Date('2026-11-06T00:00:00Z'),
+        dueDate: new Date('2026-11-07T23:59:59Z'),
+        timeNormMinutes: 60
+      });
+      // Ровно правая граница не должна попасть ни по началу, ни по готовности.
+      await roots[1].update({
+        startDate: new Date('2026-11-08T00:00:00Z'),
+        dueDate: new Date('2026-11-08T12:00:00Z'),
+        timeNormMinutes: 30
+      });
+      const query = {
+        erpUserIds: ids.join(','),
+        start: '2026-11-06T00:00:00Z',
+        end: '2026-11-08T00:00:00Z'
+      };
+
+      /** Читает реальный HTTP endpoint с общей авторизацией и валидацией DTO. */
+      const readWorkload = async (): Promise<request.Response> =>
+        request(app.getHttpServer())
+          .get('/tasks/executor-workload')
+          .query(query)
+          .auth('gantt-owner-token', { type: 'bearer' })
+          .expect(200);
+
+      const visible = await readWorkload();
+      expect(visible.body).toHaveLength(2);
+      expect(visible.body).toEqual(
+        expect.arrayContaining(
+          ids.map(executorId =>
+            expect.objectContaining({
+              executorId,
+              taskId: roots[0].id,
+              timeNormMinutes: 60,
+              projectId: project.id,
+              projectName: project.title
+            })
+          )
+        )
+      );
+      expect(visible.body[0]).not.toHaveProperty('description');
+
+      // Исходный endpoint исполнителя получает настройку прав для того же календаря карточки.
+      const personal = await service.getPersonalTasks(
+        owner.id,
+        { scope: 'assigned' },
+        String(ids[0])
+      );
+      expect(
+        personal.items.find(item => item.task.id === roots[0].id)
+          ?.attributesOwnerOnly
+      ).toBe(true);
+
+      await board.update({ membersIds: [owner.id] });
+      expect((await readWorkload()).body).toHaveLength(1);
+      await board.update({ membersIds: null });
+      await outsider.update({ ban: true });
+      expect((await readWorkload()).body).toHaveLength(1);
+      await outsider.update({ ban: false });
+
+      await ProjectMember.destroy({
+        where: { projectId: project.id, userId: outsider.id }
+      });
+      const hidden = await request(app.getHttpServer())
+        .get('/tasks/executor-workload')
+        .query(query)
+        .auth('gantt-outsider-token', { type: 'bearer' })
+        .expect(200);
+      expect(hidden.body).toEqual([]);
+
+      for (const status of ['completed', 'in_review', 'archived']) {
+        // Legacy in_review присутствует в старых данных, хотя больше не предлагается в UI.
+        await sequelize.query(
+          'UPDATE board_columns SET status = :status WHERE id = :id',
+          { replacements: { status, id: columns[0].id } }
+        );
+        expect((await readWorkload()).body).toEqual([]);
+      }
+
+      await columns[0].reload();
+      await columns[0].update({ status: ColumnStatus.Queued });
+      expect((await readWorkload()).body).toHaveLength(1);
+      await roots[0].destroy();
+      expect((await readWorkload()).body).toEqual([]);
+      await roots[0].restore();
+      await columns[0].destroy();
+      expect((await readWorkload()).body).toEqual([]);
+      await columns[0].restore();
+      await board.destroy();
+      expect((await readWorkload()).body).toEqual([]);
+      await board.restore();
+      await project.destroy();
+      expect((await readWorkload()).body).toEqual([]);
+    });
   });
 
   it('uses OR for multiple assignees without duplicates and retains every assignment', async (): Promise<void> => {
@@ -681,7 +1114,7 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
 
   /** Личные списки проверяются тем же HTTP-контуром, без отдельного обхода авторизации. */
   async function readPersonal(
-    query: Record<string, string> = {},
+    query: Record<string, string | string[]> = {},
     token = 'gantt-owner-token'
   ): Promise<PersonalTaskPage> {
     const response = await request(app.getHttpServer())
@@ -692,6 +1125,67 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
 
     return response.body;
   }
+
+  it.each(['created', 'assigned'] as const)(
+    'returns subtask progress in the %s list independently of child ownership and filters',
+    async (scope): Promise<void> => {
+      for (let index = 0; index < 10; index += 1) {
+        await persist(Task.build(), {
+          title: `Progress child ${index}`,
+          taskNumber: 100 + index,
+          columnId: columns[index < 3 ? 2 : 0].id,
+          createdById: outsider.id,
+          parentTaskId: roots[0].id
+        });
+      }
+
+      // Архивные карточки и колонки не входят в прогресс активных подзадач.
+      const archivedChild = await persist(Task.build(), {
+        title: 'Archived child',
+        taskNumber: 110,
+        columnId: columns[2].id,
+        createdById: outsider.id,
+        parentTaskId: roots[0].id
+      });
+      await archivedChild.destroy();
+      const archivedColumn = await persist(BoardColumn.build(), {
+        boardId: board.id,
+        title: 'Archived progress column',
+        status: ColumnStatus.Completed
+      });
+      await persist(Task.build(), {
+        title: 'Child in archived column',
+        taskNumber: 111,
+        columnId: archivedColumn.id,
+        createdById: outsider.id,
+        parentTaskId: roots[0].id
+      });
+      await archivedColumn.destroy();
+
+      const page = await readPersonal({
+        scope,
+        limit: '100',
+        columnStatuses: [ColumnStatus.Queued]
+      });
+      const root = page.items.find(item => item.task.id === roots[0].id);
+      expect(root?.subtaskCounter).toEqual({ total: 10, completed: 3 });
+      expect(root?.task).not.toHaveProperty('subtasks');
+      expect(root?.task).not.toHaveProperty('attachments');
+
+      // Статус дочерней колонки определяет завершение, даже если она скрыта фильтром.
+      await columns[2].update({ status: ColumnStatus.InProgress });
+      const updated = await readPersonal({ scope, limit: '100' });
+      expect(
+        updated.items.find(item => item.task.id === roots[0].id)?.subtaskCounter
+      ).toEqual({ total: 10, completed: 0 });
+      if (scope === 'created') {
+        expect(
+          updated.items.find(item => item.task.id === roots[1].id)
+            ?.subtaskCounter
+        ).toEqual({ total: 0, completed: 0 });
+      }
+    }
+  );
 
   it('personal lists separate creator and assignee, include subtasks/undated/completed tasks and omit bodies/files', async (): Promise<void> => {
     roots[0].dueDate = null;
@@ -745,12 +1239,86 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     ).toMatchObject({ projectId: project.id, projectPrefix: project.prefix });
   });
 
-  it.each([ColumnStatus.InReview, ColumnStatus.Archived])(
+  it('personal rows return totals and all active direct subtask counters before filtering and pagination', async (): Promise<void> => {
+    const children: Task[] = [];
+    for (const [index, column] of [
+      columns[0],
+      columns[2],
+      columns[2]
+    ].entries()) {
+      children.push(
+        await persist(Task.build(), {
+          title: `Counter child ${index}`,
+          taskNumber: 100 + index,
+          createdById: outsider.id,
+          parentTaskId: roots[0].id,
+          columnId: column.id
+        })
+      );
+    }
+    await children[2].destroy();
+    const page = await readPersonal({
+      scope: 'created',
+      limit: '1',
+      columnStatuses: 'queued'
+    });
+    const queued = await readPersonal({
+      scope: 'created',
+      columnStatuses: 'queued',
+      limit: '100'
+    });
+    expect(page.total).toBe(queued.items.length);
+    expect(page.hasMore).toBe(queued.items.length > 1);
+    const root = queued.items.find(item => item.task.id === roots[0].id)!;
+    expect(root.subtaskCounter).toEqual({ total: 2, completed: 1 });
+    expect(root.task).not.toHaveProperty('subtasks');
+    const all = await readPersonal({ scope: 'created', limit: '1' });
+    const allRows = await readPersonal({ scope: 'created', limit: '100' });
+    expect(all.total).toBe(allRows.items.length);
+    expect(all.hasMore).toBe(true);
+    const beyond = await readPersonal({ scope: 'created', offset: '10000' });
+    expect(beyond.items).toEqual([]);
+    expect(beyond.total).toBe(all.total);
+    const empty = await readPersonal({
+      scope: 'assigned',
+      columnStatuses: 'archived'
+    });
+    expect(empty.total).toBe(0);
+    expect(empty.items).toEqual([]);
+    children[0].columnId = columns[2].id;
+    await children[0].save();
+    expect(
+      (
+        await readPersonal({
+          scope: 'created',
+          columnStatuses: 'queued',
+          limit: '100'
+        })
+      ).items.find(item => item.task.id === roots[0].id)!.subtaskCounter
+    ).toEqual({ total: 2, completed: 2 });
+    await columns[2].destroy();
+    expect(
+      (
+        await readPersonal({
+          scope: 'created',
+          columnStatuses: 'queued',
+          limit: '100'
+        })
+      ).items.find(item => item.task.id === roots[0].id)!.subtaskCounter
+    ).toEqual({ total: 0, completed: 0 });
+  });
+
+  it.each([ColumnStatus.InProgress, ColumnStatus.Archived])(
     'filters personal lists by %s before pagination and returns the column status',
     async (status): Promise<void> => {
       await columns[0].update({ status });
       await columns[1].update({ status });
       await columns[2].update({ status: ColumnStatus.Completed });
+      const allMatching = await readPersonal({
+        scope: 'created',
+        columnStatus: status,
+        limit: '100'
+      });
       const first = await readPersonal({
         scope: 'created',
         columnStatus: status,
@@ -768,12 +1336,16 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       expect(second.items).toHaveLength(1);
       expect(second.items[0].columnStatus).toBe(status);
       expect(second.items[0].task.id).not.toBe(first.items[0].task.id);
-      expect(second.hasMore).toBe(false);
+      expect(second.hasMore).toBe(allMatching.items.length > 2);
       const assigned = await readPersonal({
         scope: 'assigned',
         columnStatus: status
       });
-      expect(assigned.items.map(item => item.task.id)).toEqual([roots[0].id]);
+      expect(
+        assigned.items
+          .filter(item => item.projectId === project.id)
+          .map(item => item.task.id)
+      ).toEqual([roots[0].id]);
       const completed = await readPersonal({
         columnStatus: ColumnStatus.Completed
       });
@@ -795,8 +1367,54 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     }
   );
 
+  it('maps legacy review filters and deduplicates them with the unified completion status', async (): Promise<void> => {
+    await columns[0].update({ status: ColumnStatus.Completed });
+    const current = await readPersonal({
+      columnStatus: ColumnStatus.Completed
+    });
+    const legacy = await readPersonal({ columnStatus: 'in_review' });
+    const combined = await readPersonal({
+      columnStatuses: ['in_review', ColumnStatus.Completed]
+    });
+    expect(legacy.items.map(item => item.task.id)).toEqual(
+      current.items.map(item => item.task.id)
+    );
+    expect(combined.items.map(item => item.task.id)).toEqual(
+      current.items.map(item => item.task.id)
+    );
+  });
+
+  it('combines selected personal task statuses before paginating', async (): Promise<void> => {
+    await columns[0].update({ status: ColumnStatus.InProgress });
+    await columns[1].update({ status: ColumnStatus.Queued });
+    await columns[2].update({ status: ColumnStatus.Completed });
+    const columnStatuses = [ColumnStatus.InProgress, ColumnStatus.Completed];
+    const unfiltered = await readPersonal({ limit: '100' });
+    const expected = unfiltered.items.filter(
+      item =>
+        item.columnStatus !== null && columnStatuses.includes(item.columnStatus)
+    );
+    const first = await readPersonal({ columnStatuses, limit: '1' });
+    const second = await readPersonal({
+      columnStatuses,
+      limit: '1',
+      offset: String(first.offset)
+    });
+
+    expect(first.hasMore).toBe(true);
+    expect(second.hasMore).toBe(expected.length > 2);
+    expect([...first.items, ...second.items].map(item => item.task.id)).toEqual(
+      expected.slice(0, 2).map(item => item.task.id)
+    );
+    const combined = await readPersonal({ columnStatuses, limit: '100' });
+    expect(combined.items.map(item => item.task.id)).toEqual(
+      expected.map(item => item.task.id)
+    );
+  });
+
   it('personal task pages sort globally before pagination, with deterministic ties and null dates last', async (): Promise<void> => {
     roots[0].dueDate = null;
+    roots[0].startDate = new Date('2030-01-01T00:00:00Z');
     await roots[0].save();
     roots[2].dueDate = new Date('2026-09-01T00:00:00Z');
     await roots[2].save();
@@ -819,6 +1437,23 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       item.task.dueDate ? new Date(item.task.dueDate).getTime() : Infinity
     );
     expect(dates).toEqual([...dates].sort((left, right) => left - right));
+
+    const order = { sortBy: 'startDate', sortDirection: 'desc' };
+    const sorted = [...all.items].sort(
+      (left, right) =>
+        new Date(String(right.task.startDate)).getTime() -
+          new Date(String(left.task.startDate)).getTime() ||
+        left.task.id - right.task.id
+    );
+    const first = await readPersonal({ ...order, limit: '2' });
+    const second = await readPersonal({
+      ...order,
+      limit: '2',
+      offset: String(first.offset)
+    });
+    expect([...first.items, ...second.items].map(item => item.task.id)).toEqual(
+      sorted.slice(0, 4).map(item => item.task.id)
+    );
   });
 
   it('personal lists keep project access checks even for a creator/assignee and reject revoked/archived locations', async (): Promise<void> => {
@@ -875,7 +1510,8 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     { limit: '101' },
     { limit: '0' },
     { offset: '-1' },
-    { columnStatus: 'invalid-status' }
+    { columnStatus: 'invalid-status' },
+    { columnStatuses: [ColumnStatus.Completed, 'invalid-status'] }
   ])('validates personal list parameters: %p', async (query): Promise<void> => {
     await request(app.getHttpServer())
       .get('/tasks/personal')

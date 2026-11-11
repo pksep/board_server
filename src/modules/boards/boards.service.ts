@@ -79,13 +79,10 @@ export class BoardsService {
           : [];
       }
 
-      const boardIds = boards.map(board => board.id);
-      const columns = await this.columnRepository.findAll({
-        where: { boardId: { [Op.in]: boardIds } },
-        attributes: ['id', 'boardId'],
-        raw: true
-      });
-      const columnIds = columns.map(column => column.id);
+      // Колонки уже загружены тем же paranoid include; повторный SQL не нужен.
+      const columnIds = boards.flatMap(board =>
+        board.columns.map(column => column.id)
+      );
       const tasksCountByColumnId = new Map<number, number>();
 
       if (columnIds.length) {
@@ -114,18 +111,9 @@ export class BoardsService {
         });
       }
 
-      const columnIdsByBoardId = new Map<number, number[]>();
-      columns.forEach(column => {
-        const boardColumnIds = columnIdsByBoardId.get(column.boardId) || [];
-        boardColumnIds.push(column.id);
-        columnIdsByBoardId.set(column.boardId, boardColumnIds);
-      });
-
       const items = boards.map(board => {
-        const boardColumnIds = columnIdsByBoardId.get(board.id) || [];
-        const tasksCount = boardColumnIds.reduce(
-          (total, columnId) =>
-            total + (tasksCountByColumnId.get(columnId) || 0),
+        const tasksCount = board.columns.reduce(
+          (total, column) => total + (tasksCountByColumnId.get(column.id) || 0),
           0
         );
 

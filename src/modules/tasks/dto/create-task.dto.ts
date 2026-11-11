@@ -12,6 +12,7 @@ import {
   ArrayMaxSize,
   ArrayMinSize,
   Min,
+  Max,
   ValidateNested
 } from 'class-validator';
 import { IsObject } from 'class-validator';
@@ -33,6 +34,30 @@ export class CreateTaskDto {
   @IsInt({ each: true })
   @Min(1, { each: true })
   controllerIds?: number[];
+
+  @ApiProperty({
+    description: 'ID ответственных',
+    type: [Number],
+    required: false
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(500)
+  @ArrayUnique()
+  @IsInt({ each: true })
+  @Min(1, { each: true })
+  responsibleIds?: number[];
+
+  @ApiProperty({
+    description: 'Норма времени в минутах',
+    required: false,
+    nullable: true
+  })
+  @IsOptional()
+  @IsInt({ message: 'Норма времени должна быть целым числом минут' })
+  @Min(1, { message: 'Норма времени должна быть больше нуля' })
+  @Max(2147483647)
+  timeNormMinutes?: number | null;
 
   @ApiProperty({
     description: 'Сущность из базы продукции',

@@ -12,6 +12,7 @@ import { MoveTaskDto } from './dto/move-task.dto';
 import { Project } from '../projects/model/project.model';
 import { BoardColumn } from '../columns/model/board-column.model';
 import { ColumnMovePermission } from '../columns/interfaces/column-move-permission.interface';
+import { ColumnStatus } from '../columns/interfaces/column-status.interface';
 import { Board } from '../boards/model/board.model';
 import { User } from '../users/model/users.model';
 import { ProjectTag } from '../tags/model/project-tag.model';
@@ -41,6 +42,8 @@ import {
 import { CreateTaskTimeEntryDto } from './dto/create-task-time-entry.dto';
 import { TaskGanttQueryDto } from './dto/task-gantt-query.dto';
 import { PersonalTaskQueryDto } from './dto/personal-task-query.dto';
+import { ExecutorWorkloadQueryDto } from './dto/executor-workload-query.dto';
+import type { ExecutorWorkloadTask } from './interfaces/executor-workload.interface';
 import { TaskTimeReportQueryDto } from './dto/task-time-report-query.dto';
 import type {
   TaskTimeReportEntry,
@@ -452,6 +455,8 @@ export class TasksService {
   ) {
     return this.activityEvents.buildChanges({
       controllerIds: { before: [], after: task.controllerIds },
+      responsibleIds: { before: [], after: task.responsibleIds },
+      timeNormMinutes: { before: null, after: task.timeNormMinutes },
       title: { before: null, after: task.title },
       linkedEntity: { before: null, after: task.linkedEntity },
       description: { before: null, after: task.description },
@@ -528,6 +533,8 @@ export class TasksService {
           'id',
           'createdById',
           'controllerIds',
+          'responsibleIds',
+          'timeNormMinutes',
           'taskNumber',
           'title',
           'description',
@@ -576,13 +583,22 @@ export class TasksService {
   /** Единая область личных списков и их счётчиков, включая доступ и архив каждого уровня. */
   private personalTaskSource(
     query: PersonalTaskQueryDto,
-    executorErpId?: string
+    executorErpId?: string | string[]
   ): string {
     // В ERP и Board разные PK: сопоставляем только подтверждённый erp_id.
     const executorSource = executorErpId
-      ? `JOIN users executor ON executor.erp_id = :executorErpId AND executor.ban = false`
+      ? `JOIN users executor ON executor.erp_id ${
+          Array.isArray(executorErpId)
+            ? 'IN (:executorErpIds)'
+            : '= :executorErpId'
+        } AND executor.ban = false`
       : '';
     const assignedUser = executorErpId ? 'executor.id' : ':userId';
+    const statusFilter = query.columnStatuses?.length
+      ? ' AND col.status IN (:columnStatuses)'
+      : query.columnStatus
+        ? ' AND col.status = :columnStatus'
+        : '';
 
     return `FROM tasks task
        JOIN board_columns col ON col.id = task.column_id AND col."deletedAt" IS NULL
@@ -600,7 +616,8 @@ export class TasksService {
                   WHERE executor_member.project_id = project.id
                     AND executor_member.user_id = executor.id)
                 AND (board.members_ids IS NULL
-                  OR board.members_ids @> jsonb_build_array(executor.id))`
+                  OR board.members_ids @> jsonb_build_array(executor.id))
+                AND (col.status IS NULL OR col.status NOT IN ('completed', 'in_review', 'archived'))`
              : ''
          }
          AND ${
@@ -608,7 +625,55 @@ export class TasksService {
              ? `EXISTS (SELECT 1 FROM task_assignees assignment
                  WHERE assignment.task_id = task.id AND assignment.user_id = ${assignedUser})`
              : 'task.created_by_id = :userId'
-         }${query.columnStatus ? ' AND col.status = :columnStatus' : ''}`;
+         }${statusFilter}`;
+  }
+
+  /** Читает нормы пакетом через общую область назначений, без карточек и побочных эффектов. */
+  async getExecutorWorkload(
+    userId: number,
+    query: ExecutorWorkloadQueryDto
+  ): Promise<ExecutorWorkloadTask[]> {
+    const start = new Date(query.start);
+    const end = new Date(query.end);
+    const span = end.getTime() - start.getTime();
+
+    if (!Number.isFinite(span) || span <= 0) {
+      throw new HttpException(
+        'Конец периода должен быть позже начала',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    const executorErpIds = [...new Set(query.erpUserIds)].map(String);
+
+    // EXISTS в общей выборке не удваивает норму при повторном назначении.
+    // Отбираем начало ИЛИ готовность: клиент относит полную норму к каждому дню.
+    return this.sequelize.query<ExecutorWorkloadTask>(
+      `SELECT executor.erp_id::int AS "executorId", task.id AS "taskId",
+         project.id AS "projectId", project.title AS "projectName",
+         task.start_date AS "startDate", task.due_date AS "dueDate",
+         task.time_norm_minutes AS "timeNormMinutes"
+       ${this.personalTaskSource({ scope: 'assigned' }, executorErpIds)}
+         AND (col.status IS NULL OR col.status NOT IN (:inactiveStatuses))
+         AND task.time_norm_minutes > 0
+         AND ((task.start_date >= :start AND task.start_date < :end)
+           OR (task.due_date >= :start AND task.due_date < :end))
+       ORDER BY task.id, executor.erp_id::int`,
+      {
+        replacements: {
+          userId,
+          executorErpIds,
+          inactiveStatuses: [
+            ColumnStatus.Completed,
+            ColumnStatus.Archived,
+            'in_review'
+          ],
+          start,
+          end
+        },
+        type: QueryTypes.SELECT
+      }
+    );
   }
 
   /** Счётчик раздела учитывает все его задачи, а не только первую видимую страницу. */
@@ -619,7 +684,11 @@ export class TasksService {
     const records = await this.sequelize.query<{ id: number }>(
       `SELECT task.id ${this.personalTaskSource(query)} ORDER BY task.id`,
       {
-        replacements: { userId, columnStatus: query.columnStatus },
+        replacements: {
+          userId,
+          columnStatus: query.columnStatus,
+          columnStatuses: query.columnStatuses
+        },
         type: QueryTypes.SELECT
       }
     );
@@ -643,18 +712,48 @@ export class TasksService {
   ): Promise<PersonalTaskPage> {
     const limit = query.limit ?? 50;
     const offset = query.offset ?? 0;
+    const dateColumn =
+      query.sortBy === 'startDate' ? 'task.start_date' : 'task.due_date';
+    const direction = query.sortDirection === 'desc' ? 'DESC' : 'ASC';
     // Владелец или участник активного проекта: те же правила, что assertCanRead.
     // EXISTS не размножает задачу при нескольких участниках/назначениях.
+    // Счётчики детей агрегируются только для выбранной страницы, без N+1 запросов.
+    // Личный фильтр не скрывает дочерние задачи, архив и доступ остаются прежними.
     const locations = await this.sequelize.query<PersonalTaskLocation>(
-      `SELECT task.id, project.id AS "projectId", project.prefix AS "projectPrefix", col.status AS "columnStatus"
-       ${this.personalTaskSource(query, executorErpId)}
-       ORDER BY task.due_date ASC NULLS LAST, task.id ASC
-       LIMIT :limit OFFSET :offset`,
+      `WITH page AS MATERIALIZED (
+         SELECT task.id, task.parent_task_id AS "parentTaskId",
+           project.id AS "projectId", project.prefix AS "projectPrefix",
+           project.attributes_owner_only AS "attributesOwnerOnly",
+           col.status AS "columnStatus", ${dateColumn} AS "sortDate", COUNT(*) OVER()::int AS total
+         ${this.personalTaskSource(query, executorErpId)}
+         ORDER BY ${dateColumn} ${direction} NULLS LAST, task.id ASC
+         LIMIT :limit OFFSET :offset
+       ), subtask_counts AS (
+         SELECT child.parent_task_id AS "taskId", COUNT(*)::int AS total,
+           COUNT(*) FILTER (WHERE child_col.status = :completedStatus)::int AS completed
+         FROM tasks child
+         JOIN page parent ON parent.id = child.parent_task_id AND parent."parentTaskId" IS NULL
+         JOIN board_columns child_col ON child_col.id = child.column_id AND child_col."deletedAt" IS NULL
+         JOIN boards child_board ON child_board.id = child_col.board_id AND child_board."deletedAt" IS NULL
+         JOIN projects child_project ON child_project.id = child_board.project_id AND child_project."deletedAt" IS NULL
+         WHERE child."deletedAt" IS NULL
+           AND (child_project.created_by_id = :userId OR EXISTS (
+             SELECT 1 FROM project_members member
+             WHERE member.project_id = child_project.id AND member.user_id = :userId
+           ))
+         GROUP BY child.parent_task_id
+       )
+       SELECT page.*, COALESCE(subtask_counts.total, 0) AS "subtasksTotal",
+         COALESCE(subtask_counts.completed, 0) AS "subtasksCompleted"
+       FROM page LEFT JOIN subtask_counts ON subtask_counts."taskId" = page.id
+       ORDER BY page."sortDate" ${direction} NULLS LAST, page.id ASC`,
       {
         replacements: {
           userId,
+          completedStatus: ColumnStatus.Completed,
           executorErpId,
           columnStatus: query.columnStatus,
+          columnStatuses: query.columnStatuses,
           limit: limit + 1,
           offset
         },
@@ -662,7 +761,26 @@ export class TasksService {
       }
     );
     const page = locations.slice(0, limit);
-    if (!page.length) return { items: [], offset, hasMore: false };
+    if (!page.length) {
+      // Смещение за концом списка не превращает его общее число в ноль.
+      const [count] =
+        offset > 0
+          ? await this.sequelize.query<{ total: number }>(
+              `SELECT COUNT(*)::int AS total ${this.personalTaskSource(query, executorErpId)}`,
+              {
+                replacements: {
+                  userId,
+                  executorErpId,
+                  columnStatus: query.columnStatus,
+                  columnStatuses: query.columnStatuses
+                },
+                type: QueryTypes.SELECT
+              }
+            )
+          : [];
+
+      return { items: [], total: count?.total ?? 0, offset, hasMore: false };
+    }
 
     // Не загружаем файлы и дочерние карточки; описание нужно только таблице ПЗ.
     const tasks = await this.taskRepository.findAll({
@@ -671,9 +789,11 @@ export class TasksService {
         'taskNumber',
         'title',
         // ПЗ показывает описание задачи; прежний личный список остаётся лёгким.
-        ...(executorErpId ? ['description'] : []),
+        ...(executorErpId ? ['description', 'linkedEntity'] : []),
         'createdById',
         'controllerIds',
+        'responsibleIds',
+        'timeNormMinutes',
         'priority',
         'approvalStatus',
         'startDate',
@@ -699,7 +819,14 @@ export class TasksService {
               task,
               projectId: location.projectId,
               projectPrefix: location.projectPrefix,
-              columnStatus: location.columnStatus
+              columnStatus: location.columnStatus,
+              subtaskCounter: {
+                total: location.subtasksTotal,
+                completed: location.subtasksCompleted
+              },
+              ...(executorErpId
+                ? { attributesOwnerOnly: location.attributesOwnerOnly }
+                : {})
             }
           ]
         : [];
@@ -707,6 +834,7 @@ export class TasksService {
 
     return {
       items,
+      total: Number(locations[0].total),
       offset: offset + page.length,
       hasMore: locations.length > limit
     };
@@ -768,7 +896,9 @@ export class TasksService {
         `SELECT task.id, task.task_number AS "taskNumber", task.title, task.priority,
           task.start_date AS "startDate", task.due_date AS "dueDate",
           task.column_id AS "columnId", col.board_id AS "boardId",
-          col.status AS "columnStatus", task.created_by_id AS "createdById", task.controller_ids AS "controllerIds",
+          col.status AS "columnStatus", col.color AS "columnColor",
+          task.created_by_id AS "createdById", task.controller_ids AS "controllerIds",
+          task.responsible_ids AS "responsibleIds", task.time_norm_minutes AS "timeNormMinutes",
           task."order", task."updatedAt"
           ${source}
           ORDER BY board."order", board."createdAt", board.id, col."order", task."order", task.id`,
@@ -1507,6 +1637,13 @@ export class TasksService {
           transaction
         );
 
+      if (dto.responsibleIds !== undefined)
+        await this.assertResponsibleIds(
+          projectId,
+          dto.responsibleIds,
+          transaction
+        );
+
       const customAttributeValues = await this.normalizeCustomAttributeValues(
         projectId,
         dto.customAttributeValues,
@@ -1545,6 +1682,8 @@ export class TasksService {
           columnId,
           order: 0,
           createdById: userId,
+          responsibleIds: this.normalizeIds(dto.responsibleIds ?? []),
+          timeNormMinutes: dto.timeNormMinutes ?? null,
           controllerIds: this.normalizeIds([
             userId,
             ...(dto.controllerIds ?? [])
@@ -1652,6 +1791,13 @@ export class TasksService {
           transaction
         );
 
+      if (dto.responsibleIds !== undefined)
+        await this.assertResponsibleIds(
+          projectId,
+          dto.responsibleIds,
+          transaction
+        );
+
       const customAttributeValues = await this.normalizeCustomAttributeValues(
         projectId,
         dto.customAttributeValues,
@@ -1679,6 +1825,8 @@ export class TasksService {
           parentTaskId: parentId,
           order: 0,
           createdById: userId,
+          responsibleIds: this.normalizeIds(dto.responsibleIds ?? []),
+          timeNormMinutes: dto.timeNormMinutes ?? null,
           controllerIds: this.normalizeIds([
             userId,
             ...(dto.controllerIds ?? [])
@@ -1831,6 +1979,39 @@ export class TasksService {
       );
   }
 
+  /** Ответственные выбираются из того же действующего состава проекта, что контроллеры. */
+  private async assertResponsibleIds(
+    projectId: number,
+    ids: number[],
+    transaction: Transaction
+  ): Promise<void> {
+    if (
+      !Array.isArray(ids) ||
+      ids.length > 500 ||
+      ids.some(id => !Number.isSafeInteger(id) || id < 1) ||
+      new Set(ids).size !== ids.length
+    ) {
+      throw new HttpException(
+        'Список ответственных должен содержать уникальные ID пользователей',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    if (!ids.length) return;
+
+    const members = await this.projectAccess.getActiveMemberIds(
+      projectId,
+      transaction,
+      ids
+    );
+    if (ids.some(id => !members.includes(id))) {
+      throw new HttpException(
+        'Ответственными могут быть только активные участники проекта',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+  }
+
   /** Проверяет именно поля: отдельное перемещение сохраняет правила исходной колонки. */
   private async assertCanEditTaskFields(
     task: Task,
@@ -1842,6 +2023,19 @@ export class TasksService {
 
     let fields = Object.entries(dto).filter(([, value]) => value !== undefined);
 
+    if (fields.some(([field]) => field === 'assigneeIds')) {
+      if (!(task.responsibleIds ?? []).includes(userId)) {
+        throw new HttpException(
+          'Изменять исполнителей могут только контроллеры и ответственные',
+          HttpStatus.FORBIDDEN
+        );
+      }
+
+      fields = fields.filter(([field]) => field !== 'assigneeIds');
+    }
+
+    if (!fields.length) return;
+
     // Открываются значения стандартных и пользовательских атрибутов, но не управление задачей.
     const attributeFields = new Set<keyof UpdateTaskDto>([
       'linkedEntity',
@@ -1849,7 +2043,7 @@ export class TasksService {
       'startDate',
       'priority',
       'approvalStatus',
-      'assigneeIds',
+      'timeNormMinutes',
       'tagIds',
       'parentTaskId',
       'customAttributeValues',
@@ -1933,6 +2127,13 @@ export class TasksService {
           transaction
         );
 
+      if (dto.responsibleIds !== undefined)
+        await this.assertResponsibleIds(
+          projectId,
+          dto.responsibleIds,
+          transaction
+        );
+
       if (dto.startDate !== undefined || dto.dueDate !== undefined) {
         this.assertTaskDateOrder(
           dto.startDate !== undefined ? dto.startDate : task.startDate,
@@ -1962,6 +2163,8 @@ export class TasksService {
               transaction
             );
       const before = {
+        responsibleIds: this.normalizeIds(task.responsibleIds ?? []),
+        timeNormMinutes: task.timeNormMinutes,
         controllerIds: this.normalizeIds(
           task.controllerIds ?? [task.createdById]
         ),
@@ -2001,6 +2204,10 @@ export class TasksService {
       if (dto.title !== undefined) task.title = dto.title;
       if (dto.controllerIds !== undefined)
         task.controllerIds = this.normalizeIds(dto.controllerIds);
+      if (dto.responsibleIds !== undefined)
+        task.responsibleIds = this.normalizeIds(dto.responsibleIds);
+      if (dto.timeNormMinutes !== undefined)
+        task.timeNormMinutes = dto.timeNormMinutes;
       if (dto.linkedEntity !== undefined) task.linkedEntity = dto.linkedEntity;
       if (dto.description !== undefined) task.description = dto.description;
       if (dto.priority !== undefined) task.priority = dto.priority;
@@ -2119,6 +2326,18 @@ export class TasksService {
         changedFields.controllerIds = {
           before: before.controllerIds,
           after: this.normalizeIds(task.controllerIds)
+        };
+      }
+      if (dto.responsibleIds !== undefined) {
+        changedFields.responsibleIds = {
+          before: before.responsibleIds,
+          after: task.responsibleIds
+        };
+      }
+      if (dto.timeNormMinutes !== undefined) {
+        changedFields.timeNormMinutes = {
+          before: before.timeNormMinutes,
+          after: task.timeNormMinutes
         };
       }
       if (dto.tagIds !== undefined) {
@@ -2366,6 +2585,29 @@ export class TasksService {
     userId: number,
     transaction: Transaction
   ): Promise<void> {
+    const target = await this.columnRepository.findByPk(targetColumnId, {
+      attributes: ['id', 'status'],
+      transaction,
+      lock: Transaction.LOCK.SHARE
+    });
+    if (!target)
+      throw new HttpException('Колонка не найдена', HttpStatus.NOT_FOUND);
+
+    if (
+      target.status === ColumnStatus.Archived &&
+      tasks.some(
+        task =>
+          task.columnId !== targetColumnId &&
+          !(task.controllerIds ?? [task.createdById]).includes(userId) &&
+          !(task.responsibleIds ?? []).includes(userId)
+      )
+    ) {
+      throw new HttpException(
+        'В архив задачу могут переместить только контроллеры и ответственные',
+        HttpStatus.FORBIDDEN
+      );
+    }
+
     const leaving = tasks.filter(task => task.columnId !== targetColumnId);
     const columnIds = [...new Set(leaving.map(task => task.columnId))].sort(
       (left, right) => left - right
@@ -2456,6 +2698,14 @@ export class TasksService {
         await this.assertControllerIds(
           target.projectId,
           controllerIds,
+          transaction
+        );
+
+        await this.assertResponsibleIds(
+          target.projectId,
+          this.normalizeIds(
+            hierarchy.flatMap(item => item.responsibleIds ?? [])
+          ),
           transaction
         );
 

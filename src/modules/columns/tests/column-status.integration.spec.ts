@@ -20,6 +20,7 @@ import { ColumnMovePermission } from '../interfaces/column-move-permission.inter
 import { TasksController } from '../../tasks/tasks.controller';
 import { TimeReportPermissionGuard } from '../../tasks/time-report-permission.guard';
 import { TasksService } from '../../tasks/tasks.service';
+import { TaskCommentCountersService } from '../../task-comment-counters/task-comment-counters.service';
 import { Task } from '../../tasks/model/task.model';
 import { TaskAssignee } from '../../tasks/model/task-assignee.model';
 import { ActivityEventsService } from '../../activity-events/activity-events.service';
@@ -118,6 +119,10 @@ describeWithDatabase('Column status API with isolated PostgreSQL', () => {
         BoardsService,
         ProjectAccessService,
         TasksService,
+        {
+          provide: TaskCommentCountersService,
+          useValue: { attachToTasks: jest.fn() }
+        },
         ActivityEventsService,
         ...models.map(model => ({
           provide: getModelToken(model),
@@ -224,6 +229,22 @@ describeWithDatabase('Column status API with isolated PostgreSQL', () => {
       expect(ws.emitColumnUpdated.mock.calls[0][1].status).toBe(status);
     }
   );
+
+  it('accepts the old review status as the unified completion type on create and update', async (): Promise<void> => {
+    const created = await request(app.getHttpServer())
+      .post(`/boards/${board.id}/columns`)
+      .set('x-test-user', String(owner.id))
+      .send({ title: 'Legacy review client', status: 'in_review' })
+      .expect(201);
+    expect(created.body.status).toBe(ColumnStatus.Completed);
+    const updated = await request(app.getHttpServer())
+      .put(`/columns/${column.id}`)
+      .set('x-test-user', String(owner.id))
+      .send({ status: 'in_review' })
+      .expect(200);
+    expect(updated.body.status).toBe(ColumnStatus.Completed);
+    expect((await column.reload()).status).toBe(ColumnStatus.Completed);
+  });
 
   it('preserves status for unrelated updates and clears it only when null is sent', async (): Promise<void> => {
     await column.update({ status: ColumnStatus.InProgress });
