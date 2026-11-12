@@ -586,12 +586,15 @@ export class TasksService {
     executorErpId?: string | string[]
   ): string {
     // В ERP и Board разные PK: сопоставляем только подтверждённый erp_id.
+    // Пустой пакет означает все связанные ERP-ресурсы, сохраняя общие права.
+    const executorFilter = Array.isArray(executorErpId)
+      ? executorErpId.length
+        ? 'executor.erp_id IN (:executorErpIds)'
+        : `CASE WHEN executor.erp_id ~ '^[1-9][0-9]{0,9}$'
+             THEN executor.erp_id::bigint <= 2147483647 ELSE false END`
+      : 'executor.erp_id = :executorErpId';
     const executorSource = executorErpId
-      ? `JOIN users executor ON executor.erp_id ${
-          Array.isArray(executorErpId)
-            ? 'IN (:executorErpIds)'
-            : '= :executorErpId'
-        } AND executor.ban = false`
+      ? `JOIN users executor ON ${executorFilter} AND executor.ban = false`
       : '';
     const assignedUser = executorErpId ? 'executor.id' : ':userId';
     const statusFilter = query.columnStatuses?.length
@@ -644,7 +647,8 @@ export class TasksService {
       );
     }
 
-    const executorErpIds = [...new Set(query.erpUserIds)].map(String);
+    const executorErpIds = [...new Set(query.erpUserIds ?? [])].map(String);
+    const debtBefore = query.debtBefore ? new Date(query.debtBefore) : null;
 
     // EXISTS в общей выборке не удваивает норму при повторном назначении.
     // Отбираем начало ИЛИ готовность: клиент относит полную норму к каждому дню.
@@ -653,11 +657,13 @@ export class TasksService {
          project.id AS "projectId", project.title AS "projectName",
          task.start_date AS "startDate", task.due_date AS "dueDate",
          task.time_norm_minutes AS "timeNormMinutes"
+         ${debtBefore ? ', COALESCE(task.start_date < :debtBefore, false) AS "isDebt"' : ''}
        ${this.personalTaskSource({ scope: 'assigned' }, executorErpIds)}
          AND (col.status IS NULL OR col.status NOT IN (:inactiveStatuses))
-         AND task.time_norm_minutes > 0
-         AND ((task.start_date >= :start AND task.start_date < :end)
-           OR (task.due_date >= :start AND task.due_date < :end))
+         AND ((task.time_norm_minutes > 0
+           AND ((task.start_date >= :start AND task.start_date < :end)
+             OR (task.due_date >= :start AND task.due_date < :end)))
+           ${debtBefore ? 'OR task.start_date < :debtBefore' : ''})
        ORDER BY task.id, executor.erp_id::int`,
       {
         replacements: {
@@ -669,7 +675,8 @@ export class TasksService {
             'in_review'
           ],
           start,
-          end
+          end,
+          debtBefore
         },
         type: QueryTypes.SELECT
       }

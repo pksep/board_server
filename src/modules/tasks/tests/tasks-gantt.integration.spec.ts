@@ -575,13 +575,13 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
 
     /** Читает пакет загрузки через настоящие маршрутизацию, авторизацию и SQL. */
     async function readExecutorWorkload(
-      erpUserIds: number[],
+      erpUserIds?: number[],
       userToken = 'gantt-owner-token'
     ): Promise<ExecutorWorkloadTask[]> {
       const response = await request(app.getHttpServer())
         .get('/tasks/executor-workload')
         .query({
-          erpUserIds: erpUserIds.join(','),
+          ...(erpUserIds ? { erpUserIds: erpUserIds.join(',') } : {}),
           start: '2026-10-01T00:00:00Z',
           end: '2026-10-05T00:00:00Z'
         })
@@ -590,6 +590,130 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
 
       return response.body;
     }
+
+    it('reads all ERP-linked assignments without an ID filter and preserves reader access', async (): Promise<void> => {
+      const erpIds = [700007, 700008];
+
+      // Оба исполнителя доступны независимо от наличия у них операций ERP.
+      for (const [index, user] of [owner, outsider].entries()) {
+        await user.update({ erpId: String(erpIds[index]) });
+        await persist(ProjectMember.build(), {
+          projectId: project.id,
+          userId: user.id
+        });
+      }
+
+      await roots[0].update({ timeNormMinutes: 60 });
+      expect(await readExecutorWorkload()).toEqual(
+        await readExecutorWorkload(erpIds)
+      );
+      expect(await readExecutorWorkload()).toHaveLength(2);
+
+      // Старые строковые связи и значения вне диапазона ERP PK не вызывают SQL 500.
+      for (const erpId of [
+        null,
+        'old-erp-id',
+        '0',
+        '-1',
+        '2147483648',
+        '999999999999999999999999999999'
+      ]) {
+        await outsider.update({ erpId });
+        expect(await readExecutorWorkload()).toEqual([
+          expect.objectContaining({ executorId: erpIds[0] })
+        ]);
+      }
+
+      await outsider.update({ erpId: String(erpIds[1]), ban: true });
+      expect(await readExecutorWorkload()).toHaveLength(1);
+      await outsider.update({ ban: false });
+      await board.update({ membersIds: [owner.id] });
+      expect(await readExecutorWorkload()).toHaveLength(1);
+      await board.update({ membersIds: null });
+      await ProjectMember.destroy({
+        where: { projectId: project.id, userId: outsider.id }
+      });
+      expect(await readExecutorWorkload()).toHaveLength(1);
+      expect(
+        await readExecutorWorkload(undefined, 'gantt-outsider-token')
+      ).toEqual([]);
+    });
+
+    it('accepts the WorkloadBody query and includes debt without a time norm across pages', async (): Promise<void> => {
+      const erpId = 700009;
+      await owner.update({ erpId: null });
+      await outsider.update({ erpId: String(erpId) });
+      await persist(ProjectMember.build(), {
+        projectId: project.id,
+        userId: outsider.id
+      });
+
+      const query = {
+        start: '2026-11-11T19:00:00.000Z',
+        end: '2026-11-25T19:00:00.000Z',
+        debtBefore: '2026-11-11T19:00:00.000Z'
+      };
+
+      // Левая граница учитывается в календаре, но ещё не является задолженностью.
+      await roots[0].update({
+        startDate: new Date(query.start),
+        dueDate: new Date(query.end),
+        timeNormMinutes: 60
+      });
+      await roots[1].update({
+        startDate: new Date('2026-11-11T18:59:59.999Z'),
+        dueDate: null,
+        timeNormMinutes: null
+      });
+
+      /** Читает фактический диапазон клиента с необязательным фильтром ресурсов. */
+      const readWorkload = async (
+        overrides: Record<string, string> = {}
+      ): Promise<ExecutorWorkloadTask[]> => {
+        const response = await request(app.getHttpServer())
+          .get('/tasks/executor-workload')
+          .query({ ...query, ...overrides })
+          .auth('gantt-owner-token', { type: 'bearer' })
+          .expect(200);
+
+        return response.body;
+      };
+
+      const result = await readWorkload();
+      expect(result).toEqual([
+        expect.objectContaining({
+          executorId: erpId,
+          taskId: roots[0].id,
+          timeNormMinutes: 60,
+          isDebt: false
+        }),
+        expect.objectContaining({
+          executorId: erpId,
+          taskId: roots[1].id,
+          timeNormMinutes: null,
+          isDebt: true
+        })
+      ]);
+      expect(await readWorkload({ erpUserIds: String(erpId) })).toEqual(result);
+
+      // На следующей странице прежний срок готовности входит по левой границе.
+      const nextPage = await readWorkload({
+        start: query.end,
+        end: '2026-12-09T19:00:00.000Z'
+      });
+      expect(nextPage).toEqual(result);
+
+      // Без нормы и начала до границы задача не добавляет ни часы, ни задолженность.
+      await roots[1].update({ startDate: new Date(query.start) });
+      expect(await readWorkload()).toHaveLength(1);
+      await columns[0].update({ status: ColumnStatus.Completed });
+      expect(await readWorkload()).toEqual([]);
+      await columns[1].update({ status: ColumnStatus.Completed });
+      await roots[1].update({
+        startDate: new Date('2026-11-01T00:00:00Z')
+      });
+      expect(await readWorkload()).toEqual([]);
+    });
 
     it('executor workload returns ERP assignments once per task, including subtasks and all selected executors', async (): Promise<void> => {
       const erpIds = [700001, 700002];
@@ -759,7 +883,10 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
         { start: '2026-02-30T00:00:00Z' },
         { end: 'invalid' },
         { end: query.start },
-        { end: '2026-11-01T00:00:00Z' }
+        { end: '2026-11-01T00:00:00Z' },
+        { debtBefore: '' },
+        { debtBefore: 'invalid' },
+        { debtBefore: '2026-02-30T00:00:00Z' }
       ]) {
         await request(app.getHttpServer())
           .get('/tasks/executor-workload')
@@ -771,7 +898,7 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
         .get('/tasks/executor-workload')
         .query({ start: query.start, end: query.end })
         .auth('gantt-owner-token', { type: 'bearer' })
-        .expect(400);
+        .expect(200);
       await request(app.getHttpServer())
         .get('/tasks/executor-workload')
         .query(query)
