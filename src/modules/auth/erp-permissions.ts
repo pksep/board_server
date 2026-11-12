@@ -10,13 +10,14 @@ import type { IUserDirectoryRequest } from '../users/interfaces/user-directory-r
 import type { ErpPermissionPolicy } from './interfaces/erp-permission-policy.interface';
 import { ErpPermissionsSchema } from './dto/erp-permissions.dto';
 
-/** Проверяет актуальные права той ERP-сессии, которую подтвердил общий guard. */
+/** Проверяет права подтверждённой ERP-сессии или явно переданного проверенным MCP-входом токена. */
 export async function assertErpPermissions(
   config: ConfigService,
   request: IUserDirectoryRequest,
-  policy: ErpPermissionPolicy
+  policy: ErpPermissionPolicy,
+  delegatedToken?: string
 ): Promise<true> {
-  const token = request.cookies?.access_token;
+  const token = delegatedToken ?? request.cookies?.access_token;
   const base = config.get<string>(ConfigConstains.erpApiUrl);
 
   // Общий TokenAuth уже разрешил дубликаты cookie и зафиксировал выбранную личность.
@@ -34,7 +35,9 @@ export async function assertErpPermissions(
   try {
     const response = await axios.get<unknown>(`${apiBase}/authorization/me`, {
       headers: {
-        Cookie: `access_token=${encodeURIComponent(token)}`,
+        ...(delegatedToken === undefined
+          ? { Cookie: `access_token=${encodeURIComponent(token)}` }
+          : { Authorization: `Bearer ${token}` }),
         compress: 'no-compress'
       },
       timeout: 5000,

@@ -7,6 +7,7 @@ import request = require('supertest');
 import { TasksController } from '../tasks.controller';
 import { TasksService } from '../tasks.service';
 import { TaskCommentCountersService } from '../../task-comment-counters/task-comment-counters.service';
+import { TimeReportPermissionGuard } from '../time-report-permission.guard';
 
 describe('Time report HTTP role permission', () => {
   let app: INestApplication;
@@ -164,5 +165,45 @@ describe('Time report HTTP role permission', () => {
       .set('Cookie', 'access_token=erp-session')
       .expect(503);
     expect(report).not.toHaveBeenCalled();
+  });
+
+  it('не использует Bearer вместо ERP cookie на обычном HTTP-маршруте', async (): Promise<void> => {
+    await request(app.getHttpServer())
+      .get('/tasks/time-report')
+      .set('Authorization', 'Bearer delegated-session')
+      .expect(401);
+    expect(get).not.toHaveBeenCalled();
+    expect(report).not.toHaveBeenCalled();
+  });
+
+  it('сохраняет персональную MCP-проверку после объединения с основной веткой', async (): Promise<void> => {
+    const guard = new TimeReportPermissionGuard(
+      new ConfigService({ erpApiUrl: 'http://erp.invalid/api/' })
+    );
+
+    await guard.assertMcpAccess('delegated-session');
+    expect(get).toHaveBeenCalledWith(
+      'http://erp.invalid/api/authorization/me',
+      expect.objectContaining({
+        headers: {
+          Authorization: 'Bearer delegated-session',
+          compress: 'no-compress'
+        }
+      })
+    );
+
+    get.mockResolvedValue({ data: { permissions: [permissions[1]] } });
+    await expect(
+      guard.assertMcpAccess('delegated-session')
+    ).rejects.toMatchObject({ status: 403 });
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+
+  it('отклоняет пустой MCP token до запроса в ERP', async (): Promise<void> => {
+    const guard = new TimeReportPermissionGuard(new ConfigService());
+    await expect(guard.assertMcpAccess('')).rejects.toMatchObject({
+      status: 401
+    });
+    expect(get).not.toHaveBeenCalled();
   });
 });

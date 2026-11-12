@@ -38,6 +38,6 @@ import { TaskCommentCountersService } from '../task-comment-counters/task-commen
     ProjectsModule,
     ActivityEventsModule
   ],
-  exports: [TasksService, TaskCommentCountersService]
+  exports: [TasksService, TimeReportPermissionGuard, TaskCommentCountersService]
 })
 export class TasksModule {}
