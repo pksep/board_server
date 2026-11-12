@@ -6,5 +6,6 @@ export interface ExecutorWorkloadTask {
   projectName: string;
   startDate: Date | string | null;
   dueDate: Date | string | null;
-  timeNormMinutes: number;
+  timeNormMinutes: number | null;
+  isDebt: boolean;
 }

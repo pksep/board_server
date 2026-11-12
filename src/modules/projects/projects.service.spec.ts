@@ -16,7 +16,8 @@ describe('ProjectsService project order', () => {
   };
   const favoriteRepository = {};
   const sequelize = {
-    transaction: jest.fn().mockResolvedValue(transaction)
+    transaction: jest.fn().mockResolvedValue(transaction),
+    query: jest.fn()
   };
   const service = new ProjectsService(
     projectRepository as any,
@@ -55,15 +56,14 @@ describe('ProjectsService project order', () => {
 
     await expect(service.reorder([2, 1], 42)).resolves.toBeUndefined();
 
-    expect(memberRepository.update).toHaveBeenNthCalledWith(
-      1,
-      { order: 0 },
-      { where: { projectId: 2, userId: 42 }, transaction }
-    );
-    expect(memberRepository.update).toHaveBeenNthCalledWith(
-      2,
-      { order: 1 },
-      { where: { projectId: 1, userId: 42 }, transaction }
+    expect(memberRepository.update).not.toHaveBeenCalled();
+    expect(sequelize.query).toHaveBeenCalledTimes(1);
+    expect(sequelize.query).toHaveBeenCalledWith(
+      expect.stringContaining('member.user_id = $userId'),
+      {
+        bind: { ids: [2, 1], userId: 42, updatedAt: expect.any(Date) },
+        transaction
+      }
     );
     expect(transaction.commit).toHaveBeenCalledTimes(1);
   });

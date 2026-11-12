@@ -17,6 +17,11 @@ import {
 } from './utils/board-session';
 
 import { AccessTokenService } from './access-token.service';
+import { performance } from 'perf_hooks';
+import {
+  recordAuthDuration,
+  writeHttpTiming
+} from '../../utils/logger/http-performance';
 
 /** Имя cookie, которую выдаёт board-сервер */
 const BOARD_TOKEN_COOKIE = 'board_token';
@@ -48,6 +53,21 @@ export class TokenAuth implements CanActivate {
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
+    const http = context.switchToHttp();
+    const request = http.getRequest<object>();
+    const started = performance.now();
+
+    try {
+      return await this.authenticate(context);
+    } finally {
+      recordAuthDuration(request, started);
+      // Guard может отклонить запрос до запуска interceptor.
+      writeHttpTiming(request, http.getResponse());
+    }
+  }
+
+  /** Существующие правила сессии выполняются без кэша или пропуска проверок. */
+  private async authenticate(context: ExecutionContext): Promise<boolean> {
     // @Public() — пропускаем
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
       context.getHandler(),

@@ -35,6 +35,7 @@ import type { ExecutorWorkloadTask } from './interfaces/executor-workload.interf
 import { TaskTimeReportQueryDto } from './dto/task-time-report-query.dto';
 import type { TaskTimeReportPage } from './interfaces/task-time-report.interface';
 import { TimeReportPermissionGuard } from './time-report-permission.guard';
+import { ExecutorPlanningPermissionGuard } from './executor-planning-permission.guard';
 import { TaskCommentCountersService } from '../task-comment-counters/task-comment-counters.service';
 import type { TaskListPage } from './tasks.service';
 import type { CounterRequestSession } from '../task-comment-counters/interfaces/task-comment-counter.interface';
@@ -58,11 +59,12 @@ export class TasksController {
     return this.tasksService.getTimeReport(user.id, query);
   }
 
-  /** Сохраняет права читателя проекта и использует общий список назначенных задач. */
+  /** Показывает назначения в планировании; доступ к карточке возвращается отдельно. */
   @ApiOperation({
     summary: 'Задачи исполнителя ERP с досок, в которых он участвует'
   })
   @Get('tasks/by-executor')
+  @UseGuards(ExecutorPlanningPermissionGuard)
   async getExecutorTasks(
     @Query() query: ExecutorTaskQueryDto,
     @CurrentUser() user: IUserDataToken,
@@ -82,11 +84,12 @@ export class TasksController {
     return page;
   }
 
-  /** Статический маршрут предшествует tasks/:id и сохраняет доступ читателя сессии. */
+  /** Планирование учитывает все действующие назначения после проверки права ERP. */
   @ApiOperation({
     summary: 'Нормы задач исполнителей ERP за календарный период'
   })
   @Get('tasks/executor-workload')
+  @UseGuards(ExecutorPlanningPermissionGuard)
   getExecutorWorkload(
     @Query() query: ExecutorWorkloadQueryDto,
     @CurrentUser() user: IUserDataToken

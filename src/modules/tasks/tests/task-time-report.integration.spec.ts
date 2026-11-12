@@ -8,6 +8,7 @@ import { TasksService } from '../tasks.service';
 import { TaskCommentCountersService } from '../../task-comment-counters/task-comment-counters.service';
 import { TasksController } from '../tasks.controller';
 import { TimeReportPermissionGuard } from '../time-report-permission.guard';
+import { ExecutorPlanningPermissionGuard } from '../executor-planning-permission.guard';
 import { ProjectAccessService } from '../../projects/project-access.service';
 import { Project } from '../../projects/model/project.model';
 import { ProjectMember } from '../../projects/model/project-member.model';
@@ -73,6 +74,8 @@ describeWithDatabase('Persisted task time report and project access', () => {
     })
       // Матрица роли проверяется через HTTP в time-report-permission.guard.spec.ts.
       // Здесь изолированно проверяются реальные записи и права конкретного проекта.
+      .overrideGuard(ExecutorPlanningPermissionGuard)
+      .useValue({ canActivate: (): boolean => true })
       .overrideGuard(TimeReportPermissionGuard)
       .useValue({ canActivate: (): boolean => true })
       .compile();
