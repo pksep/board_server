@@ -5,6 +5,7 @@ import { TaskCommentCountersService } from '../../task-comment-counters/task-com
 import type { Task } from '../model/task.model';
 import type { IUserDataToken } from '../../auth/interfaces/interface';
 import { TimeReportPermissionGuard } from '../time-report-permission.guard';
+import { ExecutorPlanningPermissionGuard } from '../executor-planning-permission.guard';
 
 describe('commentsCount in task responses', () => {
   const task = { id: 7 } as Task;
@@ -54,6 +55,8 @@ describe('commentsCount in task responses', () => {
       ]
     })
       .overrideGuard(TimeReportPermissionGuard)
+      .useValue({ canActivate: (): boolean => true })
+      .overrideGuard(ExecutorPlanningPermissionGuard)
       .useValue({ canActivate: (): boolean => true })
       .compile();
     controller = module.get(TasksController);

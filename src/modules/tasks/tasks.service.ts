@@ -47,7 +47,9 @@ import type { ExecutorWorkloadTask } from './interfaces/executor-workload.interf
 import { TaskTimeReportQueryDto } from './dto/task-time-report-query.dto';
 import type {
   TaskTimeReportEntry,
-  TaskTimeReportPage
+  TaskTimeReportPage,
+  StandaloneTimeReportEntry,
+  StandaloneTimeReportPage
 } from './interfaces/task-time-report.interface';
 import type {
   PersonalTaskLocation,
@@ -68,6 +70,7 @@ export interface TaskListPage {
 }
 
 interface TaskTimeEntryRecord {
+  createdById: number;
   actorId: number;
   actorImage: string | null;
   actorInitial: string | null;
@@ -76,11 +79,12 @@ interface TaskTimeEntryRecord {
   createdAt: Date | string;
   durationMinutes: number;
   id: number;
-  taskId: number;
+  taskId: number | null;
   userId: number;
 }
 
 export interface TaskTimeEntry {
+  createdById: number;
   actor: {
     id: number;
     image: string | null;
@@ -91,7 +95,7 @@ export interface TaskTimeEntry {
   createdAt: Date | string;
   durationMinutes: number;
   id: number;
-  taskId: number;
+  taskId: number | null;
   userId: number;
 }
 
@@ -1493,7 +1497,8 @@ export class TasksService {
   private mapTaskTimeEntry(record: TaskTimeEntryRecord): TaskTimeEntry {
     return {
       id: Number(record.id),
-      taskId: Number(record.taskId),
+      createdById: Number(record.createdById),
+      taskId: record.taskId === null ? null : Number(record.taskId),
       userId: Number(record.userId),
       durationMinutes: Number(record.durationMinutes),
       comment: record.comment,
@@ -1507,14 +1512,9 @@ export class TasksService {
     };
   }
 
-  /** Читает период без загрузки каждой задачи; доступ и авторство остаются прежними. */
-  async getTimeReport(
-    userId: number,
-    query: TaskTimeReportQueryDto
-  ): Promise<TaskTimeReportPage> {
-    const start = new Date(query.start);
-    const end = new Date(query.end);
-    const span = end.getTime() - start.getTime();
+  /** Ограничивает объём всех отчётов времени одним и тем же периодом. */
+  private assertTimeReportPeriod(query: TaskTimeReportQueryDto): void {
+    const span = Date.parse(query.end) - Date.parse(query.start);
 
     if (!Number.isFinite(span) || span <= 0 || span > 32 * 86400000) {
       throw new HttpException(
@@ -1522,6 +1522,59 @@ export class TasksService {
         HttpStatus.BAD_REQUEST
       );
     }
+  }
+
+  /** Читает только самостоятельные записи; права раздела проверяет guard. */
+  async getStandaloneTimeReport(
+    query: TaskTimeReportQueryDto
+  ): Promise<StandaloneTimeReportPage> {
+    this.assertTimeReportPeriod(query);
+    const limit = Math.min(Math.max(query.limit ?? 500, 1), 500);
+    const records = await this.sequelize.query<
+      TaskTimeEntryRecord &
+        Pick<StandaloneTimeReportEntry, 'erpUserId' | 'serviceNumber'>
+    >(
+      `SELECT entry.id, entry.task_id AS "taskId", entry.user_id AS "userId",
+        entry.created_by_id AS "createdById", entry.duration_minutes AS "durationMinutes",
+        entry.comment, entry."createdAt", actor.id AS "actorId", actor.login AS "actorLogin",
+        actor.initial AS "actorInitial", actor.image AS "actorImage",
+        actor.erp_id AS "erpUserId", actor.service_number AS "serviceNumber"
+       FROM task_time_entries entry JOIN users actor ON actor.id = entry.user_id
+       WHERE entry.task_id IS NULL AND entry."createdAt" >= :start AND entry."createdAt" < :end
+         ${query.beforeId ? 'AND entry.id < :beforeId' : ''}
+       ORDER BY entry.id DESC LIMIT :limit`,
+      {
+        replacements: {
+          start: new Date(query.start),
+          end: new Date(query.end),
+          beforeId: query.beforeId,
+          limit: limit + 1
+        },
+        type: QueryTypes.SELECT
+      }
+    );
+    const page = records.slice(0, limit);
+
+    return {
+      items: page.map(record => ({
+        ...this.mapTaskTimeEntry(record),
+        erpUserId: record.erpUserId,
+        serviceNumber: record.serviceNumber
+      })),
+      nextCursor:
+        records.length > limit ? Number(page[page.length - 1].id) : null
+    };
+  }
+
+  /** Читает период без загрузки каждой задачи; доступ и авторство остаются прежними. */
+  async getTimeReport(
+    userId: number,
+    query: TaskTimeReportQueryDto
+  ): Promise<TaskTimeReportPage> {
+    const start = new Date(query.start);
+    const end = new Date(query.end);
+
+    this.assertTimeReportPeriod(query);
 
     const projectIds = await this.projectAccess.getReadableProjectIds(userId);
     if (!projectIds.length) return { items: [], nextCursor: null };
@@ -1531,6 +1584,7 @@ export class TasksService {
       TaskTimeEntryRecord & Omit<TaskTimeReportEntry, keyof TaskTimeEntry>
     >(
       `SELECT entry.id, entry.task_id AS "taskId", entry.user_id AS "userId",
+        entry.created_by_id AS "createdById",
         entry.duration_minutes AS "durationMinutes", entry.comment, entry."createdAt",
         actor.id AS "actorId", actor.login AS "actorLogin", actor.initial AS "actorInitial",
         actor.image AS "actorImage", actor.erp_id AS "erpUserId", actor.service_number AS "serviceNumber",
@@ -1562,6 +1616,7 @@ export class TasksService {
     return {
       items: page.map(record => ({
         ...this.mapTaskTimeEntry(record),
+        taskId: Number(record.taskId),
         erpUserId: record.erpUserId,
         serviceNumber: record.serviceNumber,
         taskTitle: record.taskTitle,
@@ -1589,6 +1644,7 @@ export class TasksService {
           entry.id,
           entry.task_id AS "taskId",
           entry.user_id AS "userId",
+          entry.created_by_id AS "createdById",
           entry.duration_minutes AS "durationMinutes",
           entry.comment,
           entry."createdAt",
@@ -1623,16 +1679,61 @@ export class TasksService {
     };
   }
 
-  /** Создаёт запись времени от имени текущего пользователя. */
+  /** Учитывает время сотруднику, отдельно сохраняя пользователя, внёсшего запись. */
   async createTimeEntry(
-    id: number,
+    id: number | null,
     dto: CreateTaskTimeEntryDto,
     userId: number
   ): Promise<TaskTimeEntry> {
     const transaction = await this.sequelize.transaction();
 
     try {
-      await this.assertTaskAccess(id, userId, transaction);
+      const targetUserId = dto.userId ?? userId;
+
+      if (id !== null) {
+        const task = await this.assertTaskAccess(id, userId, transaction);
+
+        if (targetUserId !== userId) {
+          const projectId = await this.getProjectIdByColumnId(
+            task.columnId,
+            transaction
+          );
+          const project = await this.projectAccess.assertCanRead(
+            projectId,
+            userId,
+            transaction
+          );
+          const members = await this.projectAccess.getActiveMemberIds(
+            projectId,
+            transaction,
+            [targetUserId]
+          );
+
+          if (
+            project.createdById !== targetUserId &&
+            !members.includes(targetUserId)
+          ) {
+            throw new HttpException(
+              'Сотрудник не является участником проекта',
+              HttpStatus.BAD_REQUEST
+            );
+          }
+        }
+      }
+
+      const targetUser = await User.findByPk(targetUserId, {
+        attributes: ['id', 'ban'],
+        transaction,
+        lock: Transaction.LOCK.SHARE
+      });
+
+      if (!targetUser || targetUser.ban) {
+        throw new HttpException(
+          'Сотрудник не найден или заблокирован',
+          HttpStatus.BAD_REQUEST
+        );
+      }
+
       const comment = dto.comment?.trim() || null;
       const [record] = await this.sequelize.query<TaskTimeEntryRecord>(
         `
@@ -1640,17 +1741,19 @@ export class TasksService {
             INSERT INTO task_time_entries (
               task_id,
               user_id,
+              created_by_id,
               duration_minutes,
               comment,
               "createdAt"
             )
-            VALUES (:taskId, :userId, :durationMinutes, :comment, CURRENT_TIMESTAMP)
-            RETURNING id, task_id, user_id, duration_minutes, comment, "createdAt"
+            VALUES (:taskId, :userId, :createdById, :durationMinutes, :comment, CURRENT_TIMESTAMP)
+            RETURNING id, task_id, user_id, created_by_id, duration_minutes, comment, "createdAt"
           )
           SELECT
             inserted.id,
             inserted.task_id AS "taskId",
             inserted.user_id AS "userId",
+            inserted.created_by_id AS "createdById",
             inserted.duration_minutes AS "durationMinutes",
             inserted.comment,
             inserted."createdAt",
@@ -1664,7 +1767,8 @@ export class TasksService {
         {
           replacements: {
             taskId: id,
-            userId,
+            userId: targetUserId,
+            createdById: userId,
             durationMinutes: dto.durationMinutes,
             comment
           },

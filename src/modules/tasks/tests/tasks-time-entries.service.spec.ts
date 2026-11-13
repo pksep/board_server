@@ -1,5 +1,6 @@
 import { QueryTypes } from 'sequelize';
 import { TasksService } from '../tasks.service';
+import { User } from '../../users/model/users.model';
 
 interface ITaskTimeServiceFixture {
   projectAccess: { assertCanRead: jest.Mock };
@@ -20,6 +21,9 @@ const createRecord = (id: number): Record<string, unknown> => ({
 });
 
 describe('TasksService task time entries', () => {
+  afterEach((): void => {
+    jest.restoreAllMocks();
+  });
   const createService = (sequelize: object): ITaskTimeServiceFixture => {
     const taskRepository = {
       findByPk: jest.fn().mockResolvedValue({ id: 42, columnId: 10 })
@@ -84,6 +88,9 @@ describe('TasksService task time entries', () => {
   });
 
   it('сохраняет длительность и необязательный комментарий текущего пользователя', async () => {
+    jest
+      .spyOn(User, 'findByPk')
+      .mockResolvedValue({ id: 7, ban: false } as User);
     const transaction = {
       commit: jest.fn(),
       rollback: jest.fn()
@@ -111,6 +118,7 @@ describe('TasksService task time entries', () => {
         replacements: {
           taskId: 42,
           userId: 7,
+          createdById: 7,
           durationMinutes: 80,
           comment: 'Проверил результат'
         },

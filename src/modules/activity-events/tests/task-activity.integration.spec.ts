@@ -26,6 +26,10 @@ import { User } from '../../users/model/users.model';
 import { TokenAuth } from '../../auth/jwt-auth.guard';
 import { AccessTokenService } from '../../auth/access-token.service';
 import { IUserDataToken } from '../../auth/interfaces/interface';
+import type {
+  IAccessTokenRequest,
+  IAuthenticatedAccessToken
+} from '../../auth/interfaces/access-token-request.interface';
 import { S3Service } from '../../s3/s3.service';
 import { WsGateway } from '../../ws/ws.gateway';
 import { ActivityEventsService } from '../activity-events.service';
@@ -156,13 +160,20 @@ describeWithDatabase(
             provide: AccessTokenService,
             useValue: {
               isEnabled: (): boolean => true,
-              authenticate: async (token: string): Promise<User> => {
+              authenticateRequest: async (
+                request: IAccessTokenRequest
+              ): Promise<IAuthenticatedAccessToken> => {
+                const token =
+                  request.headers?.authorization?.replace(/^Bearer\s+/i, '') ??
+                  request.cookies?.access_token;
+                if (typeof token !== 'string')
+                  throw new UnauthorizedException();
                 const user = [owner, first, second, outsider].find(
                   candidate => token === `activity-${candidate.id}`
                 );
                 if (!user) throw new UnauthorizedException();
 
-                return user;
+                return { token, user };
               },
               toUserPayload: (user: User): IUserDataToken => ({
                 id: user.id,
