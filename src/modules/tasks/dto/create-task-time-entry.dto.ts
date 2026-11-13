@@ -9,6 +9,14 @@ import {
 } from 'class-validator';
 
 export class CreateTaskTimeEntryDto {
+  @ApiPropertyOptional({
+    description: 'Сотрудник Board, которому учитывается время'
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  userId?: number;
+
   @ApiProperty({
     example: 80,
     description: 'Фактическое время выполнения в минутах'
