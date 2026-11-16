@@ -19,6 +19,14 @@ import { ProjectTaskAttributeDto } from './project-task-attribute.dto';
 
 export class CreateProjectDto {
   @ApiProperty({
+    default: false,
+    description: 'Сохраняемая настройка отображения проекта на производстве'
+  })
+  @IsOptional()
+  @IsBoolean()
+  showInProduction?: boolean;
+
+  @ApiProperty({
     default: true,
     description: 'Значения атрибутов меняют только контроллеры задачи'
   })
