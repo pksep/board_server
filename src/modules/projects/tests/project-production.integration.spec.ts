@@ -4,6 +4,7 @@ import { Attributes, DataTypes, Model } from 'sequelize';
 import { Sequelize } from 'sequelize-typescript';
 import models from '../../../configs/models';
 import { User } from '../../users/model/users.model';
+import { ProjectTag } from '../../tags/model/project-tag.model';
 import { CreateProjectDto } from '../dto/create-project.dto';
 import { UpdateProjectDto } from '../dto/update-project.dto';
 import { Project } from '../model/project.model';
@@ -48,6 +49,11 @@ describeWithDatabase(
           'Project settings require an isolated board_archive_test_* database'
         );
       }
+
+      // Как в проверке смены аккаунта, сохраняем идентичность настоящих моделей при resetModules.
+      jest.doMock('../model/project-member.model', () => ({ ProjectMember }));
+      jest.doMock('../model/user-favorite.model', () => ({ UserFavorite }));
+      jest.doMock('../../tags/model/project-tag.model', () => ({ ProjectTag }));
 
       database = new Sequelize(databaseUrl!, {
         dialect: 'postgres',
