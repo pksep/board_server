@@ -7,7 +7,9 @@ import models from '../../../configs/models';
 import { TasksService } from '../tasks.service';
 import { TaskCommentCountersService } from '../../task-comment-counters/task-comment-counters.service';
 import { TasksController } from '../tasks.controller';
+import { TimeEntriesController } from '../time-entries.controller';
 import { TimeReportPermissionGuard } from '../time-report-permission.guard';
+import { StandaloneTimePermissionGuard } from '../standalone-time-permission.guard';
 import { ExecutorPlanningPermissionGuard } from '../executor-planning-permission.guard';
 import { ProjectAccessService } from '../../projects/project-access.service';
 import { Project } from '../../projects/model/project.model';
@@ -53,8 +55,11 @@ describeWithDatabase('Persisted task time report and project access', () => {
     await require('../../../../migrations/2026/30.09.2026/20260930120000-create-task-time-entries.js').up(
       sequelize.getQueryInterface()
     );
+    await require('../../../../migrations/2026/13.11.2026/20261113120000-standalone-time-entries.js').up(
+      sequelize.getQueryInterface()
+    );
     const module = await Test.createTestingModule({
-      controllers: [TasksController],
+      controllers: [TasksController, TimeEntriesController],
       providers: [
         TasksService,
         {
@@ -77,6 +82,8 @@ describeWithDatabase('Persisted task time report and project access', () => {
       .overrideGuard(ExecutorPlanningPermissionGuard)
       .useValue({ canActivate: (): boolean => true })
       .overrideGuard(TimeReportPermissionGuard)
+      .useValue({ canActivate: (): boolean => true })
+      .overrideGuard(StandaloneTimePermissionGuard)
       .useValue({ canActivate: (): boolean => true })
       .compile();
     service = module.get(TasksService);
@@ -144,7 +151,13 @@ describeWithDatabase('Persisted task time report and project access', () => {
       req.user = { id: owner.id };
       next();
     });
-    app.useGlobalPipes(new ValidationPipe({ transform: true }));
+    app.useGlobalPipes(
+      new ValidationPipe({
+        transform: true,
+        whitelist: true,
+        forbidNonWhitelisted: true
+      })
+    );
     await app.init();
   });
 
@@ -224,5 +237,143 @@ describeWithDatabase('Persisted task time report and project access', () => {
     await project.destroy();
     expect((await service.getTimeReport(owner.id, period)).items).toEqual([]);
     await project.restore();
+  });
+
+  it('credits a project member while preserving the actual recorder', async (): Promise<void> => {
+    const response = await request(app.getHttpServer())
+      .post(`/tasks/${task.id}/time-entries`)
+      .send({
+        durationMinutes: 75,
+        userId: member.id,
+        comment: '  Для участника  '
+      })
+      .expect(201);
+    expect(response.body).toMatchObject({
+      taskId: task.id,
+      userId: member.id,
+      createdById: owner.id,
+      durationMinutes: 75,
+      comment: 'Для участника',
+      actor: { id: member.id }
+    });
+    const history = await service.getTimeEntries(task.id, owner.id, {});
+    expect(
+      history.items.find(entry => entry.id === response.body.id)
+    ).toMatchObject({ userId: member.id, createdById: owner.id });
+    await sequelize.query('DELETE FROM task_time_entries WHERE id = :id', {
+      replacements: { id: response.body.id }
+    });
+  });
+
+  it('rejects assigning task time to an outsider or blocked employee without inserting data', async (): Promise<void> => {
+    await request(app.getHttpServer())
+      .post(`/tasks/${task.id}/time-entries`)
+      .send({ durationMinutes: 30, userId: outsider.id })
+      .expect(400);
+    await member.update({ ban: true });
+    try {
+      await request(app.getHttpServer())
+        .post(`/tasks/${task.id}/time-entries`)
+        .send({ durationMinutes: 30, userId: member.id })
+        .expect(400);
+      await request(app.getHttpServer())
+        .post('/time-entries')
+        .send({ durationMinutes: 30, userId: member.id })
+        .expect(400);
+    } finally {
+      await member.update({ ban: false });
+    }
+  });
+
+  it('creates independent time, pages its report and keeps task reports unchanged', async (): Promise<void> => {
+    const created: number[] = [];
+    const now = new Date();
+    const range = {
+      start: new Date(now.getTime() - 60000).toISOString(),
+      end: new Date(now.getTime() + 60000).toISOString()
+    };
+    try {
+      for (const payload of [
+        { durationMinutes: 25 },
+        { durationMinutes: 35, userId: outsider.id, comment: 'Без задачи' }
+      ]) {
+        const response = await request(app.getHttpServer())
+          .post('/time-entries')
+          .send(payload)
+          .expect(201);
+        created.push(response.body.id);
+        expect(response.body).toMatchObject({
+          taskId: null,
+          userId: payload.userId ?? owner.id,
+          createdById: owner.id
+        });
+      }
+      const page = await service.getStandaloneTimeReport({
+        ...range,
+        limit: 1
+      });
+      expect(page.items[0]).toMatchObject({
+        id: created[1],
+        userId: outsider.id,
+        actor: { id: outsider.id },
+        serviceNumber: outsider.serviceNumber
+      });
+      const next = await service.getStandaloneTimeReport({
+        ...range,
+        limit: 1,
+        beforeId: page.nextCursor!
+      });
+      expect(next.items[0].id).toBe(created[0]);
+      expect(next.nextCursor).toBeNull();
+      expect((await service.getTimeReport(owner.id, range)).items).toEqual([]);
+      await expect(
+        require('../../../../migrations/2026/13.11.2026/20261113120000-standalone-time-entries.js').down(
+          sequelize.getQueryInterface()
+        )
+      ).rejects.toThrow('Cannot roll back');
+      expect((await service.getStandaloneTimeReport(range)).items).toHaveLength(
+        2
+      );
+    } finally {
+      for (const id of created)
+        await sequelize.query('DELETE FROM task_time_entries WHERE id = :id', {
+          replacements: { id }
+        });
+    }
+  });
+
+  it('validates independent entries and refuses recorder spoofing', async (): Promise<void> => {
+    for (const body of [
+      { durationMinutes: 0 },
+      { durationMinutes: 1.5 },
+      { durationMinutes: 10, userId: -1 },
+      { durationMinutes: 10, userId: 99999999 },
+      { durationMinutes: 10, createdById: outsider.id },
+      { durationMinutes: 10, comment: 'a'.repeat(2001) }
+    ]) {
+      await request(app.getHttpServer())
+        .post('/time-entries')
+        .send(body)
+        .expect(400);
+    }
+    await request(app.getHttpServer())
+      .get('/time-entries')
+      .query({ start: period.end, end: period.start })
+      .expect(400);
+  });
+
+  it('keeps old inserts compatible and rolls back without losing the original history', async (): Promise<void> => {
+    const migration = require('../../../../migrations/2026/13.11.2026/20261113120000-standalone-time-entries.js');
+    expect(
+      (await service.getTimeEntries(task.id, owner.id, {})).items.every(
+        entry => entry.createdById === member.id
+      )
+    ).toBe(true);
+    await migration.up(sequelize.getQueryInterface());
+    await migration.down(sequelize.getQueryInterface());
+    await migration.up(sequelize.getQueryInterface());
+    expect((await service.getTimeReport(owner.id, period)).items).toHaveLength(
+      2
+    );
   });
 });
