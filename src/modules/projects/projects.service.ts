@@ -149,6 +149,7 @@ export class ProjectsService {
           prefix: dto.prefix.toUpperCase(),
           description: dto.description || '',
           attributesOwnerOnly: dto.attributesOwnerOnly ?? true,
+          showInProduction: dto.showInProduction ?? false,
           taskAttributeDefinitions: this.normalizeTaskAttributeDefinitions(
             dto.taskAttributeDefinitions
           ),
@@ -205,6 +206,9 @@ export class ProjectsService {
       if (dto.description !== undefined) project.description = dto.description;
       if (dto.attributesOwnerOnly !== undefined) {
         project.attributesOwnerOnly = dto.attributesOwnerOnly;
+      }
+      if (dto.showInProduction !== undefined) {
+        project.showInProduction = dto.showInProduction;
       }
       if (dto.taskAttributeDefinitions !== undefined) {
         project.taskAttributeDefinitions =

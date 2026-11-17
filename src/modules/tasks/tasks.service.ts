@@ -673,6 +673,11 @@ export class TasksService {
          task.time_norm_minutes AS "timeNormMinutes",
          COALESCE(task.start_date < :debtBefore, false) AS "isDebt"
        ${this.personalTaskSource({ scope: 'assigned' }, true, !query.erpUserIds)}
+         ${
+           query.onlyProductionProjects
+             ? 'AND project.show_in_production = true'
+             : ''
+         }
          AND ((task.start_date >= :start AND task.start_date < :end)
            OR (task.due_date >= :start AND task.due_date < :end)
            OR task.start_date < :debtBefore)

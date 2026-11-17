@@ -21,6 +21,15 @@ const lazyUserFavorite = () => require('./user-favorite.model').UserFavorite;
 
 @Table({ tableName: 'projects', paranoid: true })
 export class Project extends Model<Project> {
+  @ApiProperty({ default: false })
+  @Column({
+    type: DataType.BOOLEAN,
+    allowNull: false,
+    defaultValue: false,
+    field: 'show_in_production'
+  })
+  showInProduction: boolean;
+
   @ApiProperty({ default: true })
   @Column({
     type: DataType.BOOLEAN,

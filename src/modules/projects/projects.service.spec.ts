@@ -8,23 +8,32 @@ describe('ProjectsService project order', () => {
     rollback: jest.fn()
   };
   const projectRepository = {
-    findAll: jest.fn()
+    findAll: jest.fn(),
+    findByPk: jest.fn(),
+    findOne: jest.fn(),
+    create: jest.fn()
   };
   const memberRepository = {
     findAll: jest.fn(),
-    update: jest.fn()
+    update: jest.fn(),
+    bulkCreate: jest.fn(),
+    destroy: jest.fn()
   };
   const favoriteRepository = {};
   const sequelize = {
     transaction: jest.fn().mockResolvedValue(transaction),
     query: jest.fn()
   };
+  const projectAccess = {
+    assertCanRead: jest.fn(),
+    assertCanManage: jest.fn()
+  };
   const service = new ProjectsService(
     projectRepository as any,
     memberRepository as any,
     favoriteRepository as any,
     sequelize as any,
-    {} as any
+    projectAccess as any
   );
 
   beforeEach(() => {
@@ -80,5 +89,51 @@ describe('ProjectsService project order', () => {
 
     expect(memberRepository.update).not.toHaveBeenCalled();
     expect(transaction.rollback).toHaveBeenCalledTimes(1);
+  });
+
+  it('сохраняет настройку производства при создании проекта', async () => {
+    const createdProject = { id: 7, showInProduction: true };
+    projectRepository.findOne.mockResolvedValue(null);
+    projectRepository.create.mockResolvedValue(createdProject);
+    projectRepository.findByPk.mockResolvedValue(createdProject);
+    projectAccess.assertCanRead.mockResolvedValue(createdProject);
+    memberRepository.findAll.mockResolvedValue([]);
+    memberRepository.bulkCreate.mockResolvedValue([]);
+
+    await expect(
+      service.create(
+        {
+          title: 'Производственный проект',
+          prefix: 'PRD',
+          showInProduction: true
+        },
+        42
+      )
+    ).resolves.toBe(createdProject);
+
+    expect(projectRepository.create).toHaveBeenCalledWith(
+      expect.objectContaining({ showInProduction: true }),
+      { transaction }
+    );
+  });
+
+  it('обновляет и возвращает сохранённую настройку производства', async () => {
+    const project = {
+      id: 7,
+      createdById: 42,
+      showInProduction: true,
+      save: jest.fn()
+    };
+    projectAccess.assertCanManage.mockResolvedValue(project);
+    projectAccess.assertCanRead.mockResolvedValue(project);
+    projectRepository.findByPk.mockResolvedValue(project);
+
+    await expect(
+      service.update({ id: project.id, showInProduction: false }, 42)
+    ).resolves.toBe(project);
+
+    expect(project.showInProduction).toBe(false);
+    expect(project.save).toHaveBeenCalledWith({ transaction });
+    expect(transaction.commit).toHaveBeenCalledTimes(1);
   });
 });

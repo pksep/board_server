@@ -10,6 +10,7 @@ import { Test } from '@nestjs/testing';
 import { Attributes, Model } from 'sequelize';
 import { Sequelize } from 'sequelize-typescript';
 import request = require('supertest');
+import type { Request } from 'express';
 import models from '../../../configs/models';
 import { TasksController } from '../../tasks/tasks.controller';
 import { TimeReportPermissionGuard } from '../../tasks/time-report-permission.guard';
@@ -156,13 +157,17 @@ describeWithDatabase(
             provide: AccessTokenService,
             useValue: {
               isEnabled: (): boolean => true,
-              authenticate: async (token: string): Promise<User> => {
+              authenticateRequest: async (
+                req: Request
+              ): Promise<{ token: string; user: User }> => {
+                const token =
+                  req.headers.authorization?.replace(/^Bearer /, '') ?? '';
                 const user = [owner, first, second, outsider].find(
                   candidate => token === `activity-${candidate.id}`
                 );
                 if (!user) throw new UnauthorizedException();
 
-                return user;
+                return { token, user };
               },
               toUserPayload: (user: User): IUserDataToken => ({
                 id: user.id,
