@@ -2,6 +2,7 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { getModelToken } from '@nestjs/sequelize';
 import { Test } from '@nestjs/testing';
 import { Sequelize } from 'sequelize-typescript';
+import { QueryTypes } from 'sequelize';
 import request = require('supertest');
 import models from '../../../configs/models';
 import { TasksService } from '../tasks.service';
@@ -16,6 +17,7 @@ import { Project } from '../../projects/model/project.model';
 import { ProjectMember } from '../../projects/model/project-member.model';
 import { Board } from '../../boards/model/board.model';
 import { BoardColumn } from '../../columns/model/board-column.model';
+import { ColumnStatus } from '../../columns/interfaces/column-status.interface';
 import { Task } from '../model/task.model';
 import { User } from '../../users/model/users.model';
 import { WsGateway } from '../../ws/ws.gateway';
@@ -34,6 +36,7 @@ describeWithDatabase('Persisted task time report and project access', () => {
   let outsider: User;
   let task: Task;
   let project: Project;
+  let column: BoardColumn;
   const period = { start: '2026-10-18T21:00:00Z', end: '2026-10-25T21:00:00Z' };
 
   beforeAll(async (): Promise<void> => {
@@ -123,7 +126,7 @@ describeWithDatabase('Persisted task time report and project access', () => {
     const board = await Board.build()
       .set({ title: 'Time board', projectId: project.id })
       .save();
-    const column = await BoardColumn.build()
+    column = await BoardColumn.build()
       .set({ title: 'Time column', boardId: board.id })
       .save();
     task = await Task.build()
@@ -180,8 +183,79 @@ describeWithDatabase('Persisted task time report and project access', () => {
       erpUserId: '88002',
       serviceNumber: 'time-member',
       projectId: project.id,
-      taskId: task.id
+      taskId: task.id,
+      timeNormMinutes: null,
+      columnStatus: null,
+      taskTotalMinutes: 150
     });
+  });
+
+  it('returns the same full task total beyond the period and cursor for proportional norm allocation', async (): Promise<void> => {
+    await task.update({ timeNormMinutes: 120 });
+    await column.update({ status: ColumnStatus.Completed });
+
+    try {
+      const first = await service.getTimeReport(member.id, {
+        ...period,
+        limit: 1
+      });
+      const second = await service.getTimeReport(member.id, {
+        ...period,
+        limit: 1,
+        beforeId: first.nextCursor!
+      });
+
+      for (const entry of [...first.items, ...second.items]) {
+        expect(entry).toMatchObject({
+          taskId: task.id,
+          timeNormMinutes: 120,
+          columnStatus: 'completed',
+          // В выбранном периоде 60 минут, но вся задача заняла 150 минут.
+          taskTotalMinutes: 150
+        });
+      }
+      expect(
+        first.items[0].durationMinutes + second.items[0].durationMinutes
+      ).toBe(60);
+      expect((await service.getTimeReport(outsider.id, period)).items).toEqual(
+        []
+      );
+    } finally {
+      await task.update({ timeNormMinutes: null });
+      await column.update({ status: null });
+    }
+  });
+
+  it('includes other employees in the task total while preserving the credited employee of each entry', async (): Promise<void> => {
+    const [inserted] = await sequelize.query<{ id: number }>(
+      `INSERT INTO task_time_entries (task_id, user_id, duration_minutes, "createdAt")
+       VALUES (:task, :actor, 50, '2026-09-01T10:00:00Z') RETURNING id`,
+      {
+        replacements: { task: task.id, actor: owner.id },
+        type: QueryTypes.SELECT
+      }
+    );
+    await task.update({ timeNormMinutes: 160 });
+    await column.update({ status: ColumnStatus.Archived });
+
+    try {
+      const report = await service.getTimeReport(owner.id, period);
+      expect(report.items).toHaveLength(2);
+      for (const entry of report.items) {
+        expect(entry).toMatchObject({
+          userId: member.id,
+          timeNormMinutes: 160,
+          columnStatus: 'archived',
+          taskTotalMinutes: 200
+        });
+      }
+    } finally {
+      await sequelize.query('DELETE FROM task_time_entries WHERE id = :id', {
+        replacements: { id: inserted.id }
+      });
+      await task.update({ timeNormMinutes: null });
+      await column.update({ status: null });
+    }
   });
 
   it('returns the same history to a member and nothing to an outsider, regardless of global role', async (): Promise<void> => {

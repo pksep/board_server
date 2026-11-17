@@ -12,7 +12,10 @@ import { MoveTaskDto } from './dto/move-task.dto';
 import { Project } from '../projects/model/project.model';
 import { BoardColumn } from '../columns/model/board-column.model';
 import { ColumnMovePermission } from '../columns/interfaces/column-move-permission.interface';
-import { ColumnStatus } from '../columns/interfaces/column-status.interface';
+import {
+  ColumnStatus,
+  normalizeLegacyColumnStatus
+} from '../columns/interfaces/column-status.interface';
 import { Board } from '../boards/model/board.model';
 import { User } from '../users/model/users.model';
 import { ProjectTag } from '../tags/model/project-tag.model';
@@ -1583,12 +1586,14 @@ export class TasksService {
     const records = await this.sequelize.query<
       TaskTimeEntryRecord & Omit<TaskTimeReportEntry, keyof TaskTimeEntry>
     >(
-      `SELECT entry.id, entry.task_id AS "taskId", entry.user_id AS "userId",
+      `WITH report_entries AS (
+       SELECT entry.id, entry.task_id AS "taskId", entry.user_id AS "userId",
         entry.created_by_id AS "createdById",
         entry.duration_minutes AS "durationMinutes", entry.comment, entry."createdAt",
         actor.id AS "actorId", actor.login AS "actorLogin", actor.initial AS "actorInitial",
         actor.image AS "actorImage", actor.erp_id AS "erpUserId", actor.service_number AS "serviceNumber",
         task.title AS "taskTitle", task.task_number AS "taskNumber",
+        task.time_norm_minutes AS "timeNormMinutes", col.status AS "columnStatus",
         project.id AS "projectId", project.title AS "projectTitle", project.prefix AS "projectPrefix"
        FROM task_time_entries entry
        JOIN users actor ON actor.id = entry.user_id
@@ -1599,7 +1604,16 @@ export class TasksService {
        WHERE project.id IN (:projectIds)
          AND entry."createdAt" >= :start AND entry."createdAt" < :end
          ${query.beforeId ? 'AND entry.id < :beforeId' : ''}
-       ORDER BY entry.id DESC LIMIT :limit`,
+       ORDER BY entry.id DESC LIMIT :limit
+       ), task_totals AS (
+         SELECT history.task_id, SUM(history.duration_minutes)::double precision AS "taskTotalMinutes"
+         FROM task_time_entries history
+         JOIN (SELECT DISTINCT "taskId" FROM report_entries) selected ON selected."taskId" = history.task_id
+         GROUP BY history.task_id
+       )
+       SELECT report_entries.*, task_totals."taskTotalMinutes"
+       FROM report_entries JOIN task_totals ON task_totals.task_id = report_entries."taskId"
+       ORDER BY report_entries.id DESC`,
       {
         replacements: {
           projectIds,
@@ -1623,7 +1637,11 @@ export class TasksService {
         taskNumber: Number(record.taskNumber),
         projectId: Number(record.projectId),
         projectTitle: record.projectTitle,
-        projectPrefix: record.projectPrefix
+        projectPrefix: record.projectPrefix,
+        timeNormMinutes: record.timeNormMinutes,
+        columnStatus: normalizeLegacyColumnStatus(record.columnStatus),
+        // Полное время не ограничивается месяцем: норма делится между всеми записями задачи.
+        taskTotalMinutes: Number(record.taskTotalMinutes)
       })),
       nextCursor:
         records.length > limit ? Number(page[page.length - 1].id) : null
