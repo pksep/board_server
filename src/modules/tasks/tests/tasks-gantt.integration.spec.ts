@@ -1117,6 +1117,41 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
       await outsider.update({ ban: false });
     });
 
+    it('executor workload includes only production-visible projects when requested', async (): Promise<void> => {
+      const erpId = 700007;
+      await outsider.update({ erpId: String(erpId) });
+      await persist(ProjectMember.build(), {
+        projectId: project.id,
+        userId: outsider.id
+      });
+      await roots[0].update({ timeNormMinutes: 60 });
+
+      /** Читает тот же endpoint с фильтром, который включает таблица производства. */
+      const readProductionProjects = async (): Promise<
+        ExecutorWorkloadTask[]
+      > => {
+        const response = await request(app.getHttpServer())
+          .get('/tasks/executor-workload')
+          .query({
+            erpUserIds: String(erpId),
+            start: '2026-10-01T00:00:00Z',
+            end: '2026-10-05T00:00:00Z',
+            onlyProductionProjects: true
+          })
+          .auth('gantt-owner-token', { type: 'bearer' })
+          .expect(200);
+
+        return response.body;
+      };
+
+      expect(await readProductionProjects()).toEqual([]);
+      await project.update({ showInProduction: true });
+      expect(await readProductionProjects()).toHaveLength(1);
+      await project.update({ showInProduction: false });
+      expect(await readProductionProjects()).toEqual([]);
+      expect(await readExecutorWorkload([erpId])).toHaveLength(1);
+    });
+
     it('executor workload includes either date inside the half-open range and excludes inactive statuses and absent norms', async (): Promise<void> => {
       const erpId = 700004;
       await outsider.update({ erpId: String(erpId) });

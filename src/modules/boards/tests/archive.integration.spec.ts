@@ -19,6 +19,7 @@ import { TaskAssignee } from '../../tasks/model/task-assignee.model';
 import { TaskTag } from '../../tasks/model/task-tag.model';
 import { TaskAttachment } from '../../tasks/model/task-attachment.model';
 import { TasksController } from '../../tasks/tasks.controller';
+import { ExecutorPlanningPermissionGuard } from '../../tasks/executor-planning-permission.guard';
 import { TimeReportPermissionGuard } from '../../tasks/time-report-permission.guard';
 import { ExecutorPlanningPermissionGuard } from '../../tasks/executor-planning-permission.guard';
 import { TasksService } from '../../tasks/tasks.service';
@@ -99,6 +100,8 @@ describeWithDatabase('Archive API with isolated PostgreSQL', () => {
         { provide: S3Service, useValue: {} }
       ]
     })
+      .overrideGuard(ExecutorPlanningPermissionGuard)
+      .useValue({ canActivate: (): boolean => true })
       .overrideGuard(TimeReportPermissionGuard)
       .useValue({ canActivate: (): boolean => true })
       .overrideGuard(ExecutorPlanningPermissionGuard)
