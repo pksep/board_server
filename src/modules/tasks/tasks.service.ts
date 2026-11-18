@@ -1210,13 +1210,13 @@ export class TasksService {
   private hasStructuredTaskFilters(query: TaskListQueryDto): boolean {
     return Boolean(
       query.assigneeIds?.length ||
-        query.creatorIds?.length ||
-        query.priorities?.length ||
-        query.tagIds?.length ||
-        query.startDateFrom ||
-        query.startDateTo ||
-        query.dueDateFrom ||
-        query.dueDateTo
+      query.creatorIds?.length ||
+      query.priorities?.length ||
+      query.tagIds?.length ||
+      query.startDateFrom ||
+      query.startDateTo ||
+      query.dueDateFrom ||
+      query.dueDateTo
     );
   }
 

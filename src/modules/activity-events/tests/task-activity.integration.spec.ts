@@ -10,7 +10,6 @@ import { Test } from '@nestjs/testing';
 import { Attributes, Model } from 'sequelize';
 import { Sequelize } from 'sequelize-typescript';
 import request = require('supertest');
-import type { Request } from 'express';
 import models from '../../../configs/models';
 import { TasksController } from '../../tasks/tasks.controller';
 import { TimeReportPermissionGuard } from '../../tasks/time-report-permission.guard';
