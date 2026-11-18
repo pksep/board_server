@@ -27,6 +27,10 @@ import { User } from '../../users/model/users.model';
 import { TokenAuth } from '../../auth/jwt-auth.guard';
 import { AccessTokenService } from '../../auth/access-token.service';
 import { IUserDataToken } from '../../auth/interfaces/interface';
+import type {
+  IAccessTokenRequest,
+  IAuthenticatedAccessToken
+} from '../../auth/interfaces/access-token-request.interface';
 import { S3Service } from '../../s3/s3.service';
 import { WsGateway } from '../../ws/ws.gateway';
 import { ActivityEventsService } from '../activity-events.service';
@@ -158,10 +162,13 @@ describeWithDatabase(
             useValue: {
               isEnabled: (): boolean => true,
               authenticateRequest: async (
-                req: Request
-              ): Promise<{ token: string; user: User }> => {
+                request: IAccessTokenRequest
+              ): Promise<IAuthenticatedAccessToken> => {
                 const token =
-                  req.headers.authorization?.replace(/^Bearer /, '') ?? '';
+                  request.headers?.authorization?.replace(/^Bearer\s+/i, '') ??
+                  request.cookies?.access_token;
+                if (typeof token !== 'string')
+                  throw new UnauthorizedException();
                 const user = [owner, first, second, outsider].find(
                   candidate => token === `activity-${candidate.id}`
                 );

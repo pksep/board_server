@@ -2,18 +2,22 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { getModelToken } from '@nestjs/sequelize';
 import { Test } from '@nestjs/testing';
 import { Sequelize } from 'sequelize-typescript';
+import { QueryTypes } from 'sequelize';
 import request = require('supertest');
 import models from '../../../configs/models';
 import { TasksService } from '../tasks.service';
 import { TaskCommentCountersService } from '../../task-comment-counters/task-comment-counters.service';
 import { TasksController } from '../tasks.controller';
+import { TimeEntriesController } from '../time-entries.controller';
 import { TimeReportPermissionGuard } from '../time-report-permission.guard';
+import { StandaloneTimePermissionGuard } from '../standalone-time-permission.guard';
 import { ExecutorPlanningPermissionGuard } from '../executor-planning-permission.guard';
 import { ProjectAccessService } from '../../projects/project-access.service';
 import { Project } from '../../projects/model/project.model';
 import { ProjectMember } from '../../projects/model/project-member.model';
 import { Board } from '../../boards/model/board.model';
 import { BoardColumn } from '../../columns/model/board-column.model';
+import { ColumnStatus } from '../../columns/interfaces/column-status.interface';
 import { Task } from '../model/task.model';
 import { User } from '../../users/model/users.model';
 import { WsGateway } from '../../ws/ws.gateway';
@@ -32,6 +36,7 @@ describeWithDatabase('Persisted task time report and project access', () => {
   let outsider: User;
   let task: Task;
   let project: Project;
+  let column: BoardColumn;
   const period = { start: '2026-10-18T21:00:00Z', end: '2026-10-25T21:00:00Z' };
 
   beforeAll(async (): Promise<void> => {
@@ -53,8 +58,11 @@ describeWithDatabase('Persisted task time report and project access', () => {
     await require('../../../../migrations/2026/30.09.2026/20260930120000-create-task-time-entries.js').up(
       sequelize.getQueryInterface()
     );
+    await require('../../../../migrations/2026/13.11.2026/20261113120000-standalone-time-entries.js').up(
+      sequelize.getQueryInterface()
+    );
     const module = await Test.createTestingModule({
-      controllers: [TasksController],
+      controllers: [TasksController, TimeEntriesController],
       providers: [
         TasksService,
         {
@@ -77,6 +85,8 @@ describeWithDatabase('Persisted task time report and project access', () => {
       .overrideGuard(ExecutorPlanningPermissionGuard)
       .useValue({ canActivate: (): boolean => true })
       .overrideGuard(TimeReportPermissionGuard)
+      .useValue({ canActivate: (): boolean => true })
+      .overrideGuard(StandaloneTimePermissionGuard)
       .useValue({ canActivate: (): boolean => true })
       .compile();
     service = module.get(TasksService);
@@ -116,7 +126,7 @@ describeWithDatabase('Persisted task time report and project access', () => {
     const board = await Board.build()
       .set({ title: 'Time board', projectId: project.id })
       .save();
-    const column = await BoardColumn.build()
+    column = await BoardColumn.build()
       .set({ title: 'Time column', boardId: board.id })
       .save();
     task = await Task.build()
@@ -144,7 +154,13 @@ describeWithDatabase('Persisted task time report and project access', () => {
       req.user = { id: owner.id };
       next();
     });
-    app.useGlobalPipes(new ValidationPipe({ transform: true }));
+    app.useGlobalPipes(
+      new ValidationPipe({
+        transform: true,
+        whitelist: true,
+        forbidNonWhitelisted: true
+      })
+    );
     await app.init();
   });
 
@@ -167,8 +183,79 @@ describeWithDatabase('Persisted task time report and project access', () => {
       erpUserId: '88002',
       serviceNumber: 'time-member',
       projectId: project.id,
-      taskId: task.id
+      taskId: task.id,
+      timeNormMinutes: null,
+      columnStatus: null,
+      taskTotalMinutes: 150
     });
+  });
+
+  it('returns the same full task total beyond the period and cursor for proportional norm allocation', async (): Promise<void> => {
+    await task.update({ timeNormMinutes: 120 });
+    await column.update({ status: ColumnStatus.Completed });
+
+    try {
+      const first = await service.getTimeReport(member.id, {
+        ...period,
+        limit: 1
+      });
+      const second = await service.getTimeReport(member.id, {
+        ...period,
+        limit: 1,
+        beforeId: first.nextCursor!
+      });
+
+      for (const entry of [...first.items, ...second.items]) {
+        expect(entry).toMatchObject({
+          taskId: task.id,
+          timeNormMinutes: 120,
+          columnStatus: 'completed',
+          // В выбранном периоде 60 минут, но вся задача заняла 150 минут.
+          taskTotalMinutes: 150
+        });
+      }
+      expect(
+        first.items[0].durationMinutes + second.items[0].durationMinutes
+      ).toBe(60);
+      expect((await service.getTimeReport(outsider.id, period)).items).toEqual(
+        []
+      );
+    } finally {
+      await task.update({ timeNormMinutes: null });
+      await column.update({ status: null });
+    }
+  });
+
+  it('includes other employees in the task total while preserving the credited employee of each entry', async (): Promise<void> => {
+    const [inserted] = await sequelize.query<{ id: number }>(
+      `INSERT INTO task_time_entries (task_id, user_id, duration_minutes, "createdAt")
+       VALUES (:task, :actor, 50, '2026-09-01T10:00:00Z') RETURNING id`,
+      {
+        replacements: { task: task.id, actor: owner.id },
+        type: QueryTypes.SELECT
+      }
+    );
+    await task.update({ timeNormMinutes: 160 });
+    await column.update({ status: ColumnStatus.Archived });
+
+    try {
+      const report = await service.getTimeReport(owner.id, period);
+      expect(report.items).toHaveLength(2);
+      for (const entry of report.items) {
+        expect(entry).toMatchObject({
+          userId: member.id,
+          timeNormMinutes: 160,
+          columnStatus: 'archived',
+          taskTotalMinutes: 200
+        });
+      }
+    } finally {
+      await sequelize.query('DELETE FROM task_time_entries WHERE id = :id', {
+        replacements: { id: inserted.id }
+      });
+      await task.update({ timeNormMinutes: null });
+      await column.update({ status: null });
+    }
   });
 
   it('returns the same history to a member and nothing to an outsider, regardless of global role', async (): Promise<void> => {
@@ -224,5 +311,143 @@ describeWithDatabase('Persisted task time report and project access', () => {
     await project.destroy();
     expect((await service.getTimeReport(owner.id, period)).items).toEqual([]);
     await project.restore();
+  });
+
+  it('credits a project member while preserving the actual recorder', async (): Promise<void> => {
+    const response = await request(app.getHttpServer())
+      .post(`/tasks/${task.id}/time-entries`)
+      .send({
+        durationMinutes: 75,
+        userId: member.id,
+        comment: '  Для участника  '
+      })
+      .expect(201);
+    expect(response.body).toMatchObject({
+      taskId: task.id,
+      userId: member.id,
+      createdById: owner.id,
+      durationMinutes: 75,
+      comment: 'Для участника',
+      actor: { id: member.id }
+    });
+    const history = await service.getTimeEntries(task.id, owner.id, {});
+    expect(
+      history.items.find(entry => entry.id === response.body.id)
+    ).toMatchObject({ userId: member.id, createdById: owner.id });
+    await sequelize.query('DELETE FROM task_time_entries WHERE id = :id', {
+      replacements: { id: response.body.id }
+    });
+  });
+
+  it('rejects assigning task time to an outsider or blocked employee without inserting data', async (): Promise<void> => {
+    await request(app.getHttpServer())
+      .post(`/tasks/${task.id}/time-entries`)
+      .send({ durationMinutes: 30, userId: outsider.id })
+      .expect(400);
+    await member.update({ ban: true });
+    try {
+      await request(app.getHttpServer())
+        .post(`/tasks/${task.id}/time-entries`)
+        .send({ durationMinutes: 30, userId: member.id })
+        .expect(400);
+      await request(app.getHttpServer())
+        .post('/time-entries')
+        .send({ durationMinutes: 30, userId: member.id })
+        .expect(400);
+    } finally {
+      await member.update({ ban: false });
+    }
+  });
+
+  it('creates independent time, pages its report and keeps task reports unchanged', async (): Promise<void> => {
+    const created: number[] = [];
+    const now = new Date();
+    const range = {
+      start: new Date(now.getTime() - 60000).toISOString(),
+      end: new Date(now.getTime() + 60000).toISOString()
+    };
+    try {
+      for (const payload of [
+        { durationMinutes: 25 },
+        { durationMinutes: 35, userId: outsider.id, comment: 'Без задачи' }
+      ]) {
+        const response = await request(app.getHttpServer())
+          .post('/time-entries')
+          .send(payload)
+          .expect(201);
+        created.push(response.body.id);
+        expect(response.body).toMatchObject({
+          taskId: null,
+          userId: payload.userId ?? owner.id,
+          createdById: owner.id
+        });
+      }
+      const page = await service.getStandaloneTimeReport({
+        ...range,
+        limit: 1
+      });
+      expect(page.items[0]).toMatchObject({
+        id: created[1],
+        userId: outsider.id,
+        actor: { id: outsider.id },
+        serviceNumber: outsider.serviceNumber
+      });
+      const next = await service.getStandaloneTimeReport({
+        ...range,
+        limit: 1,
+        beforeId: page.nextCursor!
+      });
+      expect(next.items[0].id).toBe(created[0]);
+      expect(next.nextCursor).toBeNull();
+      expect((await service.getTimeReport(owner.id, range)).items).toEqual([]);
+      await expect(
+        require('../../../../migrations/2026/13.11.2026/20261113120000-standalone-time-entries.js').down(
+          sequelize.getQueryInterface()
+        )
+      ).rejects.toThrow('Cannot roll back');
+      expect((await service.getStandaloneTimeReport(range)).items).toHaveLength(
+        2
+      );
+    } finally {
+      for (const id of created)
+        await sequelize.query('DELETE FROM task_time_entries WHERE id = :id', {
+          replacements: { id }
+        });
+    }
+  });
+
+  it('validates independent entries and refuses recorder spoofing', async (): Promise<void> => {
+    for (const body of [
+      { durationMinutes: 0 },
+      { durationMinutes: 1.5 },
+      { durationMinutes: 10, userId: -1 },
+      { durationMinutes: 10, userId: 99999999 },
+      { durationMinutes: 10, createdById: outsider.id },
+      { durationMinutes: 10, comment: 'a'.repeat(2001) }
+    ]) {
+      await request(app.getHttpServer())
+        .post('/time-entries')
+        .send(body)
+        .expect(400);
+    }
+    await request(app.getHttpServer())
+      .get('/time-entries')
+      .query({ start: period.end, end: period.start })
+      .expect(400);
+  });
+
+  it('keeps old inserts compatible and rolls back without losing the original history', async (): Promise<void> => {
+    const migration = require('../../../../migrations/2026/13.11.2026/20261113120000-standalone-time-entries.js');
+    expect(
+      (await service.getTimeEntries(task.id, owner.id, {})).items.every(
+        entry => entry.createdById === member.id
+      )
+    ).toBe(true);
+    await migration.up(sequelize.getQueryInterface());
+    await migration.down(sequelize.getQueryInterface());
+    await migration.up(sequelize.getQueryInterface());
+    expect((await service.getTimeReport(owner.id, period)).items).toHaveLength(
+      2
+    );
   });
 });

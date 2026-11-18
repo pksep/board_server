@@ -21,6 +21,7 @@ import { TaskAttachment } from '../../tasks/model/task-attachment.model';
 import { TasksController } from '../../tasks/tasks.controller';
 import { ExecutorPlanningPermissionGuard } from '../../tasks/executor-planning-permission.guard';
 import { TimeReportPermissionGuard } from '../../tasks/time-report-permission.guard';
+import { ExecutorPlanningPermissionGuard } from '../../tasks/executor-planning-permission.guard';
 import { TasksService } from '../../tasks/tasks.service';
 import { TaskCommentCountersService } from '../../task-comment-counters/task-comment-counters.service';
 import { ActivityEvent } from '../../activity-events/model/activity-event.model';
@@ -102,6 +103,8 @@ describeWithDatabase('Archive API with isolated PostgreSQL', () => {
       .overrideGuard(ExecutorPlanningPermissionGuard)
       .useValue({ canActivate: (): boolean => true })
       .overrideGuard(TimeReportPermissionGuard)
+      .useValue({ canActivate: (): boolean => true })
+      .overrideGuard(ExecutorPlanningPermissionGuard)
       .useValue({ canActivate: (): boolean => true })
       .compile();
     app = module.createNestApplication();
