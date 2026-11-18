@@ -105,7 +105,12 @@ export interface TaskTimeEntry {
 export interface TaskTimeEntryPage {
   items: TaskTimeEntry[];
   nextCursor: number | null;
+  totalMinutes: number;
 }
+
+type TaskTimeEntryPageRecord = (TaskTimeEntryRecord | { id: null }) & {
+  totalMinutes: number;
+};
 
 @Injectable()
 export class TasksService {
@@ -1648,7 +1653,7 @@ export class TasksService {
     };
   }
 
-  /** Возвращает записи фактического времени задачи от новых к старым. */
+  /** Возвращает страницу записей и общее фактическое время задачи. */
   async getTimeEntries(
     id: number,
     userId: number,
@@ -1656,26 +1661,36 @@ export class TasksService {
   ): Promise<TaskTimeEntryPage> {
     await this.assertTaskAccess(id, userId, undefined, false, true);
     const pageSize = Math.min(Math.max(query.limit || 50, 1), 100);
-    const records = await this.sequelize.query<TaskTimeEntryRecord>(
+    // Итог и страницу читаем из одного снимка. Курсор ограничивает только записи.
+    const records = await this.sequelize.query<TaskTimeEntryPageRecord>(
       `
-        SELECT
-          entry.id,
-          entry.task_id AS "taskId",
-          entry.user_id AS "userId",
-          entry.created_by_id AS "createdById",
-          entry.duration_minutes AS "durationMinutes",
-          entry.comment,
-          entry."createdAt",
-          actor.id AS "actorId",
-          actor.login AS "actorLogin",
-          actor.initial AS "actorInitial",
-          actor.image AS "actorImage"
-        FROM task_time_entries entry
-        INNER JOIN users actor ON actor.id = entry.user_id
-        WHERE entry.task_id = :taskId
-          ${query.beforeId ? 'AND entry.id < :beforeId' : ''}
-        ORDER BY entry.id DESC
-        LIMIT :limit
+        SELECT page.*, totals."totalMinutes"
+        FROM (
+          SELECT COALESCE(SUM(duration_minutes), 0)::double precision AS "totalMinutes"
+          FROM task_time_entries
+          WHERE task_id = :taskId
+        ) totals
+        LEFT JOIN LATERAL (
+          SELECT
+            entry.id,
+            entry.task_id AS "taskId",
+            entry.user_id AS "userId",
+            entry.created_by_id AS "createdById",
+            entry.duration_minutes AS "durationMinutes",
+            entry.comment,
+            entry."createdAt",
+            actor.id AS "actorId",
+            actor.login AS "actorLogin",
+            actor.initial AS "actorInitial",
+            actor.image AS "actorImage"
+          FROM task_time_entries entry
+          INNER JOIN users actor ON actor.id = entry.user_id
+          WHERE entry.task_id = :taskId
+            ${query.beforeId ? 'AND entry.id < :beforeId' : ''}
+          ORDER BY entry.id DESC
+          LIMIT :limit
+        ) page ON TRUE
+        ORDER BY page.id DESC
       `,
       {
         replacements: {
@@ -1686,14 +1701,19 @@ export class TasksService {
         type: QueryTypes.SELECT
       }
     );
-    const hasNextPage = records.length > pageSize;
-    const pageRecords = hasNextPage ? records.slice(0, pageSize) : records;
+    const entries = records.filter(
+      (record): record is TaskTimeEntryRecord & { totalMinutes: number } =>
+        record.id !== null
+    );
+    const hasNextPage = entries.length > pageSize;
+    const pageRecords = entries.slice(0, pageSize);
 
     return {
       items: pageRecords.map(record => this.mapTaskTimeEntry(record)),
       nextCursor: hasNextPage
         ? Number(pageRecords[pageRecords.length - 1].id)
-        : null
+        : null,
+      totalMinutes: records[0].totalMinutes
     };
   }
 
