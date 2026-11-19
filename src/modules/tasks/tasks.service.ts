@@ -2339,7 +2339,9 @@ export class TasksService {
           transaction
         );
 
-      if (dto.startDate !== undefined || dto.dueDate !== undefined) {
+      // Перенос ручного начала не сдвигает требуемый срок: просрочку показываем в ПЗ.
+      // Новый срок по-прежнему проверяем относительно выбранного начала.
+      if (dto.dueDate !== undefined) {
         this.assertTaskDateOrder(
           dto.startDate !== undefined ? dto.startDate : task.startDate,
           dto.dueDate !== undefined ? dto.dueDate : task.dueDate
