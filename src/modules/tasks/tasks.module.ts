@@ -17,10 +17,12 @@ import { TimeReportPermissionGuard } from './time-report-permission.guard';
 import { StandaloneTimePermissionGuard } from './standalone-time-permission.guard';
 import { ExecutorPlanningPermissionGuard } from './executor-planning-permission.guard';
 import { TaskCommentCountersService } from '../task-comment-counters/task-comment-counters.service';
+import { ProductionQueueWorkProvider } from './production-queue-work.provider';
 
 @Module({
   controllers: [TasksController, TimeEntriesController],
   providers: [
+    ProductionQueueWorkProvider,
     TasksService,
     TimeReportPermissionGuard,
     StandaloneTimePermissionGuard,

@@ -111,6 +111,49 @@ export interface TaskTimeEntryPage {
 export class TasksService {
   private readonly logger = new Logger(TasksService.name);
 
+  /** Доверенный ERP worker читает только актуальные назначения и норму; при включении проверяет право изменения даты. */
+  async getProductionQueueWork(
+    resourceId: number,
+    taskIds: number[],
+    actorErpId?: number
+  ): Promise<{ taskId: number; title: string; timeNormMinutes: number }[]> {
+    if (actorErpId) {
+      const actor = await User.findOne({
+        attributes: ['id'],
+        where: { erpId: String(actorErpId), ban: false }
+      });
+      if (!actor)
+        throw new HttpException(
+          'Пользователь доски не найден',
+          HttpStatus.FORBIDDEN
+        );
+      await this.sequelize.transaction(async transaction => {
+        for (const id of taskIds) {
+          const task = await this.assertTaskAccess(id, actor.id, transaction);
+          await this.assertCanEditTaskFields(
+            task,
+            { startDate: task.startDate?.toISOString() ?? null },
+            actor.id,
+            transaction
+          );
+        }
+      });
+    }
+    return this.sequelize.query<{
+      taskId: number;
+      title: string;
+      timeNormMinutes: number;
+    }>(
+      `SELECT task.id AS "taskId", task.title, task.time_norm_minutes AS "timeNormMinutes"
+       ${this.personalTaskSource({ scope: 'assigned' }, true)}
+       AND task.id IN (:taskIds) AND task.time_norm_minutes > 0 ORDER BY task.id`,
+      {
+        replacements: { taskIds, executorErpIds: [String(resourceId)] },
+        type: QueryTypes.SELECT
+      }
+    );
+  }
+
   constructor(
     @InjectModel(Task) private taskRepository: typeof Task,
     @InjectModel(TaskAssignee) private assigneeRepository: typeof TaskAssignee,
@@ -625,6 +668,14 @@ export class TasksService {
        JOIN boards board ON board.id = col.board_id AND board."deletedAt" IS NULL
        JOIN projects project ON project.id = board.project_id AND project."deletedAt" IS NULL
        ${executorSource}
+       ${
+         hasExecutor
+           ? `LEFT JOIN LATERAL (
+         SELECT MAX(personal.production_start_date) AS start_date FROM task_assignees personal
+         WHERE personal.task_id = task.id AND personal.user_id = executor.id
+       ) production_planning ON true`
+           : ''
+       }
        WHERE task."deletedAt" IS NULL
          ${hasExecutor ? '' : `AND ${this.taskProjectReaderAccess()}`}
          ${
@@ -676,19 +727,19 @@ export class TasksService {
     return this.sequelize.query<ExecutorWorkloadTask>(
       `SELECT executor.erp_id::int AS "executorId", task.id AS "taskId",
          project.id AS "projectId", project.title AS "projectName",
-         task.start_date AS "startDate", task.due_date AS "dueDate",
+         COALESCE(production_planning.start_date, task.start_date) AS "startDate", task.due_date AS "dueDate",
          task.time_norm_minutes AS "timeNormMinutes",
-         COALESCE(task.start_date < :debtBefore, false) AS "isDebt"
+         COALESCE(COALESCE(production_planning.start_date, task.start_date) < :debtBefore, false) AS "isDebt"
        ${this.personalTaskSource({ scope: 'assigned' }, true, !query.erpUserIds)}
          ${
            query.onlyProductionProjects
              ? 'AND project.show_in_production = true'
              : ''
          }
-         AND ((task.start_date >= :start AND task.start_date < :end)
+         AND ((COALESCE(production_planning.start_date, task.start_date) >= :start AND COALESCE(production_planning.start_date, task.start_date) < :end)
            OR (task.due_date >= :start AND task.due_date < :end)
-           OR task.start_date < :debtBefore)
-         AND (task.time_norm_minutes > 0 OR task.start_date < :debtBefore)
+           OR COALESCE(production_planning.start_date, task.start_date) < :debtBefore)
+         AND (task.time_norm_minutes > 0 OR COALESCE(production_planning.start_date, task.start_date) < :debtBefore)
        ORDER BY task.id, executor.erp_id::int`,
       {
         replacements: {

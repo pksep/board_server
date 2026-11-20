@@ -1115,7 +1115,7 @@ describeWithDatabase(
       await write(
         'put',
         `/tasks/${task.id}`,
-        { dueDate: '2026-10-09T00:00:00Z' },
+        { startDate: '2026-10-21T00:00:00Z' },
         'date-outsider-token'
       ).expect(400);
       await ProjectMember.destroy({
@@ -1157,6 +1157,7 @@ describeWithDatabase(
 
     it.each([
       { dueDate: '2026-10-09T00:00:00Z' },
+      { startDate: '2026-10-21T00:00:00Z' },
       { startDate: '2026-10-14T00:00:00Z', dueDate: '2026-10-13T00:00:00Z' }
     ])(
       'validates the effective pair for a partial update %j without saving other fields',
@@ -1179,23 +1180,6 @@ describeWithDatabase(
         expect(ws.emitTaskUpdated).not.toHaveBeenCalled();
       }
     );
-
-    it('allows a manual start after the unchanged required date and records the change', async (): Promise<void> => {
-      await write('put', `/tasks/${task.id}`, {
-        startDate: '2026-10-21T00:00:00Z'
-      }).expect(200);
-      await task.reload();
-      expect(task.startDate.toISOString()).toBe('2026-10-21T00:00:00.000Z');
-      expect(task.dueDate.toISOString()).toBe('2026-10-20T00:00:00.000Z');
-      const events = await ActivityEvent.findAll({
-        where: { projectId: project.id }
-      });
-      expect(events).toHaveLength(1);
-      expect(events[0].changes.map(change => change.field)).toEqual([
-        'startDate'
-      ]);
-      expect(ws.emitTaskUpdated).toHaveBeenCalledTimes(1);
-    });
 
     it.each(['task', 'subtask'])(
       'allows equal dates for %s creation and emits the normal history',

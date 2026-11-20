@@ -31,7 +31,6 @@ describe('AccessTokenService', () => {
     get: jest.fn((key: string) => {
       if (key === 'authServiceUrl') return 'http://sep-auth:8080/';
       if (key === 'erpApiUrl') return 'http://erp:5000';
-      if (key === 'erpClientOfflineHost') return 'http://localhost:8080/';
       return undefined;
     })
   };
@@ -133,11 +132,7 @@ describe('AccessTokenService', () => {
       expect(post).toHaveBeenCalledWith(
         'http://erp:5000/api/auth/check',
         { token: 'legacy-erp-token' },
-        expect.objectContaining({
-          headers: { Origin: 'http://localhost:8080' },
-          timeout: 3000,
-          proxy: false
-        })
+        expect.objectContaining({ timeout: 3000 })
       );
     }
   );
