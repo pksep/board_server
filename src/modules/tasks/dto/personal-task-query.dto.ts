@@ -1,11 +1,14 @@
 import { ApiPropertyOptional, PickType } from '@nestjs/swagger';
-import { Transform } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
   IsEnum,
   IsIn,
-  IsOptional
+  IsInt,
+  IsOptional,
+  Max,
+  Min
 } from 'class-validator';
 import {
   ColumnStatus,
@@ -40,6 +43,19 @@ export class PersonalTaskQueryDto extends PickType(TaskListQueryDto, [
   @ArrayMaxSize(Object.values(ColumnStatus).length)
   @IsEnum(ColumnStatus, { each: true })
   columnStatuses?: ColumnStatus[];
+
+  @ApiPropertyOptional({ description: 'Идентификатор колонки личных задач' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(2147483647)
+  columnId?: number;
+
+  @ApiPropertyOptional({ enum: ['true', 'false'] })
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  includeColumnOptions?: 'true' | 'false';
 
   @ApiPropertyOptional({ enum: ['dueDate', 'startDate'], default: 'dueDate' })
   @IsOptional()

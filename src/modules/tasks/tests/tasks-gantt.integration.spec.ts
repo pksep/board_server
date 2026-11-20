@@ -1759,6 +1759,67 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     );
   });
 
+  it('filters personal tasks by column before pagination and keeps the scoped column choices', async (): Promise<void> => {
+    const columnId = columns[0].id;
+    await columns[0].update({ status: ColumnStatus.InProgress });
+    await persist(Task.build(), {
+      title: 'Second personal task in column',
+      taskNumber: 90,
+      columnId,
+      createdById: owner.id
+    });
+    const unfiltered = await readPersonal({
+      limit: '100',
+      includeColumnOptions: 'true'
+    });
+    const expected = unfiltered.items.filter(
+      item => item.task.columnId === columnId
+    );
+    const filter = {
+      columnId: String(columnId),
+      columnStatuses: [ColumnStatus.InProgress],
+      includeColumnOptions: 'true',
+      limit: '1'
+    };
+    const first = await readPersonal(filter);
+    const second = await readPersonal({
+      ...filter,
+      offset: String(first.offset)
+    });
+    const mismatch = await readPersonal({
+      ...filter,
+      columnStatuses: [ColumnStatus.Queued]
+    });
+    const outsiderPage = await readPersonal(filter, 'gantt-outsider-token');
+
+    expect(expected.length).toBeGreaterThan(1);
+    expect(first.total).toBe(expected.length);
+    expect([...first.items, ...second.items].map(item => item.task.id)).toEqual(
+      expected.slice(0, 2).map(item => item.task.id)
+    );
+    expect(first.columnOptions).toEqual(unfiltered.columnOptions);
+    expect(first.columnOptions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: columnId,
+          title: columns[0].title,
+          projectTitle: project.title
+        })
+      ])
+    );
+    expect(second.columnOptions).toBeUndefined();
+    expect(mismatch).toMatchObject({
+      items: [],
+      total: 0,
+      columnOptions: first.columnOptions
+    });
+    expect(outsiderPage.items).toEqual([]);
+    expect(
+      outsiderPage.columnOptions?.some(option => option.id === columnId)
+    ).toBe(false);
+    expect((await readPersonal({ limit: '1' })).columnOptions).toBeUndefined();
+  });
+
   it('personal task pages sort globally before pagination, with deterministic ties and null dates last', async (): Promise<void> => {
     roots[0].dueDate = null;
     roots[0].startDate = new Date('2030-01-01T00:00:00Z');
