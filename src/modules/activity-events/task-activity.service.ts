@@ -56,6 +56,12 @@ export class TaskActivityService {
       throw new BadRequestException('Используйте только один курсор истории');
     }
     const limit = query.limit ?? 50;
+    const general = query.scope === 'all';
+    const order = query.afterId !== undefined ? 'ASC' : 'DESC';
+    const cursor = `${query.beforeId ? 'AND e.id < :beforeId' : ''}
+      ${query.afterId !== undefined ? 'AND e.id > :afterId' : ''}`;
+    // Независимый EXISTS останавливает общую ленту без доступных проектов до
+    // обхода журнала: иначе план с ORDER BY/LIMIT может проверить все события.
     const items = await this.sequelize.query<TaskActivityItem>(
       `
       ${ACCESSIBLE_PROJECTS}
@@ -74,10 +80,9 @@ export class TaskActivityService {
       ${FEED_FROM}
       LEFT JOIN users actor ON actor.id = e.actor_user_id
       WHERE ${FEED_ACCESS}
-        ${query.scope === 'all' ? '' : 'AND r.user_id = :userId'}
-        ${query.beforeId ? 'AND e.id < :beforeId' : ''}
-        ${query.afterId !== undefined ? 'AND e.id > :afterId' : ''}
-      ORDER BY e.id ${query.afterId !== undefined ? 'ASC' : 'DESC'} LIMIT :limit
+        ${general ? 'AND EXISTS (SELECT 1 FROM activity_accessible_projects)' : 'AND r.user_id = :userId'}
+        ${cursor}
+      ORDER BY e.id ${order} LIMIT :limit
     `,
       {
         type: QueryTypes.SELECT,

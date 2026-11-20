@@ -1402,22 +1402,38 @@ export class TasksService {
     return new Set([...current].filter(id => next.has(id)));
   }
 
-  /** Поднимается по цепочке родителей и возвращает ID корневой карточки. */
-  private findRootTaskId(taskId: number, tasksById: Map<number, Task>): number {
+  /** Разрешает общих предков один раз; null в кэше сохраняет поведение циклической цепочки. */
+  private findRootTaskId(
+    taskId: number,
+    tasksById: Map<number, Pick<Task, 'id' | 'parentTaskId'>>,
+    rootsByTaskId: Map<number, number | null>
+  ): number {
     const visitedTaskIds = new Set<number>();
     let currentTaskId = taskId;
+    let rootTaskId: number | null = null;
 
     while (!visitedTaskIds.has(currentTaskId)) {
+      if (rootsByTaskId.has(currentTaskId)) {
+        rootTaskId = rootsByTaskId.get(currentTaskId);
+        break;
+      }
       visitedTaskIds.add(currentTaskId);
       const parentTaskId = Number(
         tasksById.get(currentTaskId)?.parentTaskId || 0
       );
 
-      if (!parentTaskId) return currentTaskId;
+      if (!parentTaskId) {
+        rootTaskId = currentTaskId;
+        break;
+      }
       currentTaskId = parentTaskId;
     }
 
-    return taskId;
+    for (const visitedTaskId of visitedTaskIds) {
+      rootsByTaskId.set(visitedTaskId, rootTaskId);
+    }
+
+    return rootTaskId ?? taskId;
   }
 
   /**
@@ -1554,10 +1570,12 @@ export class TasksService {
     // Подзадача остаётся в своей колонке, даже если родитель не загружен или отфильтрован.
     if (query.flatSubtasks) return [...matchingTaskIds];
 
+    const rootsByTaskId = new Map<number, number | null>();
+
     return [
       ...new Set(
         [...matchingTaskIds].map(taskId =>
-          this.findRootTaskId(taskId, candidatesById)
+          this.findRootTaskId(taskId, candidatesById, rootsByTaskId)
         )
       )
     ];

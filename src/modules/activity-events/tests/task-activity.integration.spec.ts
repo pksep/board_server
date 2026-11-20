@@ -7,7 +7,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import { getModelToken } from '@nestjs/sequelize';
 import { Test } from '@nestjs/testing';
-import { Attributes, Model } from 'sequelize';
+import { Attributes, Model, QueryTypes } from 'sequelize';
 import { Sequelize } from 'sequelize-typescript';
 import request = require('supertest');
 import models from '../../../configs/models';
@@ -49,6 +49,12 @@ import { ActivityEventPage } from '../interfaces/activity-event.interface';
 
 const databaseUrl = process.env.BOARD_ARCHIVE_TEST_DATABASE_URL;
 const describeWithDatabase = databaseUrl ? describe : describe.skip;
+
+interface QueryPlanNode {
+  'Relation Name'?: string;
+  'Actual Loops'?: number;
+  Plans?: QueryPlanNode[];
+}
 
 /** Записывает реальные модели только в выделенную тестовую базу. */
 async function persist<T extends Model>(
@@ -555,32 +561,127 @@ describeWithDatabase(
       );
     });
 
-    it('paginates new actions oldest-first without skipping a burst, while old pages stay newest-first', async (): Promise<void> => {
-      const snapshot = (await feed(first)).items[0].id;
-      for (let index = 0; index < 7; index += 1) {
-        await http(owner)
-          .put(`/tasks/${task.id}`)
-          .send({ title: `Delta ${index}` })
-          .expect(200);
+    it.each(['mine', 'all'])(
+      'paginates %s actions oldest-first without skipping a burst, while old pages stay newest-first',
+      async (scope): Promise<void> => {
+        const snapshot = (await feed(first, `?scope=${scope}`)).items[0].id;
+        for (let index = 0; index < 7; index += 1) {
+          await http(owner)
+            .put(`/tasks/${task.id}`)
+            .send({ title: `Delta ${index}` })
+            .expect(200);
+        }
+        const all = (await feed(first, `?scope=${scope}`)).items.map(
+          event => event.id
+        );
+        const incoming: number[] = [];
+        let cursor: number | null = snapshot;
+        do {
+          const page = await feed(
+            first,
+            `?scope=${scope}&afterId=${cursor}&limit=3`
+          );
+          expect(page.items.length).toBeLessThanOrEqual(3);
+          incoming.push(...page.items.map(event => event.id));
+          cursor = page.nextCursor;
+        } while (cursor);
+        expect(incoming).toEqual(all.filter(id => id > snapshot).reverse());
+        const older = await feed(
+          first,
+          `?scope=${scope}&beforeId=${all[2]}&limit=2`
+        );
+        expect(older.items.map(event => event.id)).toEqual(all.slice(3, 5));
+        await http(first)
+          .get(`/activity/task-feed?beforeId=${snapshot}&afterId=${snapshot}`)
+          .expect(400);
+        await http(first).get('/activity/task-feed?scope=invalid').expect(400);
+        await http(first).get('/activity/task-feed?afterId=-1').expect(400);
+        await http(first).get('/activity/task-feed?limit=101').expect(400);
       }
-      const all = (await feed(first)).items.map(event => event.id);
-      const incoming: number[] = [];
-      let cursor: number | null = snapshot;
-      do {
-        const page = await feed(first, `?afterId=${cursor}&limit=3`);
-        expect(page.items.length).toBeLessThanOrEqual(3);
-        incoming.push(...page.items.map(event => event.id));
-        cursor = page.nextCursor;
-      } while (cursor);
-      expect(incoming).toEqual(all.filter(id => id > snapshot).reverse());
-      const older = await feed(first, `?beforeId=${all[2]}&limit=2`);
-      expect(older.items.map(event => event.id)).toEqual(all.slice(3, 5));
-      await http(first)
-        .get(`/activity/task-feed?beforeId=${snapshot}&afterId=${snapshot}`)
-        .expect(400);
-      await http(first).get('/activity/task-feed?scope=invalid').expect(400);
-      await http(first).get('/activity/task-feed?afterId=-1').expect(400);
-      await http(first).get('/activity/task-feed?limit=101').expect(400);
+    );
+
+    it('does not scan the event journal for a reader without accessible projects', async (): Promise<void> => {
+      const querySpy = jest.spyOn(sequelize, 'query');
+      let sql: string;
+
+      try {
+        expect((await feed(outsider, '?scope=all')).items).toEqual([]);
+        sql = String(querySpy.mock.calls[0][0]);
+      } finally {
+        querySpy.mockRestore();
+      }
+
+      const rows = await sequelize.query<{
+        'QUERY PLAN': { Plan: QueryPlanNode }[];
+      }>(`EXPLAIN (ANALYZE, FORMAT JSON) ${sql}`, {
+        type: QueryTypes.SELECT,
+        replacements: { userId: outsider.id, limit: 51 }
+      });
+      const nodes = [rows[0]['QUERY PLAN'][0].Plan];
+      const eventScans: QueryPlanNode[] = [];
+
+      for (let index = 0; index < nodes.length; index += 1) {
+        const node = nodes[index];
+        if (node['Relation Name'] === 'activity_events') eventScans.push(node);
+        nodes.push(...(node.Plans ?? []));
+      }
+
+      // Проверяем выполненную работу, а не нестабильный порог времени тестовой машины.
+      expect(eventScans.length).toBeGreaterThan(0);
+      expect(eventScans.every(node => node['Actual Loops'] === 0)).toBe(true);
+    });
+
+    it('limits general pages only after checking each task destination', async (): Promise<void> => {
+      const destination = await persist(Project.build(), {
+        title: 'Hidden destination',
+        prefix: `HIDE${String.fromCharCode(64 + sequence)}`,
+        createdById: owner.id
+      });
+      const destinationBoard = await persist(Board.build(), {
+        title: 'Hidden board',
+        projectId: destination.id
+      });
+      const destinationColumn = await persist(BoardColumn.build(), {
+        title: 'Hidden column',
+        boardId: destinationBoard.id
+      });
+      const relocated = await persist(Task.build(), {
+        columnId: destinationColumn.id,
+        title: 'Relocated task',
+        taskNumber: 1,
+        createdById: owner.id
+      });
+      const original = (await feed(first)).items[0];
+
+      // Более свежих недоступных событий больше, чем размер страницы.
+      await ActivityEvent.bulkCreate(
+        Array.from({ length: 25 }, () => ({
+          projectId: project.id,
+          entityType: ActivityEntityType.Task,
+          entityId: String(relocated.id),
+          actionType: ActivityActionType.Updated
+        }))
+      );
+
+      const page = await feed(first, '?scope=all&limit=1');
+      expect(page.items.map(event => event.id)).toEqual([original.id]);
+      const delta = await feed(
+        first,
+        `?scope=all&afterId=${original.id}&limit=1`
+      );
+      expect(delta.items).toEqual([]);
+
+      await persist(ProjectMember.build(), {
+        projectId: destination.id,
+        userId: first.id
+      });
+      const visible = await feed(
+        first,
+        `?scope=all&afterId=${original.id}&limit=2`
+      );
+      expect(visible.items).toHaveLength(2);
+      expect(visible.nextCursor).toBe(visible.items[1].id);
+      expect(visible.items[0].taskProjectId).toBe(destination.id);
     });
 
     it('read-only requests for task or project do not erase history or mark another user', async (): Promise<void> => {
