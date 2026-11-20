@@ -2393,7 +2393,8 @@ export class TasksService {
       'timeNormMinutes',
       'tagIds',
       'parentTaskId',
-      'customAttributeValues'
+      'customAttributeValues',
+      'customAttributeChanges'
     ]);
     if (
       fields.some(([field]) =>
@@ -2468,6 +2469,16 @@ export class TasksService {
    * Обновить задачу
    */
   async update(id: number, dto: UpdateTaskDto, userId: number): Promise<Task> {
+    if (
+      dto.customAttributeValues !== undefined &&
+      dto.customAttributeChanges !== undefined
+    ) {
+      throw new HttpException(
+        'Передайте либо полный набор атрибутов, либо отдельные изменения',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
     const transaction = await this.sequelize.transaction();
     try {
       const task = await this.assertTaskAccess(id, userId, transaction, true);
@@ -2507,12 +2518,18 @@ export class TasksService {
           transaction
         );
       }
+      // Объединяем после блокировки задачи, чтобы не стереть параллельные изменения других полей.
+      const requestedAttributes =
+        dto.customAttributeChanges === undefined
+          ? dto.customAttributeValues
+          : { ...task.customAttributeValues, ...dto.customAttributeChanges };
+
       const customAttributeValues =
-        dto.customAttributeValues === undefined
+        requestedAttributes === undefined
           ? undefined
           : await this.normalizeCustomAttributeValues(
               projectId,
-              dto.customAttributeValues,
+              requestedAttributes,
               transaction
             );
       const before = {
