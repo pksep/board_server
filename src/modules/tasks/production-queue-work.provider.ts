@@ -16,9 +16,9 @@ import { Public } from '../auth/public.decorator';
 import { TasksService } from './tasks.service';
 import type {
   ProductionQueueWorkRequest,
-  ProductionQueueWorkResponse
+  ProductionQueueWorkResponse,
+  ProductionQueueDates
 } from './interfaces/production-queue-work.interface';
-import type { ProductionQueueDates } from './interfaces/production-queue-work.interface';
 
 /** Норма и права остаются у Board; персональные даты рассчитывает ERP. */
 @Injectable()
@@ -28,6 +28,7 @@ export class ProductionQueueWorkProvider
   private readonly logger = new Logger(ProductionQueueWorkProvider.name);
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stopped = false;
+  private readonly scheduledTransactions = new WeakSet<Transaction>();
   private readonly planningModels = new Set([
     'Task',
     'TaskAssignee',
@@ -154,6 +155,12 @@ export class ProductionQueueWorkProvider
   /** Только зафиксированные изменения могут перестраивать внешнюю очередь. */
   private schedule(transaction?: Transaction): void {
     if (!this.connection) return;
+    // Модельные hooks уже объединяются одним debounce-уведомлением после commit.
+    // Не регистрируем одинаковый callback для каждой изменённой строки транзакции.
+    if (transaction) {
+      if (this.scheduledTransactions.has(transaction)) return;
+      this.scheduledTransactions.add(transaction);
+    }
     const notify = (): void => {
       clearTimeout(this.timer);
       this.timer = setTimeout((): void => {

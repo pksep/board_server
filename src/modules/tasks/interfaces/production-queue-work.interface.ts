@@ -5,17 +5,25 @@ export interface ProductionQueueWorkRequest {
 }
 
 export interface ProductionQueueWorkResponse {
-  items?: { taskId: number; title: string; timeNormMinutes: number }[];
+  items?: ProductionQueueWork[];
   error?: string;
   status?: number;
+}
+
+export interface ProductionQueueWork {
+  taskId: number;
+  title: string;
+  timeNormMinutes: number;
+}
+
+export interface ProductionQueueTaskDate {
+  taskId: number;
+  startTime: string | null;
+  isManualStartTime: boolean;
 }
 
 export interface ProductionQueueDates {
   resourceId: number;
   version: string;
-  tasks: {
-    taskId: number;
-    startTime: string | null;
-    isManualStartTime: boolean;
-  }[];
+  tasks: ProductionQueueTaskDate[];
 }
