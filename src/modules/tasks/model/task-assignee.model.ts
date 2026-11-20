@@ -32,6 +32,14 @@ export class TaskAssignee extends Model<TaskAssignee> {
   @Column({ type: DataType.INTEGER, allowNull: false, field: 'user_id' })
   userId: number;
 
+  /** Персональная проекция ERP для загрузки; общая дата карточки остаётся в tasks. */
+  @Column({
+    type: DataType.DATE,
+    allowNull: true,
+    field: 'production_start_date'
+  })
+  productionStartDate: Date | null;
+
   @ApiHideProperty()
   @BelongsTo(lazyTask)
   task: any;

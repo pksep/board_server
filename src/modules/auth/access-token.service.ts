@@ -180,13 +180,22 @@ export class AccessTokenService {
     const apiBase = normalized.endsWith('/api')
       ? normalized
       : `${normalized}/api`;
+    const clientOrigin = this.configService.get<string>(
+      ConfigConstains.erpClientOfflineHost
+    );
 
     let response: AxiosResponse<IErpCheckResponse>;
     try {
       response = await axios.post<IErpCheckResponse>(
         `${apiBase}/auth/check`,
         { token },
-        { timeout: 3000, validateStatus: () => true, proxy: false }
+        {
+          // ERP проверяет источник POST до проверки токена; адрес берём из конфигурации.
+          headers: clientOrigin ? { Origin: new URL(clientOrigin).origin } : {},
+          timeout: 3000,
+          validateStatus: () => true,
+          proxy: false
+        }
       );
     } catch {
       throw new ServiceUnavailableException('ERP auth unavailable');
