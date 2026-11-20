@@ -55,6 +55,7 @@ import type {
   StandaloneTimeReportPage
 } from './interfaces/task-time-report.interface';
 import type {
+  PersonalTaskColumnOption,
   PersonalTaskLocation,
   PersonalTaskPage
 } from './interfaces/personal-task.interface';
@@ -622,6 +623,7 @@ export class TasksService {
       : query.columnStatus
         ? ' AND col.status = :columnStatus'
         : '';
+    const columnFilter = query.columnId ? ' AND col.id = :columnId' : '';
 
     // Назначение разрешено участнику проекта независимо от состава конкретной доски.
     // Иначе созданная штатным API задача исчезает из загрузки и списка ПЗ исполнителя.
@@ -645,7 +647,7 @@ export class TasksService {
              ? `EXISTS (SELECT 1 FROM task_assignees assignment
                  WHERE assignment.task_id = task.id AND assignment.user_id = ${assignedUser})`
              : 'task.created_by_id = :userId'
-         }${statusFilter}`;
+         }${statusFilter}${columnFilter}`;
   }
 
   /** Возвращает факты загрузки всех проектов после проверки права планирования в guard. */
@@ -714,7 +716,8 @@ export class TasksService {
         replacements: {
           userId,
           columnStatus: query.columnStatus,
-          columnStatuses: query.columnStatuses
+          columnStatuses: query.columnStatuses,
+          columnId: query.columnId
         },
         type: QueryTypes.SELECT
       }
@@ -746,8 +749,9 @@ export class TasksService {
     // EXISTS не размножает задачу при нескольких участниках/назначениях.
     // Счётчики детей агрегируются только для выбранной страницы, без N+1 запросов.
     // Личный фильтр не скрывает дочерние задачи, архив и доступ остаются прежними.
-    const locations = await this.sequelize.query<PersonalTaskLocation>(
-      `WITH page AS MATERIALIZED (
+    const [locations, columnOptions] = await Promise.all([
+      this.sequelize.query<PersonalTaskLocation>(
+        `WITH page AS MATERIALIZED (
          SELECT task.id, task.parent_task_id AS "parentTaskId",
            project.id AS "projectId", project.prefix AS "projectPrefix",
            project.attributes_owner_only AS "attributesOwnerOnly",
@@ -784,19 +788,31 @@ export class TasksService {
          COALESCE(subtask_counts.completed, 0) AS "subtasksCompleted"
        FROM page LEFT JOIN subtask_counts ON subtask_counts."taskId" = page.id
        ORDER BY page."sortDate" ${direction} NULLS LAST, page.id ASC`,
-      {
-        replacements: {
-          userId,
-          completedStatus: ColumnStatus.Completed,
-          executorErpIds: executorErpId ? [executorErpId] : [],
-          columnStatus: query.columnStatus,
-          columnStatuses: query.columnStatuses,
-          limit: limit + 1,
-          offset
-        },
-        type: QueryTypes.SELECT
-      }
-    );
+        {
+          replacements: {
+            userId,
+            completedStatus: ColumnStatus.Completed,
+            executorErpIds: executorErpId ? [executorErpId] : [],
+            columnStatus: query.columnStatus,
+            columnStatuses: query.columnStatuses,
+            columnId: query.columnId,
+            limit: limit + 1,
+            offset
+          },
+          type: QueryTypes.SELECT
+        }
+      ),
+      // Варианты подчиняются доступу и разделу, но не зависят от выбранных фильтров.
+      offset === 0 && !executorErpId && query.includeColumnOptions === 'true'
+        ? this.sequelize.query<PersonalTaskColumnOption>(
+            `SELECT DISTINCT col.id, col.title,
+               board.title AS "boardTitle", project.title AS "projectTitle"
+             ${this.personalTaskSource({ scope: query.scope })}
+             ORDER BY "projectTitle", "boardTitle", col.title, col.id`,
+            { replacements: { userId }, type: QueryTypes.SELECT }
+          )
+        : Promise.resolve(undefined)
+    ]);
     const page = locations.slice(0, limit);
     if (!page.length) {
       // Смещение за концом списка не превращает его общее число в ноль.
@@ -809,14 +825,21 @@ export class TasksService {
                   userId,
                   executorErpIds: executorErpId ? [executorErpId] : [],
                   columnStatus: query.columnStatus,
-                  columnStatuses: query.columnStatuses
+                  columnStatuses: query.columnStatuses,
+                  columnId: query.columnId
                 },
                 type: QueryTypes.SELECT
               }
             )
           : [];
 
-      return { items: [], total: count?.total ?? 0, offset, hasMore: false };
+      return {
+        items: [],
+        total: count?.total ?? 0,
+        offset,
+        hasMore: false,
+        ...(columnOptions ? { columnOptions } : {})
+      };
     }
 
     // Не загружаем файлы и дочерние карточки; описание нужно только таблице ПЗ.
@@ -937,7 +960,8 @@ export class TasksService {
       items,
       total: Number(locations[0].total),
       offset: offset + page.length,
-      hasMore: locations.length > limit
+      hasMore: locations.length > limit,
+      ...(columnOptions ? { columnOptions } : {})
     };
   }
 
@@ -1210,13 +1234,13 @@ export class TasksService {
   private hasStructuredTaskFilters(query: TaskListQueryDto): boolean {
     return Boolean(
       query.assigneeIds?.length ||
-        query.creatorIds?.length ||
-        query.priorities?.length ||
-        query.tagIds?.length ||
-        query.startDateFrom ||
-        query.startDateTo ||
-        query.dueDateFrom ||
-        query.dueDateTo
+      query.creatorIds?.length ||
+      query.priorities?.length ||
+      query.tagIds?.length ||
+      query.startDateFrom ||
+      query.startDateTo ||
+      query.dueDateFrom ||
+      query.dueDateTo
     );
   }
 
