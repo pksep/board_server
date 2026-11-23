@@ -249,6 +249,10 @@ describeWithDatabase('Persisted task time report and project access', () => {
           taskTotalMinutes: 200
         });
       }
+      const history = await service.getTimeEntries(task.id, member.id, {
+        limit: 1
+      });
+      expect(history.totalMinutes).toBe(200);
     } finally {
       await sequelize.query('DELETE FROM task_time_entries WHERE id = :id', {
         replacements: { id: inserted.id }
@@ -313,6 +317,33 @@ describeWithDatabase('Persisted task time report and project access', () => {
     await project.restore();
   });
 
+  it('returns the task total even when the requested page is empty', async (): Promise<void> => {
+    const firstPage = await request(app.getHttpServer())
+      .get(`/tasks/${task.id}/time-entries`)
+      .query({ limit: 1 })
+      .expect(200);
+
+    expect(firstPage.body.totalMinutes).toBe(150);
+    expect(firstPage.body.items).toMatchObject([{ durationMinutes: 90 }]);
+    expect(firstPage.body.nextCursor).toBe(firstPage.body.items[0].id);
+
+    const nextPage = await service.getTimeEntries(task.id, owner.id, {
+      limit: 1,
+      beforeId: firstPage.body.nextCursor
+    });
+    expect(nextPage.totalMinutes).toBe(150);
+    expect(nextPage.items.map(entry => entry.durationMinutes)).toEqual([40]);
+
+    const emptyPage = await service.getTimeEntries(task.id, owner.id, {
+      beforeId: 1
+    });
+    expect(emptyPage).toEqual({
+      items: [],
+      nextCursor: null,
+      totalMinutes: 150
+    });
+  });
+
   it('credits a project member while preserving the actual recorder', async (): Promise<void> => {
     const response = await request(app.getHttpServer())
       .post(`/tasks/${task.id}/time-entries`)
@@ -334,6 +365,7 @@ describeWithDatabase('Persisted task time report and project access', () => {
     expect(
       history.items.find(entry => entry.id === response.body.id)
     ).toMatchObject({ userId: member.id, createdById: owner.id });
+    expect(history.totalMinutes).toBe(225);
     await sequelize.query('DELETE FROM task_time_entries WHERE id = :id', {
       replacements: { id: response.body.id }
     });

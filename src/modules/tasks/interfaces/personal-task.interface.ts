@@ -44,9 +44,18 @@ export interface PersonalTaskItem {
   displayContext?: ExecutorTaskDisplayContext;
 }
 
+/** Один вариант отбора, с путём для различения одинаково названных колонок. */
+export interface PersonalTaskColumnOption {
+  id: number;
+  title: string;
+  boardTitle: string;
+  projectTitle: string;
+}
+
 export interface PersonalTaskPage {
   total: number;
   items: PersonalTaskItem[];
   offset: number;
   hasMore: boolean;
+  columnOptions?: PersonalTaskColumnOption[];
 }
