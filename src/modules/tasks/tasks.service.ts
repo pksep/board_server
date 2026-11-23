@@ -980,22 +980,36 @@ export class TasksService {
     });
     const byId = new Map(tasks.map(task => [task.id, task]));
     // Подписи контроллеров/ответственных берём одним пакетом только для этих задач.
-    const participantIds = executorErpId
+    const taskIdsByParticipantId = new Map<number, number[]>();
+    if (executorErpId) {
+      for (const task of tasks) {
+        const ids = new Set([
+          ...(task.controllerIds ?? [task.createdById]),
+          ...(task.responsibleIds ?? []),
+          ...task.assignees.map(assignment => assignment.userId),
+          ...Object.values(task.customAttributeValues ?? {}).flatMap(value =>
+            Array.isArray(value) ? value.map(Number) : []
+          )
+        ]);
+
+        for (const id of ids) {
+          if (!Number.isSafeInteger(id) || id <= 0) continue;
+
+          const taskIds = taskIdsByParticipantId.get(id);
+          if (taskIds) taskIds.push(task.id);
+          else taskIdsByParticipantId.set(id, [task.id]);
+        }
+      }
+    }
+    const participantIds = [...taskIdsByParticipantId.keys()];
+    const parentIds = executorErpId
       ? [
           ...new Set(
-            tasks.flatMap(task => [
-              ...(task.controllerIds ?? [task.createdById]),
-              ...(task.responsibleIds ?? []),
-              ...task.assignees.map(assignment => assignment.userId),
-              ...Object.values(task.customAttributeValues ?? {}).flatMap(
-                value => (Array.isArray(value) ? value.map(Number) : [])
-              )
-            ])
+            tasks.flatMap(task =>
+              task.parentTaskId ? [task.parentTaskId] : []
+            )
           )
-        ].filter(id => Number.isSafeInteger(id) && id > 0)
-      : [];
-    const parentIds = executorErpId
-      ? tasks.flatMap(task => (task.parentTaskId ? [task.parentTaskId] : []))
+        ]
       : [];
     const [participants, parents] = await Promise.all([
       participantIds.length
@@ -1011,6 +1025,17 @@ export class TasksService {
           })
         : Promise.resolve([])
     ]);
+    const participantsByTaskId = new Map<number, User[]>();
+    // Порядок общего результата User сохраняется и внутри каждой карточки.
+    for (const user of participants) {
+      for (const taskId of taskIdsByParticipantId.get(user.id) ?? []) {
+        const users = participantsByTaskId.get(taskId);
+        if (users) users.push(user);
+        else participantsByTaskId.set(taskId, [user]);
+      }
+    }
+    const parentsById = new Map(parents.map(parent => [parent.id, parent]));
+
     const items = page.flatMap(location => {
       const task = byId.get(location.id);
 
@@ -1033,26 +1058,8 @@ export class TasksService {
                       ? {
                           displayContext: {
                             ...location.displayContext,
-                            users: participants.filter(
-                              user =>
-                                (
-                                  task.controllerIds ?? [task.createdById]
-                                ).includes(user.id) ||
-                                task.responsibleIds?.includes(user.id) ||
-                                task.assignees.some(
-                                  assignment => assignment.userId === user.id
-                                ) ||
-                                Object.values(
-                                  task.customAttributeValues ?? {}
-                                ).some(
-                                  value =>
-                                    Array.isArray(value) &&
-                                    value.some(id => Number(id) === user.id)
-                                )
-                            ),
-                            parentTask: parents.find(
-                              parent => parent.id === task.parentTaskId
-                            )
+                            users: participantsByTaskId.get(task.id) ?? [],
+                            parentTask: parentsById.get(task.parentTaskId)
                           }
                         }
                       : {})

@@ -408,7 +408,7 @@ export class ProjectsService {
     return normalized;
   }
 
-  /** Одним запросом рассчитывает следующую позицию проекта для всех участников. */
+  /** Возвращает только максимальные позиции участников, без загрузки всей истории членства. */
   private async getNextMemberOrders(
     userIds: number[],
     transaction: Transaction
@@ -416,8 +416,19 @@ export class ProjectsService {
     if (!userIds.length) return new Map();
 
     const memberships = await this.memberRepository.findAll({
-      attributes: ['userId', 'order'],
+      attributes: [
+        'userId',
+        [
+          Sequelize.fn(
+            'MAX',
+            Sequelize.fn('COALESCE', Sequelize.col('order'), 0)
+          ),
+          'order'
+        ]
+      ],
       where: { userId: { [Op.in]: userIds } },
+      group: ['userId'],
+      raw: true,
       transaction
     });
     const nextOrderByMemberId = new Map(userIds.map(memberId => [memberId, 0]));
