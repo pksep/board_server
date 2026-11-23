@@ -49,6 +49,7 @@ import { ActivityEventPage } from '../interfaces/activity-event.interface';
 
 const databaseUrl = process.env.BOARD_ARCHIVE_TEST_DATABASE_URL;
 const describeWithDatabase = databaseUrl ? describe : describe.skip;
+const taskLookupMigration = require('../../../../migrations/2026/23.11.2026/20261123120000-add-task-activity-lookup-index.js');
 
 interface QueryPlanNode {
   'Relation Name'?: string;
@@ -133,6 +134,7 @@ describeWithDatabase(
         pool: { max: 2, min: 0 }
       });
       await sequelize.sync();
+      await taskLookupMigration.up(sequelize.getQueryInterface());
       [owner, first, second, outsider] = await Promise.all(
         ['owner', 'first', 'second', 'outsider'].map(label =>
           persist(User.build(), {
@@ -778,6 +780,104 @@ describeWithDatabase(
         .expect(200);
       expect(after.body.items).toEqual([]);
       expect(after.body.accessibleProjectIds).not.toContain(project.id);
+    });
+
+    it('preserves numeric task matching, existing read timestamps and other recipients with the lookup index', async (): Promise<void> => {
+      const oldReadAt = new Date('2026-10-01T00:00:00.000Z');
+      const original = (await feed(first)).items[0];
+      await ActivityEventRecipient.update(
+        { readAt: oldReadAt },
+        { where: { eventId: original.id, userId: first.id } }
+      );
+      const legacyEvent = await persist(ActivityEvent.build(), {
+        projectId: project.id,
+        entityType: ActivityEntityType.Task,
+        entityId: `00${task.id}`,
+        actionType: ActivityActionType.Updated,
+        actorUserId: owner.id
+      });
+      for (const user of [first, second]) {
+        await persist(ActivityEventRecipient.build(), {
+          eventId: legacyEvent.id,
+          userId: user.id
+        });
+      }
+      // A partial index must not cast arbitrary entity IDs of other entity types.
+      await persist(ActivityEvent.build(), {
+        projectId: project.id,
+        entityType: ActivityEntityType.Project,
+        entityId: 'external-project-id',
+        actionType: ActivityActionType.Updated,
+        actorUserId: owner.id
+      });
+
+      const before = await feed(first);
+      expect(before.items.map(event => event.id)).toEqual([
+        legacyEvent.id,
+        original.id
+      ]);
+      const read = await http(first)
+        .patch('/activity/task-feed/read')
+        .send({ taskId: task.id, throughEventId: legacyEvent.id })
+        .expect(200);
+      expect(read.body).toEqual({ throughEventId: legacyEvent.id });
+      const after = await feed(first);
+      expect(after.items.find(event => event.id === original.id)?.readAt).toBe(
+        oldReadAt.toISOString()
+      );
+      expect(after.items[0].readAt).not.toBeNull();
+      expect((await counts(first)).total).toBe(0);
+      const otherRecipient = await ActivityEventRecipient.findOne({
+        where: { eventId: legacyEvent.id, userId: second.id }
+      });
+      expect(otherRecipient?.readAt).toBeNull();
+    });
+
+    it('builds and removes the lookup index idempotently without changing feed or counts', async (): Promise<void> => {
+      const queryInterface = sequelize.getQueryInterface();
+      const beforeFeed = await feed(first);
+      const beforeCounts = await counts(first);
+      await taskLookupMigration.up(queryInterface);
+      await taskLookupMigration.up(queryInterface);
+      await taskLookupMigration.down(queryInterface);
+      await taskLookupMigration.down(queryInterface);
+      expect(await feed(first)).toEqual(beforeFeed);
+      expect(await counts(first)).toEqual(beforeCounts);
+      await taskLookupMigration.up(queryInterface);
+      const [indexes] = await sequelize.query(
+        `SELECT indexdef FROM pg_indexes
+         WHERE schemaname = 'public' AND indexname = 'activity_events_task_lookup_idx'`
+      );
+      expect(indexes).toHaveLength(1);
+      expect(await feed(first)).toEqual(beforeFeed);
+      expect(await counts(first)).toEqual(beforeCounts);
+    });
+
+    it('recovers an invalid concurrent lookup-index build', async (): Promise<void> => {
+      const queryInterface = sequelize.getQueryInterface();
+      await taskLookupMigration.down(queryInterface);
+      try {
+        // Duplicate task entity types deliberately leave an invalid concurrent index.
+        await expect(
+          sequelize.query(
+            `CREATE UNIQUE INDEX CONCURRENTLY activity_events_task_lookup_idx
+             ON public.activity_events (entity_type)`
+          )
+        ).rejects.toThrow();
+        const [invalid] = await sequelize.query(
+          `SELECT indisvalid FROM pg_index
+           WHERE indexrelid = 'public.activity_events_task_lookup_idx'::regclass`
+        );
+        expect(invalid).toEqual([{ indisvalid: false }]);
+      } finally {
+        await taskLookupMigration.up(queryInterface);
+      }
+      const [valid] = await sequelize.query(
+        `SELECT indisvalid FROM pg_index
+         WHERE indexrelid = 'public.activity_events_task_lookup_idx'::regclass`
+      );
+      expect(valid).toEqual([{ indisvalid: true }]);
+      expect((await feed(first)).items).toHaveLength(1);
     });
 
     it('has idempotent deployment migration and does not backfill old history', async (): Promise<void> => {
