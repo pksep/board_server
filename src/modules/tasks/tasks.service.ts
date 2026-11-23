@@ -745,7 +745,14 @@ export class TasksService {
       : query.columnStatus
         ? ' AND col.status = :columnStatus'
         : '';
-    const columnFilter = query.columnId ? ' AND col.id = :columnId' : '';
+    const columnFilter = query.columnIds?.length
+      ? ' AND col.id IN (:columnIds)'
+      : query.columnId
+        ? ' AND col.id = :columnId'
+        : '';
+    const nameFilter = query.search?.trim()
+      ? ' AND strpos(lower(task.title), lower(:search)) > 0'
+      : '';
 
     // Назначение разрешено участнику проекта независимо от состава конкретной доски.
     // Иначе созданная штатным API задача исчезает из загрузки и списка ПЗ исполнителя.
@@ -777,7 +784,7 @@ export class TasksService {
              ? `EXISTS (SELECT 1 FROM task_assignees assignment
                  WHERE assignment.task_id = task.id AND assignment.user_id = ${assignedUser})`
              : 'task.created_by_id = :userId'
-         }${statusFilter}${columnFilter}`;
+         }${statusFilter}${columnFilter}${nameFilter}`;
   }
 
   /** Возвращает факты загрузки всех проектов после проверки права планирования в guard. */
@@ -852,7 +859,9 @@ export class TasksService {
           userId,
           columnStatus: query.columnStatus,
           columnStatuses: query.columnStatuses,
-          columnId: query.columnId
+          columnId: query.columnId,
+          columnIds: query.columnIds,
+          search: query.search?.trim()
         },
         type: QueryTypes.SELECT
       }
@@ -931,6 +940,8 @@ export class TasksService {
             columnStatus: query.columnStatus,
             columnStatuses: query.columnStatuses,
             columnId: query.columnId,
+            columnIds: query.columnIds,
+            search: query.search?.trim(),
             limit: limit + 1,
             offset
           },
@@ -961,7 +972,9 @@ export class TasksService {
                   executorErpIds: executorErpId ? [executorErpId] : [],
                   columnStatus: query.columnStatus,
                   columnStatuses: query.columnStatuses,
-                  columnId: query.columnId
+                  columnId: query.columnId,
+                  columnIds: query.columnIds,
+                  search: query.search?.trim()
                 },
                 type: QueryTypes.SELECT
               }

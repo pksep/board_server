@@ -42,7 +42,12 @@ describe('TasksService.getHistory', () => {
       beforeId: 100
     });
 
-    expect(projectAccess.assertCanRead).toHaveBeenCalledWith(30, 7, undefined);
+    expect(projectAccess.assertCanRead).toHaveBeenCalledWith(
+      30,
+      7,
+      undefined,
+      undefined
+    );
     expect(activityEvents.findByEntity).toHaveBeenCalledWith({
       projectId: 30,
       entityType: ActivityEntityType.Task,

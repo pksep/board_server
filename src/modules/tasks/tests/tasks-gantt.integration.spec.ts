@@ -1820,6 +1820,107 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     expect((await readPersonal({ limit: '1' })).columnOptions).toBeUndefined();
   });
 
+  it('matches any selected column before pagination within personal task access and other filters', async (): Promise<void> => {
+    const columnIds = [columns[0].id, columns[2].id];
+    const filter = {
+      columnIds: [...columnIds, columnIds[0]].join(','),
+      search: 'ROOT',
+      limit: '1'
+    };
+    const first = await readPersonal(filter);
+    const second = await readPersonal({
+      ...filter,
+      offset: String(first.offset)
+    });
+    const pastEnd = await readPersonal({ ...filter, offset: '2' });
+    const assigned = await readPersonal({ ...filter, scope: 'assigned' });
+    const outsiderPage = await readPersonal(
+      { ...filter, scope: 'assigned' },
+      'gantt-outsider-token'
+    );
+    const completedOnly = await readPersonal({
+      ...filter,
+      columnStatuses: [ColumnStatus.Completed]
+    });
+
+    expect(first.total).toBe(2);
+    expect(first.items.map(item => item.task.id)).toEqual([roots[0].id]);
+    expect(second.items.map(item => item.task.id)).toEqual([roots[2].id]);
+    expect(pastEnd).toMatchObject({ items: [], total: 2, hasMore: false });
+    expect(assigned.items.map(item => item.task.id)).toEqual([roots[0].id]);
+    expect(completedOnly.items.map(item => item.task.id)).toEqual([
+      roots[2].id
+    ]);
+    expect(outsiderPage.items).toEqual([]);
+    expect(await service.getPersonalTaskIds(owner.id, { columnIds })).toEqual([
+      roots[0].id,
+      roots[2].id
+    ]);
+  });
+
+  it('searches personal task titles before pagination and combines search with column filters', async (): Promise<void> => {
+    const columnId = columns[0].id;
+    await columns[0].update({ status: ColumnStatus.InProgress });
+    const earlier = await persist(Task.build(), {
+      title: 'Первая сверка 20%_ПБЗ',
+      taskNumber: 90,
+      columnId,
+      createdById: owner.id,
+      startDate: new Date('2030-01-02T00:00:00Z')
+    });
+    const later = await persist(Task.build(), {
+      title: 'Вторая сверка 20%_ПБЗ',
+      taskNumber: 91,
+      columnId,
+      createdById: owner.id,
+      startDate: new Date('2030-01-03T00:00:00Z')
+    });
+    await persist(Task.build(), {
+      title: 'Сверка 200АПБЗ',
+      description: 'Здесь есть 20%_ПБЗ, но только в описании',
+      taskNumber: 92,
+      columnId,
+      createdById: owner.id
+    });
+    await persist(Task.build(), {
+      title: 'Сверка 20%_ПБЗ в другой колонке',
+      taskNumber: 93,
+      columnId: columns[1].id,
+      createdById: owner.id
+    });
+    await persist(TaskAssignee.build(), {
+      taskId: later.id,
+      userId: owner.id
+    });
+
+    const query = {
+      search: ' 20%_пбз ',
+      columnId: String(columnId),
+      columnStatuses: [ColumnStatus.InProgress],
+      sortBy: 'startDate',
+      sortDirection: 'desc',
+      limit: '1'
+    };
+    const first = await readPersonal(query);
+    const second = await readPersonal({
+      ...query,
+      offset: String(first.offset)
+    });
+    const end = await readPersonal({ ...query, offset: '10' });
+    const assigned = await readPersonal({ ...query, scope: 'assigned' });
+
+    expect(first.total).toBe(2);
+    expect(first.hasMore).toBe(true);
+    expect(first.items.map(item => item.task.id)).toEqual([later.id]);
+    expect(second.items.map(item => item.task.id)).toEqual([earlier.id]);
+    expect(end).toMatchObject({ items: [], total: 2, hasMore: false });
+    expect(assigned.items.map(item => item.task.id)).toEqual([later.id]);
+    expect(
+      (await readPersonal({ ...query, columnStatuses: [ColumnStatus.Queued] }))
+        .items
+    ).toEqual([]);
+  });
+
   it('personal task pages sort globally before pagination, with deterministic ties and null dates last', async (): Promise<void> => {
     roots[0].dueDate = null;
     roots[0].startDate = new Date('2030-01-01T00:00:00Z');
@@ -1919,7 +2020,10 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
     { limit: '0' },
     { offset: '-1' },
     { columnStatus: 'invalid-status' },
-    { columnStatuses: [ColumnStatus.Completed, 'invalid-status'] }
+    { columnStatuses: [ColumnStatus.Completed, 'invalid-status'] },
+    { columnIds: '1,invalid' },
+    { columnIds: '1,-2' },
+    { columnIds: '2147483648' }
   ])('validates personal list parameters: %p', async (query): Promise<void> => {
     await request(app.getHttpServer())
       .get('/tasks/personal')
