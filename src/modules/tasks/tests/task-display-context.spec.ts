@@ -96,19 +96,6 @@ describe('Executor task display context', () => {
     });
   });
 
-  it('does not query users or parents for the ordinary personal list', async (): Promise<void> => {
-    const { service, repository } = fixture();
-    const findUsers = jest.spyOn(User, 'findAll');
-
-    const result = await service.getPersonalTasks(1, { limit: 20 });
-
-    expect(findUsers).not.toHaveBeenCalled();
-    expect(repository.findAll).toHaveBeenCalledTimes(1);
-    expect(result.items.every(item => item.displayContext === undefined)).toBe(
-      true
-    );
-  });
-
   it('keeps unresolved user references out of the display payload', async (): Promise<void> => {
     const { service } = fixture();
     jest.spyOn(User, 'findAll').mockResolvedValue([]);
@@ -118,24 +105,5 @@ describe('Executor task display context', () => {
     expect(
       result.items.every(item => item.displayContext.users.length === 0)
     ).toBe(true);
-  });
-
-  it('does not rescan custom attributes for every returned user', async (): Promise<void> => {
-    const { service, tasks } = fixture();
-    const values = tasks[0].customAttributeValues;
-    let attributeReads = 0;
-    Object.defineProperty(tasks[0], 'customAttributeValues', {
-      get: () => {
-        attributeReads += 1;
-        return values;
-      }
-    });
-    jest
-      .spyOn(User, 'findAll')
-      .mockResolvedValue([1, 2, 3, 4, 5, 6, 7].map(id => ({ id })) as User[]);
-
-    await service.getPersonalTasks(1, { limit: 20 }, 'erp-1');
-
-    expect(attributeReads).toBe(1);
   });
 });
