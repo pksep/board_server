@@ -55,6 +55,7 @@ import type {
   StandaloneTimeReportPage
 } from './interfaces/task-time-report.interface';
 import type {
+  PersonalTaskColumnOption,
   PersonalTaskLocation,
   PersonalTaskPage
 } from './interfaces/personal-task.interface';
@@ -110,7 +111,12 @@ export interface TaskTimeEntry {
 export interface TaskTimeEntryPage {
   items: TaskTimeEntry[];
   nextCursor: number | null;
+  totalMinutes: number;
 }
+
+type TaskTimeEntryPageRecord = (TaskTimeEntryRecord | { id: null }) & {
+  totalMinutes: number;
+};
 
 @Injectable()
 export class TasksService {
@@ -739,6 +745,14 @@ export class TasksService {
       : query.columnStatus
         ? ' AND col.status = :columnStatus'
         : '';
+    const columnFilter = query.columnIds?.length
+      ? ' AND col.id IN (:columnIds)'
+      : query.columnId
+        ? ' AND col.id = :columnId'
+        : '';
+    const nameFilter = query.search?.trim()
+      ? ' AND strpos(lower(task.title), lower(:search)) > 0'
+      : '';
 
     // Назначение разрешено участнику проекта независимо от состава конкретной доски.
     // Иначе созданная штатным API задача исчезает из загрузки и списка ПЗ исполнителя.
@@ -770,7 +784,7 @@ export class TasksService {
              ? `EXISTS (SELECT 1 FROM task_assignees assignment
                  WHERE assignment.task_id = task.id AND assignment.user_id = ${assignedUser})`
              : 'task.created_by_id = :userId'
-         }${statusFilter}`;
+         }${statusFilter}${columnFilter}${nameFilter}`;
   }
 
   /** Возвращает факты загрузки всех проектов после проверки права планирования в guard. */
@@ -844,7 +858,10 @@ export class TasksService {
         replacements: {
           userId,
           columnStatus: query.columnStatus,
-          columnStatuses: query.columnStatuses
+          columnStatuses: query.columnStatuses,
+          columnId: query.columnId,
+          columnIds: query.columnIds,
+          search: query.search?.trim()
         },
         type: QueryTypes.SELECT
       }
@@ -876,8 +893,9 @@ export class TasksService {
     // EXISTS не размножает задачу при нескольких участниках/назначениях.
     // Счётчики детей агрегируются только для выбранной страницы, без N+1 запросов.
     // Личный фильтр не скрывает дочерние задачи, архив и доступ остаются прежними.
-    const locations = await this.sequelize.query<PersonalTaskLocation>(
-      `WITH page AS MATERIALIZED (
+    const [locations, columnOptions] = await Promise.all([
+      this.sequelize.query<PersonalTaskLocation>(
+        `WITH page AS MATERIALIZED (
          SELECT task.id, task.parent_task_id AS "parentTaskId",
            project.id AS "projectId", project.prefix AS "projectPrefix",
            project.attributes_owner_only AS "attributesOwnerOnly",
@@ -914,19 +932,33 @@ export class TasksService {
          COALESCE(subtask_counts.completed, 0) AS "subtasksCompleted"
        FROM page LEFT JOIN subtask_counts ON subtask_counts."taskId" = page.id
        ORDER BY page."sortDate" ${direction} NULLS LAST, page.id ASC`,
-      {
-        replacements: {
-          userId,
-          completedStatus: ColumnStatus.Completed,
-          executorErpIds: executorErpId ? [executorErpId] : [],
-          columnStatus: query.columnStatus,
-          columnStatuses: query.columnStatuses,
-          limit: limit + 1,
-          offset
-        },
-        type: QueryTypes.SELECT
-      }
-    );
+        {
+          replacements: {
+            userId,
+            completedStatus: ColumnStatus.Completed,
+            executorErpIds: executorErpId ? [executorErpId] : [],
+            columnStatus: query.columnStatus,
+            columnStatuses: query.columnStatuses,
+            columnId: query.columnId,
+            columnIds: query.columnIds,
+            search: query.search?.trim(),
+            limit: limit + 1,
+            offset
+          },
+          type: QueryTypes.SELECT
+        }
+      ),
+      // Варианты подчиняются доступу и разделу, но не зависят от выбранных фильтров.
+      offset === 0 && !executorErpId && query.includeColumnOptions === 'true'
+        ? this.sequelize.query<PersonalTaskColumnOption>(
+            `SELECT DISTINCT col.id, col.title,
+               board.title AS "boardTitle", project.title AS "projectTitle"
+             ${this.personalTaskSource({ scope: query.scope })}
+             ORDER BY "projectTitle", "boardTitle", col.title, col.id`,
+            { replacements: { userId }, type: QueryTypes.SELECT }
+          )
+        : Promise.resolve(undefined)
+    ]);
     const page = locations.slice(0, limit);
     if (!page.length) {
       // Смещение за концом списка не превращает его общее число в ноль.
@@ -939,14 +971,23 @@ export class TasksService {
                   userId,
                   executorErpIds: executorErpId ? [executorErpId] : [],
                   columnStatus: query.columnStatus,
-                  columnStatuses: query.columnStatuses
+                  columnStatuses: query.columnStatuses,
+                  columnId: query.columnId,
+                  columnIds: query.columnIds,
+                  search: query.search?.trim()
                 },
                 type: QueryTypes.SELECT
               }
             )
           : [];
 
-      return { items: [], total: count?.total ?? 0, offset, hasMore: false };
+      return {
+        items: [],
+        total: count?.total ?? 0,
+        offset,
+        hasMore: false,
+        ...(columnOptions ? { columnOptions } : {})
+      };
     }
 
     // Не загружаем файлы и дочерние карточки; описание нужно только таблице ПЗ.
@@ -1074,7 +1115,8 @@ export class TasksService {
       items,
       total: Number(locations[0].total),
       offset: offset + page.length,
-      hasMore: locations.length > limit
+      hasMore: locations.length > limit,
+      ...(columnOptions ? { columnOptions } : {})
     };
   }
 
@@ -1808,7 +1850,7 @@ export class TasksService {
     };
   }
 
-  /** Возвращает записи фактического времени задачи от новых к старым. */
+  /** Возвращает страницу записей и общее фактическое время задачи. */
   async getTimeEntries(
     id: number,
     userId: number,
@@ -1816,26 +1858,36 @@ export class TasksService {
   ): Promise<TaskTimeEntryPage> {
     await this.assertTaskAccess(id, userId, undefined, false, true);
     const pageSize = Math.min(Math.max(query.limit || 50, 1), 100);
-    const records = await this.sequelize.query<TaskTimeEntryRecord>(
+    // Итог и страницу читаем из одного снимка. Курсор ограничивает только записи.
+    const records = await this.sequelize.query<TaskTimeEntryPageRecord>(
       `
-        SELECT
-          entry.id,
-          entry.task_id AS "taskId",
-          entry.user_id AS "userId",
-          entry.created_by_id AS "createdById",
-          entry.duration_minutes AS "durationMinutes",
-          entry.comment,
-          entry."createdAt",
-          actor.id AS "actorId",
-          actor.login AS "actorLogin",
-          actor.initial AS "actorInitial",
-          actor.image AS "actorImage"
-        FROM task_time_entries entry
-        INNER JOIN users actor ON actor.id = entry.user_id
-        WHERE entry.task_id = :taskId
-          ${query.beforeId ? 'AND entry.id < :beforeId' : ''}
-        ORDER BY entry.id DESC
-        LIMIT :limit
+        SELECT page.*, totals."totalMinutes"
+        FROM (
+          SELECT COALESCE(SUM(duration_minutes), 0)::double precision AS "totalMinutes"
+          FROM task_time_entries
+          WHERE task_id = :taskId
+        ) totals
+        LEFT JOIN LATERAL (
+          SELECT
+            entry.id,
+            entry.task_id AS "taskId",
+            entry.user_id AS "userId",
+            entry.created_by_id AS "createdById",
+            entry.duration_minutes AS "durationMinutes",
+            entry.comment,
+            entry."createdAt",
+            actor.id AS "actorId",
+            actor.login AS "actorLogin",
+            actor.initial AS "actorInitial",
+            actor.image AS "actorImage"
+          FROM task_time_entries entry
+          INNER JOIN users actor ON actor.id = entry.user_id
+          WHERE entry.task_id = :taskId
+            ${query.beforeId ? 'AND entry.id < :beforeId' : ''}
+          ORDER BY entry.id DESC
+          LIMIT :limit
+        ) page ON TRUE
+        ORDER BY page.id DESC
       `,
       {
         replacements: {
@@ -1846,14 +1898,19 @@ export class TasksService {
         type: QueryTypes.SELECT
       }
     );
-    const hasNextPage = records.length > pageSize;
-    const pageRecords = hasNextPage ? records.slice(0, pageSize) : records;
+    const entries = records.filter(
+      (record): record is TaskTimeEntryRecord & { totalMinutes: number } =>
+        record.id !== null
+    );
+    const hasNextPage = entries.length > pageSize;
+    const pageRecords = entries.slice(0, pageSize);
 
     return {
       items: pageRecords.map(record => this.mapTaskTimeEntry(record)),
       nextCursor: hasNextPage
         ? Number(pageRecords[pageRecords.length - 1].id)
-        : null
+        : null,
+      totalMinutes: records[0].totalMinutes
     };
   }
 

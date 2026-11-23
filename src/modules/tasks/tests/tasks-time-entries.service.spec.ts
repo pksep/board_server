@@ -64,7 +64,12 @@ describe('TasksService task time entries', () => {
       limit: 2
     });
 
-    expect(projectAccess.assertCanRead).toHaveBeenCalledWith(30, 7, undefined);
+    expect(projectAccess.assertCanRead).toHaveBeenCalledWith(
+      30,
+      7,
+      undefined,
+      undefined
+    );
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining('entry.id < :beforeId'),
       expect.objectContaining({
@@ -110,7 +115,8 @@ describe('TasksService task time entries', () => {
     expect(projectAccess.assertCanRead).toHaveBeenCalledWith(
       30,
       7,
-      transaction
+      transaction,
+      undefined
     );
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO task_time_entries'),
