@@ -231,6 +231,56 @@ describeWithDatabase(
       expect((await recovered.reload()).controllerIds).toEqual([owner.id]);
     });
 
+    it('applies inclusive start/due bounds at the epoch through the column endpoint', async (): Promise<void> => {
+      const epoch = '1970-01-01T00:00:00.000Z';
+      await task.update({ startDate: new Date(0), dueDate: new Date(0) });
+      for (const [index, timestamp] of [-1, 1].entries()) {
+        await persist(Task.build(), {
+          title: `Adjacent date ${timestamp}`,
+          taskNumber: index + 2,
+          columnId: column.id,
+          createdById: owner.id,
+          startDate: new Date(timestamp),
+          dueDate: new Date(timestamp)
+        });
+      }
+
+      const response = await request(app.getHttpServer())
+        .get(`/columns/${column.id}/tasks`)
+        .auth('date-owner-token', { type: 'bearer' })
+        .query({
+          limit: 10,
+          startDateFrom: epoch,
+          startDateTo: epoch,
+          dueDateFrom: epoch,
+          dueDateTo: epoch
+        })
+        .expect(200);
+
+      expect(response.body.total).toBe(1);
+      expect(response.body.items.map((row: Task) => row.id)).toEqual([task.id]);
+      expect(response.body.items[0].startDate).toBe(epoch);
+      expect(response.body.items[0].dueDate).toBe(epoch);
+      expect(response.body.hasMore).toBe(false);
+    });
+
+    it('keeps invalid and inverted column-date filters rejected without changing the task', async (): Promise<void> => {
+      const before = (await task.reload()).toJSON();
+      for (const query of [
+        { startDateFrom: 'invalid' },
+        { startDateFrom: '2026-11-30', startDateTo: '2026-11-20' },
+        { dueDateFrom: '2026-11-30', dueDateTo: '2026-11-20' }
+      ]) {
+        await request(app.getHttpServer())
+          .get(`/columns/${column.id}/tasks`)
+          .auth('date-owner-token', { type: 'bearer' })
+          .query(query)
+          .expect(400);
+      }
+
+      expect((await task.reload()).toJSON()).toEqual(before);
+    });
+
     it('keeps custom attribute values restricted by default', async (): Promise<void> => {
       await assignExecutor(outsider);
       expect(project.attributesOwnerOnly).toBe(true);

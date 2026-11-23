@@ -1377,17 +1377,17 @@ export class TasksService {
   /** Сравнивает дату с включительными границами; пустая дата не совпадает с выбранным периодом. */
   private matchesTaskDateRange(
     date: Date | null | undefined,
-    from?: string,
-    to?: string
+    from?: number,
+    to?: number
   ): boolean {
-    if (!from && !to) return true;
+    if (from === undefined && to === undefined) return true;
     if (!date || Number.isNaN(date.getTime())) return false;
 
     const timestamp = date.getTime();
 
     return (
-      (!from || timestamp >= Date.parse(from)) &&
-      (!to || timestamp <= Date.parse(to))
+      (from === undefined || timestamp >= from) &&
+      (to === undefined || timestamp <= to)
     );
   }
 
@@ -1524,6 +1524,16 @@ export class TasksService {
       candidates.map(task => [Number(task.id), task])
     );
     const creatorIds = new Set(query.creatorIds);
+    const startDateFrom = query.startDateFrom
+      ? Date.parse(query.startDateFrom)
+      : undefined;
+    const startDateTo = query.startDateTo
+      ? Date.parse(query.startDateTo)
+      : undefined;
+    const dueDateFrom = query.dueDateFrom
+      ? Date.parse(query.dueDateFrom)
+      : undefined;
+    const dueDateTo = query.dueDateTo ? Date.parse(query.dueDateTo) : undefined;
     let matchingTaskIds = new Set(
       candidates
         .filter(
@@ -1534,14 +1544,10 @@ export class TasksService {
               query.priorities.includes(task.priority)) &&
             this.matchesTaskDateRange(
               task.startDate,
-              query.startDateFrom,
-              query.startDateTo
+              startDateFrom,
+              startDateTo
             ) &&
-            this.matchesTaskDateRange(
-              task.dueDate,
-              query.dueDateFrom,
-              query.dueDateTo
-            )
+            this.matchesTaskDateRange(task.dueDate, dueDateFrom, dueDateTo)
         )
         .map(task => Number(task.id))
     );
