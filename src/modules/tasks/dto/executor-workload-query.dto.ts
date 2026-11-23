@@ -4,6 +4,7 @@ import {
   ArrayMaxSize,
   ArrayNotEmpty,
   IsArray,
+  IsBoolean,
   IsInt,
   IsOptional,
   IsISO8601,
@@ -11,8 +12,25 @@ import {
 } from 'class-validator';
 import { parseNumberQueryList } from './task-list-query.dto';
 
+/** Преобразует только явные boolean-значения, сохраняя ошибки валидации. */
+function parseQueryBoolean(value: unknown): unknown {
+  if (value === true || value === 'true') return true;
+  if (value === false || value === 'false') return false;
+
+  return value;
+}
+
 /** Пакет ресурсов ERP и полуоткрытый период видимых календарных дней. */
 export class ExecutorWorkloadQueryDto {
+  @ApiProperty({
+    description: 'Учитывать только проекты, отображаемые на производстве',
+    required: false
+  })
+  @IsOptional()
+  @Transform(({ value }) => parseQueryBoolean(value))
+  @IsBoolean()
+  onlyProductionProjects?: boolean;
+
   @ApiProperty({
     description:
       'ERP ID исполнителей через запятую; без фильтра — все назначения за период',

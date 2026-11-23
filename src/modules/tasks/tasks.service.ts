@@ -63,6 +63,11 @@ import type {
   TaskGanttItem,
   TaskGanttSnapshot
 } from './interfaces/task-gantt.interface';
+import type { ProductionQueueWork } from './interfaces/production-queue-work.interface';
+import type {
+  TaskAccessContext,
+  TaskColumnLocation
+} from './interfaces/task-access-context.interface';
 
 export interface TaskListPage {
   items: Task[];
@@ -116,6 +121,58 @@ type TaskTimeEntryPageRecord = (TaskTimeEntryRecord | { id: null }) & {
 @Injectable()
 export class TasksService {
   private readonly logger = new Logger(TasksService.name);
+
+  /** Доверенный ERP worker читает только актуальные назначения и норму; при включении проверяет право изменения даты. */
+  async getProductionQueueWork(
+    resourceId: number,
+    taskIds: number[],
+    actorErpId?: number
+  ): Promise<ProductionQueueWork[]> {
+    if (actorErpId) {
+      const actor = await User.findOne({
+        attributes: ['id'],
+        where: { erpId: String(actorErpId), ban: false }
+      });
+      if (!actor)
+        throw new HttpException(
+          'Пользователь доски не найден',
+          HttpStatus.FORBIDDEN
+        );
+      await this.sequelize.transaction(async transaction => {
+        const context = await this.loadTaskAccessContext(
+          taskIds,
+          actor.id,
+          transaction
+        );
+        for (const id of taskIds) {
+          const task = await this.assertTaskAccess(
+            id,
+            actor.id,
+            transaction,
+            false,
+            false,
+            context
+          );
+          await this.assertCanEditTaskFields(
+            task,
+            { startDate: task.startDate?.toISOString() ?? null },
+            actor.id,
+            transaction,
+            context
+          );
+        }
+      });
+    }
+    return this.sequelize.query<ProductionQueueWork>(
+      `SELECT task.id AS "taskId", task.title, task.time_norm_minutes AS "timeNormMinutes"
+       ${this.personalTaskSource({ scope: 'assigned' }, true)}
+       AND task.id IN (:taskIds) AND task.time_norm_minutes > 0 ORDER BY task.id`,
+      {
+        replacements: { taskIds, executorErpIds: [String(resourceId)] },
+        type: QueryTypes.SELECT
+      }
+    );
+  }
 
   constructor(
     @InjectModel(Task) private taskRepository: typeof Task,
@@ -274,22 +331,78 @@ export class TasksService {
     return normalized;
   }
 
+  /** Один набор чтений обслуживает все канонические проверки задач запроса ERP. */
+  private async loadTaskAccessContext(
+    taskIds: number[],
+    userId: number,
+    transaction: Transaction
+  ): Promise<TaskAccessContext> {
+    const tasks = await this.taskRepository.findAll({
+      attributes: [
+        'id',
+        'columnId',
+        'createdById',
+        'controllerIds',
+        'responsibleIds',
+        'startDate'
+      ],
+      where: { id: { [Op.in]: taskIds } },
+      order: [['id', 'ASC']],
+      transaction
+    });
+    const columnIds = [...new Set(tasks.map(task => task.columnId))];
+    const columns = columnIds.length
+      ? await this.columnRepository.findAll({
+          attributes: ['id', 'boardId'],
+          where: { id: { [Op.in]: columnIds } },
+          order: [['id', 'ASC']],
+          transaction
+        })
+      : [];
+    const boardIds = [...new Set(columns.map(column => column.boardId))];
+    const boards = boardIds.length
+      ? await this.boardRepository.findAll({
+          attributes: ['id', 'projectId'],
+          where: { id: { [Op.in]: boardIds } },
+          order: [['id', 'ASC']],
+          transaction
+        })
+      : [];
+    const projectAccess = await this.projectAccess.loadReadAccess(
+      [...new Set(boards.map(board => board.projectId))],
+      userId,
+      transaction
+    );
+
+    return {
+      tasksById: new Map(tasks.map(task => [task.id, task])),
+      columnsById: new Map(columns.map(column => [column.id, column])),
+      boardsById: new Map(boards.map(board => [board.id, board])),
+      projectAccess
+    };
+  }
+
   private async getColumnLocation(
     columnId: number,
     transaction?: Transaction,
-    includeArchived = false
-  ): Promise<{ column: BoardColumn; board: Board; projectId: number }> {
-    const column = await this.columnRepository.findByPk(columnId, {
-      transaction
-    });
+    includeArchived = false,
+    context?: TaskAccessContext
+  ): Promise<TaskColumnLocation> {
+    const column = context
+      ? context.columnsById.get(columnId)
+      : await this.columnRepository.findByPk(columnId, {
+          transaction
+        });
     if (!column) {
       throw new HttpException('Колонка не найдена', HttpStatus.NOT_FOUND);
     }
 
-    const board = await this.boardRepository.findByPk(column.boardId, {
-      transaction,
-      ...(includeArchived ? { paranoid: false } : {})
-    });
+    const board = context
+      ? context.boardsById.get(column.boardId)
+      : await this.boardRepository.findByPk(column.boardId, {
+          transaction,
+          ...(includeArchived ? { paranoid: false } : {})
+        });
     if (!board) {
       throw new HttpException('Доска не найдена', HttpStatus.NOT_FOUND);
     }
@@ -301,17 +414,20 @@ export class TasksService {
     columnId: number,
     userId: number,
     transaction?: Transaction,
-    includeArchived = false
-  ): Promise<{ column: BoardColumn; board: Board; projectId: number }> {
+    includeArchived = false,
+    context?: TaskAccessContext
+  ): Promise<TaskColumnLocation> {
     const location = await this.getColumnLocation(
       columnId,
       transaction,
-      includeArchived
+      includeArchived,
+      context
     );
     await this.projectAccess.assertCanRead(
       location.projectId,
       userId,
-      transaction
+      transaction,
+      context?.projectAccess
     );
     return location;
   }
@@ -321,13 +437,18 @@ export class TasksService {
     userId: number,
     transaction?: Transaction,
     lockForUpdate = false,
-    includeArchived = false
+    includeArchived = false,
+    context?: TaskAccessContext
   ): Promise<Task> {
-    const task = await this.taskRepository.findByPk(taskId, {
-      transaction,
-      ...(includeArchived ? { paranoid: false } : {}),
-      ...(transaction && lockForUpdate ? { lock: transaction.LOCK.UPDATE } : {})
-    });
+    const task = context
+      ? context.tasksById.get(taskId)
+      : await this.taskRepository.findByPk(taskId, {
+          transaction,
+          ...(includeArchived ? { paranoid: false } : {}),
+          ...(transaction && lockForUpdate
+            ? { lock: transaction.LOCK.UPDATE }
+            : {})
+        });
     if (!task) {
       throw new HttpException('Задача не найдена', HttpStatus.NOT_FOUND);
     }
@@ -335,7 +456,8 @@ export class TasksService {
       task.columnId,
       userId,
       transaction,
-      includeArchived
+      includeArchived,
+      context
     );
     return task;
   }
@@ -632,6 +754,14 @@ export class TasksService {
        JOIN boards board ON board.id = col.board_id AND board."deletedAt" IS NULL
        JOIN projects project ON project.id = board.project_id AND project."deletedAt" IS NULL
        ${executorSource}
+       ${
+         hasExecutor
+           ? `LEFT JOIN LATERAL (
+         SELECT MAX(personal.production_start_date) AS start_date FROM task_assignees personal
+         WHERE personal.task_id = task.id AND personal.user_id = executor.id
+       ) production_planning ON true`
+           : ''
+       }
        WHERE task."deletedAt" IS NULL
          ${hasExecutor ? '' : `AND ${this.taskProjectReaderAccess()}`}
          ${
@@ -683,14 +813,19 @@ export class TasksService {
     return this.sequelize.query<ExecutorWorkloadTask>(
       `SELECT executor.erp_id::int AS "executorId", task.id AS "taskId",
          project.id AS "projectId", project.title AS "projectName",
-         task.start_date AS "startDate", task.due_date AS "dueDate",
+         COALESCE(production_planning.start_date, task.start_date) AS "startDate", task.due_date AS "dueDate",
          task.time_norm_minutes AS "timeNormMinutes",
-         COALESCE(task.start_date < :debtBefore, false) AS "isDebt"
+         COALESCE(COALESCE(production_planning.start_date, task.start_date) < :debtBefore, false) AS "isDebt"
        ${this.personalTaskSource({ scope: 'assigned' }, true, !query.erpUserIds)}
-         AND ((task.start_date >= :start AND task.start_date < :end)
+         ${
+           query.onlyProductionProjects
+             ? 'AND project.show_in_production = true'
+             : ''
+         }
+         AND ((COALESCE(production_planning.start_date, task.start_date) >= :start AND COALESCE(production_planning.start_date, task.start_date) < :end)
            OR (task.due_date >= :start AND task.due_date < :end)
-           OR task.start_date < :debtBefore)
-         AND (task.time_norm_minutes > 0 OR task.start_date < :debtBefore)
+           OR COALESCE(production_planning.start_date, task.start_date) < :debtBefore)
+         AND (task.time_norm_minutes > 0 OR COALESCE(production_planning.start_date, task.start_date) < :debtBefore)
        ORDER BY task.id, executor.erp_id::int`,
       {
         replacements: {
@@ -2272,7 +2407,8 @@ export class TasksService {
     task: Task,
     dto: UpdateTaskDto,
     userId: number,
-    transaction: Transaction
+    transaction: Transaction,
+    context?: TaskAccessContext
   ): Promise<void> {
     if ((task.controllerIds ?? [task.createdById]).includes(userId)) return;
 
@@ -2308,14 +2444,21 @@ export class TasksService {
         attributeFields.has(field as keyof UpdateTaskDto)
       )
     ) {
-      const projectId = await this.getProjectIdByColumnId(
-        task.columnId,
-        transaction
-      );
+      const projectId = context
+        ? (
+            await this.getColumnLocation(
+              task.columnId,
+              transaction,
+              false,
+              context
+            )
+          ).projectId
+        : await this.getProjectIdByColumnId(task.columnId, transaction);
       const project = await this.projectAccess.assertCanRead(
         projectId,
         userId,
-        transaction
+        transaction,
+        context?.projectAccess
       );
 
       if (project.attributesOwnerOnly === false) {
@@ -2337,11 +2480,25 @@ export class TasksService {
       )
     ) {
       // Дата начала работ по-прежнему требует действующего назначения.
-      const assignment = await this.assigneeRepository.findOne({
-        where: { taskId: task.id, userId },
-        transaction,
-        lock: transaction.LOCK.SHARE
-      });
+      if (context && !context.assigneeTaskIds) {
+        const assignments = await this.assigneeRepository.findAll({
+          attributes: ['taskId'],
+          where: { taskId: { [Op.in]: [...context.tasksById.keys()] }, userId },
+          order: [['taskId', 'ASC']],
+          transaction,
+          lock: transaction.LOCK.SHARE
+        });
+        context.assigneeTaskIds = new Set(
+          assignments.map(assignment => assignment.taskId)
+        );
+      }
+      const assignment = context
+        ? context.assigneeTaskIds.has(task.id)
+        : await this.assigneeRepository.findOne({
+            where: { taskId: task.id, userId },
+            transaction,
+            lock: transaction.LOCK.SHARE
+          });
       if (assignment) return;
     }
 
@@ -2378,7 +2535,9 @@ export class TasksService {
           transaction
         );
 
-      if (dto.startDate !== undefined || dto.dueDate !== undefined) {
+      // Перенос ручного начала не сдвигает требуемый срок: просрочку показываем в ПЗ.
+      // Новый срок по-прежнему проверяем относительно выбранного начала.
+      if (dto.dueDate !== undefined) {
         this.assertTaskDateOrder(
           dto.startDate !== undefined ? dto.startDate : task.startDate,
           dto.dueDate !== undefined ? dto.dueDate : task.dueDate

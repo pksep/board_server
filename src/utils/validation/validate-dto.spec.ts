@@ -26,6 +26,16 @@ describe('validateDto', () => {
     });
   });
 
+  it('сохраняет булеву настройку отображения проекта на производстве', async () => {
+    const dto = await validateDto(CreateProjectDto, {
+      title: 'План производства',
+      prefix: 'PRD',
+      showInProduction: true
+    });
+
+    expect(dto.showInProduction).toBe(true);
+  });
+
   it('не пропускает некорректные идентификаторы связанных сущностей', async () => {
     await expect(
       validateDto(CreateProjectDto, {

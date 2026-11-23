@@ -4,6 +4,7 @@ import { Op, Transaction } from 'sequelize';
 import { Project } from './model/project.model';
 import { ProjectMember } from './model/project-member.model';
 import { User } from '../users/model/users.model';
+import type { ProjectReadAccessContext } from './interfaces/project-read-access.interface';
 
 @Injectable()
 export class ProjectAccessService {
@@ -34,11 +35,14 @@ export class ProjectAccessService {
   async assertCanRead(
     projectId: number,
     userId: number,
-    transaction?: Transaction
+    transaction?: Transaction,
+    context?: ProjectReadAccessContext
   ): Promise<Project> {
-    const project = await this.projectRepository.findByPk(projectId, {
-      transaction
-    });
+    const project = context
+      ? context.projectsById.get(projectId)
+      : await this.projectRepository.findByPk(projectId, {
+          transaction
+        });
 
     if (!project) {
       throw new HttpException('Проект не найден', HttpStatus.NOT_FOUND);
@@ -46,16 +50,45 @@ export class ProjectAccessService {
 
     if (project.createdById === userId) return project;
 
-    const member = await this.memberRepository.findOne({
-      where: { projectId, userId },
-      transaction
-    });
+    const member = context
+      ? context.memberProjectIds.has(projectId)
+      : await this.memberRepository.findOne({
+          where: { projectId, userId },
+          transaction
+        });
 
     if (!member) {
       throw new HttpException('Проект не найден', HttpStatus.NOT_FOUND);
     }
 
     return project;
+  }
+
+  /** Загружает те же права сразу для списка проектов, без проверок по одному ID. */
+  async loadReadAccess(
+    projectIds: number[],
+    userId: number,
+    transaction: Transaction
+  ): Promise<ProjectReadAccessContext> {
+    if (!projectIds.length)
+      return { projectsById: new Map(), memberProjectIds: new Set() };
+    const projects = await this.projectRepository.findAll({
+      attributes: ['id', 'createdById', 'attributesOwnerOnly'],
+      where: { id: { [Op.in]: projectIds } },
+      order: [['id', 'ASC']],
+      transaction
+    });
+    const memberships = await this.memberRepository.findAll({
+      attributes: ['projectId'],
+      where: { projectId: { [Op.in]: projectIds }, userId },
+      order: [['projectId', 'ASC']],
+      transaction
+    });
+
+    return {
+      projectsById: new Map(projects.map(project => [project.id, project])),
+      memberProjectIds: new Set(memberships.map(member => member.projectId))
+    };
   }
 
   async assertCanManage(

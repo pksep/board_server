@@ -4,6 +4,7 @@ import { TasksService } from '../tasks.service';
 import { TaskCommentCountersService } from '../../task-comment-counters/task-comment-counters.service';
 import type { Task } from '../model/task.model';
 import type { IUserDataToken } from '../../auth/interfaces/interface';
+import { ExecutorPlanningPermissionGuard } from '../executor-planning-permission.guard';
 import { TimeReportPermissionGuard } from '../time-report-permission.guard';
 import { ExecutorPlanningPermissionGuard } from '../executor-planning-permission.guard';
 
@@ -54,6 +55,8 @@ describe('commentsCount in task responses', () => {
         { provide: TaskCommentCountersService, useValue: counters }
       ]
     })
+      .overrideGuard(ExecutorPlanningPermissionGuard)
+      .useValue({ canActivate: (): boolean => true })
       .overrideGuard(TimeReportPermissionGuard)
       .useValue({ canActivate: (): boolean => true })
       .overrideGuard(ExecutorPlanningPermissionGuard)
