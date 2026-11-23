@@ -9,6 +9,7 @@ import { CreateProjectDto } from './dto/create-project.dto';
 import { UpdateProjectDto } from './dto/update-project.dto';
 import { ProjectTag } from '../tags/model/project-tag.model';
 import { ProjectAccessService } from './project-access.service';
+import type { ProjectMemberCreationAttributes } from './interfaces/project-creation-attributes.interface';
 
 @Injectable()
 export class ProjectsService {
@@ -154,7 +155,7 @@ export class ProjectsService {
             dto.taskAttributeDefinitions
           ),
           createdById: userId
-        } as any,
+        },
         { transaction }
       );
 
@@ -166,16 +167,14 @@ export class ProjectsService {
         memberIds,
         transaction
       );
-      const members: Array<{
-        projectId: number;
-        userId: number;
-        order: number;
-      }> = memberIds.map(memberId => ({
-        projectId: project.id,
-        userId: memberId,
-        order: nextOrderByMemberId.get(memberId) ?? 0
-      }));
-      await this.memberRepository.bulkCreate(members as any[], { transaction });
+      const members: ProjectMemberCreationAttributes[] = memberIds.map(
+        memberId => ({
+          projectId: project.id,
+          userId: memberId,
+          order: nextOrderByMemberId.get(memberId) ?? 0
+        })
+      );
+      await this.memberRepository.bulkCreate(members, { transaction });
 
       await transaction.commit();
 
@@ -245,17 +244,15 @@ export class ProjectsService {
           newMemberIds,
           transaction
         );
-        const newMembers: Array<{
-          projectId: number;
-          userId: number;
-          order: number;
-        }> = newMemberIds.map(memberId => ({
-          projectId: dto.id,
-          userId: memberId,
-          order: nextOrderByMemberId.get(memberId) ?? 0
-        }));
+        const newMembers: ProjectMemberCreationAttributes[] = newMemberIds.map(
+          memberId => ({
+            projectId: dto.id,
+            userId: memberId,
+            order: nextOrderByMemberId.get(memberId) ?? 0
+          })
+        );
         if (newMembers.length) {
-          await this.memberRepository.bulkCreate(newMembers as any[], {
+          await this.memberRepository.bulkCreate(newMembers, {
             transaction
           });
         }
@@ -362,7 +359,7 @@ export class ProjectsService {
         return { isFavorite: false };
       }
 
-      await this.favoriteRepository.create({ projectId, userId } as any);
+      await this.favoriteRepository.create({ projectId, userId });
       return { isFavorite: true };
     } catch (error) {
       if (error instanceof HttpException) throw error;

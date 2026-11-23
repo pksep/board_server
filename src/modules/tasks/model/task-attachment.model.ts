@@ -8,12 +8,17 @@ import {
   BelongsTo
 } from 'sequelize-typescript';
 import { User } from 'src/modules/users/model/users.model';
+import type { Task } from './task.model';
+import type { TaskAttachmentCreationAttributes } from '../interfaces/task-creation-attributes.interface';
 
 // Lazy require для решения circular dependency (SWC live bindings)
 const lazyTask = () => require('./task.model').Task;
 
 @Table({ tableName: 'task_attachments' })
-export class TaskAttachment extends Model<TaskAttachment> {
+export class TaskAttachment extends Model<
+  TaskAttachment,
+  TaskAttachmentCreationAttributes
+> {
   @ApiProperty({ example: 1, description: 'Уникальный идентификатор' })
   @Column({
     type: DataType.INTEGER,
@@ -56,7 +61,7 @@ export class TaskAttachment extends Model<TaskAttachment> {
 
   @ApiHideProperty()
   @BelongsTo(lazyTask)
-  task: any;
+  task: Task;
 
   @ApiHideProperty()
   @BelongsTo(() => User)

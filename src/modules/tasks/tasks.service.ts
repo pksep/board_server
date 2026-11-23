@@ -69,54 +69,14 @@ import type {
   TaskColumnLocation
 } from './interfaces/task-access-context.interface';
 
-export interface TaskListPage {
-  items: Task[];
-  total: number;
-  rootTotal?: number;
-  limit: number;
-  offset: number;
-  hasMore: boolean;
-}
-
-interface TaskTimeEntryRecord {
-  createdById: number;
-  actorId: number;
-  actorImage: string | null;
-  actorInitial: string | null;
-  actorLogin: string;
-  comment: string | null;
-  createdAt: Date | string;
-  durationMinutes: number;
-  id: number;
-  taskId: number | null;
-  userId: number;
-}
-
-export interface TaskTimeEntry {
-  createdById: number;
-  actor: {
-    id: number;
-    image: string | null;
-    initial: string | null;
-    login: string;
-  };
-  comment: string | null;
-  createdAt: Date | string;
-  durationMinutes: number;
-  id: number;
-  taskId: number | null;
-  userId: number;
-}
-
-export interface TaskTimeEntryPage {
-  items: TaskTimeEntry[];
-  nextCursor: number | null;
-  totalMinutes: number;
-}
-
-type TaskTimeEntryPageRecord = (TaskTimeEntryRecord | { id: null }) & {
-  totalMinutes: number;
-};
+import type { TaskListPage } from './interfaces/task-list.interface';
+import type { TaskFilterCandidate } from './interfaces/task-filter-candidate.interface';
+import type {
+  TaskTimeEntry,
+  TaskTimeEntryRecord,
+  TaskTimeEntryPage,
+  TaskTimeEntryPageRecord
+} from './interfaces/task-time-entry.interface';
 
 @Injectable()
 export class TasksService {
@@ -1493,7 +1453,7 @@ export class TasksService {
     columnId: number,
     query: TaskListQueryDto,
     archivedBoard = false
-  ): Promise<Task[]> {
+  ): Promise<TaskFilterCandidate[]> {
     const filterPrioritiesInDatabase = Boolean(
       (!query.includeSubtasks || query.flatSubtasks) && query.priorities?.length
     );
@@ -1563,12 +1523,12 @@ export class TasksService {
     const candidatesById = new Map(
       candidates.map(task => [Number(task.id), task])
     );
+    const creatorIds = new Set(query.creatorIds);
     let matchingTaskIds = new Set(
       candidates
         .filter(
           task =>
-            (!query.creatorIds?.length ||
-              query.creatorIds.includes(Number(task.createdById))) &&
+            (!creatorIds.size || creatorIds.has(Number(task.createdById))) &&
             (!query.includeSubtasks ||
               !query.priorities?.length ||
               query.priorities.includes(task.priority)) &&
@@ -2086,7 +2046,7 @@ export class TasksService {
 
       // Вставляем новую верхнеуровневую задачу в начало колонки.
       await this.taskRepository.update(
-        { order: this.sequelize.literal('"order" + 1') as any },
+        { order: this.sequelize.literal('"order" + 1') },
         {
           where: {
             columnId,
@@ -2116,7 +2076,7 @@ export class TasksService {
             userId,
             ...(dto.controllerIds ?? [])
           ])
-        } as any,
+        },
         { transaction }
       );
 
@@ -2126,7 +2086,7 @@ export class TasksService {
           dto.assigneeIds.map(uid => ({
             taskId: task.id,
             userId: uid
-          })) as any[],
+          })),
           { transaction }
         );
       }
@@ -2136,7 +2096,7 @@ export class TasksService {
           dto.tagIds.map(tagId => ({
             taskId: task.id,
             projectTagId: tagId
-          })) as any[],
+          })),
           { transaction }
         );
       }
@@ -2259,7 +2219,7 @@ export class TasksService {
             userId,
             ...(dto.controllerIds ?? [])
           ])
-        } as any,
+        },
         { transaction }
       );
 
@@ -2268,7 +2228,7 @@ export class TasksService {
           dto.assigneeIds.map(uid => ({
             taskId: task.id,
             userId: uid
-          })) as any[],
+          })),
           { transaction }
         );
       }
@@ -2278,7 +2238,7 @@ export class TasksService {
           dto.tagIds.map(tagId => ({
             taskId: task.id,
             projectTagId: tagId
-          })) as any[],
+          })),
           { transaction }
         );
       }
@@ -2667,7 +2627,7 @@ export class TasksService {
         });
         if (dto.assigneeIds.length) {
           await this.assigneeRepository.bulkCreate(
-            dto.assigneeIds.map(uid => ({ taskId: id, userId: uid })) as any[],
+            dto.assigneeIds.map(uid => ({ taskId: id, userId: uid })),
             { transaction }
           );
         }
@@ -2684,7 +2644,7 @@ export class TasksService {
             dto.tagIds.map(tagId => ({
               taskId: id,
               projectTagId: tagId
-            })) as any[],
+            })),
             { transaction }
           );
         }
@@ -3514,7 +3474,7 @@ export class TasksService {
         mimeType: dto.mimeType,
         size: dto.size,
         uploadedById: userId
-      } as any);
+      });
 
       const boardId = await this.getBoardIdByColumnId(task.columnId);
       const updatedTask = await this.getById(taskId, userId);

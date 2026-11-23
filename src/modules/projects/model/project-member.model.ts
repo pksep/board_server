@@ -8,12 +8,17 @@ import {
   BelongsTo
 } from 'sequelize-typescript';
 import { User } from 'src/modules/users/model/users.model';
+import type { Project } from './project.model';
+import type { ProjectMemberCreationAttributes } from '../interfaces/project-creation-attributes.interface';
 
 // Lazy require для решения circular dependency (SWC live bindings)
 const lazyProject = () => require('./project.model').Project;
 
 @Table({ tableName: 'project_members' })
-export class ProjectMember extends Model<ProjectMember> {
+export class ProjectMember extends Model<
+  ProjectMember,
+  ProjectMemberCreationAttributes
+> {
   @ApiProperty({ example: 1, description: 'Уникальный идентификатор' })
   @Column({
     type: DataType.INTEGER,
@@ -38,7 +43,7 @@ export class ProjectMember extends Model<ProjectMember> {
 
   @ApiHideProperty()
   @BelongsTo(lazyProject)
-  project: any;
+  project: Project;
 
   @ApiHideProperty()
   @BelongsTo(() => User)

@@ -8,6 +8,8 @@ import {
   BelongsTo
 } from 'sequelize-typescript';
 import { User } from 'src/modules/users/model/users.model';
+import type { Project } from './project.model';
+import type { UserFavoriteCreationAttributes } from '../interfaces/project-creation-attributes.interface';
 
 // Lazy require для решения circular dependency (SWC live bindings)
 const lazyProject = () => require('./project.model').Project;
@@ -16,7 +18,10 @@ const lazyProject = () => require('./project.model').Project;
   tableName: 'user_favorites',
   indexes: [{ unique: true, fields: ['user_id', 'project_id'] }]
 })
-export class UserFavorite extends Model<UserFavorite> {
+export class UserFavorite extends Model<
+  UserFavorite,
+  UserFavoriteCreationAttributes
+> {
   @ApiProperty({ example: 1, description: 'Уникальный идентификатор' })
   @Column({
     type: DataType.INTEGER,
@@ -41,5 +46,5 @@ export class UserFavorite extends Model<UserFavorite> {
 
   @ApiHideProperty()
   @BelongsTo(lazyProject)
-  project: any;
+  project: Project;
 }

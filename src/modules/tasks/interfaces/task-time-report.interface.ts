@@ -1,4 +1,4 @@
-import type { TaskTimeEntry } from '../tasks.service';
+import type { TaskTimeEntry } from './task-time-entry.interface';
 import type { ColumnStatus } from '../../columns/interfaces/column-status.interface';
 
 /** Запись времени с привязкой к сотруднику ERP и доступной задаче. */
