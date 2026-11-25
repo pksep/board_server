@@ -853,6 +853,46 @@ describeWithDatabase(
       expect(await counts(first)).toEqual(beforeCounts);
     });
 
+    it('builds the lookup index with malformed historical task IDs and keeps those orphan recipients unchanged', async (): Promise<void> => {
+      const queryInterface = sequelize.getQueryInterface();
+      await taskLookupMigration.down(queryInterface);
+      const orphanIds: number[] = [];
+      for (const entityId of [
+        'old-task-key',
+        '2147483648',
+        '-2147483649',
+        '9'.repeat(64)
+      ]) {
+        const event = await persist(ActivityEvent.build(), {
+          projectId: project.id,
+          entityType: ActivityEntityType.Task,
+          entityId,
+          actionType: ActivityActionType.Updated,
+          actorUserId: owner.id
+        });
+        orphanIds.push(event.id);
+        await persist(ActivityEventRecipient.build(), {
+          eventId: event.id,
+          userId: first.id
+        });
+      }
+      const beforeFeed = await feed(first);
+      const beforeCounts = await counts(first);
+      await taskLookupMigration.up(queryInterface);
+      await taskLookupMigration.up(queryInterface);
+      expect(await feed(first)).toEqual(beforeFeed);
+      expect(await counts(first)).toEqual(beforeCounts);
+      await http(first)
+        .patch('/activity/task-feed/read')
+        .send({ taskId: task.id })
+        .expect(200);
+      const orphans = await ActivityEventRecipient.findAll({
+        where: { eventId: orphanIds, userId: first.id }
+      });
+      expect(orphans).toHaveLength(orphanIds.length);
+      expect(orphans.every(row => row.readAt === null)).toBe(true);
+    });
+
     it('recovers an invalid concurrent lookup-index build', async (): Promise<void> => {
       const queryInterface = sequelize.getQueryInterface();
       await taskLookupMigration.down(queryInterface);

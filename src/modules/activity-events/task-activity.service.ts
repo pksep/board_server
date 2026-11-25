@@ -25,7 +25,7 @@ const ACCESSIBLE_PROJECTS = `WITH activity_accessible_projects AS (
 const FEED_FROM = `
   FROM activity_events e
   LEFT JOIN activity_event_recipients r ON r.event_id = e.id AND r.user_id = :userId
-  JOIN tasks t ON t.id = e.entity_id::integer
+  JOIN tasks t ON t.id = public.activity_task_entity_id(e.entity_id)
   JOIN board_columns c ON c.id = t.column_id
   JOIN boards b ON b.id = c.board_id
   JOIN projects p ON p.id = e.project_id AND p."deletedAt" IS NULL
