@@ -216,6 +216,75 @@ describeWithDatabase(
       await persist(TaskAssignee.build(), { taskId: task.id, userId: user.id });
     }
 
+    it('patches attributes atomically, preserves unrelated values and validates permissions', async (): Promise<void> => {
+      await project.update({
+        taskAttributeDefinitions: [
+          { id: 'text', name: 'Описание', type: TaskAttributeType.Text },
+          { id: 'flag', name: 'Проверено', type: TaskAttributeType.Boolean },
+          { id: 'count', name: 'Количество', type: TaskAttributeType.Number }
+        ]
+      });
+      await task.update({
+        customAttributeValues: { text: 'Сохранить', flag: true, count: 5 }
+      });
+      await Promise.all([
+        write('put', `/tasks/${task.id}`, {
+          customAttributeChanges: { flag: false }
+        }).expect(200),
+        write('put', `/tasks/${task.id}`, {
+          customAttributeChanges: { count: 0 }
+        }).expect(200)
+      ]);
+      expect((await task.reload()).customAttributeValues).toEqual({
+        text: 'Сохранить',
+        flag: false,
+        count: 0
+      });
+      await write('put', `/tasks/${task.id}`, {
+        customAttributeChanges: { text: null }
+      }).expect(200);
+      expect((await task.reload()).customAttributeValues).toEqual({
+        text: null,
+        flag: false,
+        count: 0
+      });
+      await write('put', `/tasks/${task.id}`, {
+        customAttributeChanges: { missing: 'x' }
+      }).expect(400);
+      await write('put', `/tasks/${task.id}`, {
+        customAttributeChanges: { count: 'x' }
+      }).expect(400);
+      await write('put', `/tasks/${task.id}`, {
+        customAttributeChanges: { flag: true },
+        customAttributeValues: {}
+      }).expect(400);
+      await assignExecutor(secondExecutor);
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { customAttributeChanges: { flag: true } },
+        'date-second-executor-token'
+      ).expect(403);
+      await project.update({ attributesOwnerOnly: false });
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { customAttributeChanges: { flag: true } },
+        'date-second-executor-token'
+      ).expect(200);
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { customAttributeChanges: { flag: false }, title: 'Нет прав' },
+        'date-second-executor-token'
+      ).expect(403);
+      expect((await task.reload()).customAttributeValues).toEqual({
+        text: null,
+        flag: true,
+        count: 0
+      });
+    });
+
     it('restores an empty controller list to the project owner while preserving the task author', async (): Promise<void> => {
       const recovered = await persist(Task.build(), {
         title: 'Recovered controllers',
