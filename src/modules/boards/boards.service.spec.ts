@@ -17,7 +17,9 @@ describe('BoardsService.getByProject', () => {
       const plain = { id: 1, title: 'Пустая доска', columns: [] };
       const boardRepository = {
         count: jest.fn().mockResolvedValue(1),
-        findAll: jest.fn().mockResolvedValue([{ ...plain, toJSON: () => plain }])
+        findAll: jest
+          .fn()
+          .mockResolvedValue([{ ...plain, toJSON: () => plain }])
       };
       const columnRepository = { findAll: jest.fn() };
       const taskRepository = { findAll: jest.fn() };

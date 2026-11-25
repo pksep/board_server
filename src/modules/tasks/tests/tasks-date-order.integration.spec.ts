@@ -1080,23 +1080,27 @@ describeWithDatabase(
       expect(ws.emitTaskUpdated).toHaveBeenCalledTimes(1);
     });
 
-    it('rolls back an executor description when its accompanying start date is invalid', async (): Promise<void> => {
+    it('saves an executor description and a delayed start without moving the due date', async (): Promise<void> => {
       await assignExecutor(outsider);
-      const before = task.toJSON();
+
       await write(
         'put',
         `/tasks/${task.id}`,
         {
-          description: '<p>Must not be saved</p>',
+          description: '<p>Delayed start</p>',
           startDate: '2026-10-21T00:00:00Z'
         },
         'date-outsider-token'
-      ).expect(400);
-      expect((await task.reload()).toJSON()).toEqual(before);
+      ).expect(200);
+
+      await task.reload();
+      expect(task.description).toBe('<p>Delayed start</p>');
+      expect(task.startDate.toISOString()).toBe('2026-10-21T00:00:00.000Z');
+      expect(task.dueDate.toISOString()).toBe('2026-10-20T00:00:00.000Z');
       expect(
         await ActivityEvent.count({ where: { projectId: project.id } })
-      ).toBe(0);
-      expect(ws.emitTaskUpdated).not.toHaveBeenCalled();
+      ).toBe(1);
+      expect(ws.emitTaskUpdated).toHaveBeenCalledTimes(1);
     });
 
     it('allows a creator who is not project owner to update all fields without being an executor', async (): Promise<void> => {
@@ -1179,23 +1183,21 @@ describeWithDatabase(
       });
     });
 
-    it('keeps date-order validation for an executor and still checks project access first', async (): Promise<void> => {
+    it('denies a delayed start to an executor whose project access was removed', async (): Promise<void> => {
       await assignExecutor(outsider);
-      await write(
-        'put',
-        `/tasks/${task.id}`,
-        { startDate: '2026-10-21T00:00:00Z' },
-        'date-outsider-token'
-      ).expect(400);
+      const before = task.toJSON();
+
       await ProjectMember.destroy({
         where: { projectId: project.id, userId: outsider.id }
       });
       await write(
         'put',
         `/tasks/${task.id}`,
-        { startDate: '2026-10-12T00:00:00Z' },
+        { startDate: '2026-10-21T00:00:00Z' },
         'date-outsider-token'
       ).expect(404);
+
+      expect((await task.reload()).toJSON()).toEqual(before);
       expect(ws.emitTaskUpdated).not.toHaveBeenCalled();
     });
 
@@ -1226,7 +1228,6 @@ describeWithDatabase(
 
     it.each([
       { dueDate: '2026-10-09T00:00:00Z' },
-      { startDate: '2026-10-21T00:00:00Z' },
       { startDate: '2026-10-14T00:00:00Z', dueDate: '2026-10-13T00:00:00Z' }
     ])(
       'validates the effective pair for a partial update %j without saving other fields',

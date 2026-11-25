@@ -12,7 +12,10 @@ import { MoveTaskDto } from './dto/move-task.dto';
 import { Project } from '../projects/model/project.model';
 import { BoardColumn } from '../columns/model/board-column.model';
 import { ColumnMovePermission } from '../columns/interfaces/column-move-permission.interface';
-import { ColumnStatus } from '../columns/interfaces/column-status.interface';
+import {
+  ColumnStatus,
+  normalizeLegacyColumnStatus
+} from '../columns/interfaces/column-status.interface';
 import { Board } from '../boards/model/board.model';
 import { User } from '../users/model/users.model';
 import { ProjectTag } from '../tags/model/project-tag.model';
@@ -52,6 +55,7 @@ import type {
   StandaloneTimeReportPage
 } from './interfaces/task-time-report.interface';
 import type {
+  PersonalTaskColumnOption,
   PersonalTaskLocation,
   PersonalTaskPage
 } from './interfaces/personal-task.interface';
@@ -59,6 +63,11 @@ import type {
   TaskGanttItem,
   TaskGanttSnapshot
 } from './interfaces/task-gantt.interface';
+import type { ProductionQueueWork } from './interfaces/production-queue-work.interface';
+import type {
+  TaskAccessContext,
+  TaskColumnLocation
+} from './interfaces/task-access-context.interface';
 
 export interface TaskListPage {
   items: Task[];
@@ -102,11 +111,68 @@ export interface TaskTimeEntry {
 export interface TaskTimeEntryPage {
   items: TaskTimeEntry[];
   nextCursor: number | null;
+  totalMinutes: number;
 }
+
+type TaskTimeEntryPageRecord = (TaskTimeEntryRecord | { id: null }) & {
+  totalMinutes: number;
+};
 
 @Injectable()
 export class TasksService {
   private readonly logger = new Logger(TasksService.name);
+
+  /** Доверенный ERP worker читает только актуальные назначения и норму; при включении проверяет право изменения даты. */
+  async getProductionQueueWork(
+    resourceId: number,
+    taskIds: number[],
+    actorErpId?: number
+  ): Promise<ProductionQueueWork[]> {
+    if (actorErpId) {
+      const actor = await User.findOne({
+        attributes: ['id'],
+        where: { erpId: String(actorErpId), ban: false }
+      });
+      if (!actor)
+        throw new HttpException(
+          'Пользователь доски не найден',
+          HttpStatus.FORBIDDEN
+        );
+      await this.sequelize.transaction(async transaction => {
+        const context = await this.loadTaskAccessContext(
+          taskIds,
+          actor.id,
+          transaction
+        );
+        for (const id of taskIds) {
+          const task = await this.assertTaskAccess(
+            id,
+            actor.id,
+            transaction,
+            false,
+            false,
+            context
+          );
+          await this.assertCanEditTaskFields(
+            task,
+            { startDate: task.startDate?.toISOString() ?? null },
+            actor.id,
+            transaction,
+            context
+          );
+        }
+      });
+    }
+    return this.sequelize.query<ProductionQueueWork>(
+      `SELECT task.id AS "taskId", task.title, task.time_norm_minutes AS "timeNormMinutes"
+       ${this.personalTaskSource({ scope: 'assigned' }, true)}
+       AND task.id IN (:taskIds) AND task.time_norm_minutes > 0 ORDER BY task.id`,
+      {
+        replacements: { taskIds, executorErpIds: [String(resourceId)] },
+        type: QueryTypes.SELECT
+      }
+    );
+  }
 
   constructor(
     @InjectModel(Task) private taskRepository: typeof Task,
@@ -265,22 +331,78 @@ export class TasksService {
     return normalized;
   }
 
+  /** Один набор чтений обслуживает все канонические проверки задач запроса ERP. */
+  private async loadTaskAccessContext(
+    taskIds: number[],
+    userId: number,
+    transaction: Transaction
+  ): Promise<TaskAccessContext> {
+    const tasks = await this.taskRepository.findAll({
+      attributes: [
+        'id',
+        'columnId',
+        'createdById',
+        'controllerIds',
+        'responsibleIds',
+        'startDate'
+      ],
+      where: { id: { [Op.in]: taskIds } },
+      order: [['id', 'ASC']],
+      transaction
+    });
+    const columnIds = [...new Set(tasks.map(task => task.columnId))];
+    const columns = columnIds.length
+      ? await this.columnRepository.findAll({
+          attributes: ['id', 'boardId'],
+          where: { id: { [Op.in]: columnIds } },
+          order: [['id', 'ASC']],
+          transaction
+        })
+      : [];
+    const boardIds = [...new Set(columns.map(column => column.boardId))];
+    const boards = boardIds.length
+      ? await this.boardRepository.findAll({
+          attributes: ['id', 'projectId'],
+          where: { id: { [Op.in]: boardIds } },
+          order: [['id', 'ASC']],
+          transaction
+        })
+      : [];
+    const projectAccess = await this.projectAccess.loadReadAccess(
+      [...new Set(boards.map(board => board.projectId))],
+      userId,
+      transaction
+    );
+
+    return {
+      tasksById: new Map(tasks.map(task => [task.id, task])),
+      columnsById: new Map(columns.map(column => [column.id, column])),
+      boardsById: new Map(boards.map(board => [board.id, board])),
+      projectAccess
+    };
+  }
+
   private async getColumnLocation(
     columnId: number,
     transaction?: Transaction,
-    includeArchived = false
-  ): Promise<{ column: BoardColumn; board: Board; projectId: number }> {
-    const column = await this.columnRepository.findByPk(columnId, {
-      transaction
-    });
+    includeArchived = false,
+    context?: TaskAccessContext
+  ): Promise<TaskColumnLocation> {
+    const column = context
+      ? context.columnsById.get(columnId)
+      : await this.columnRepository.findByPk(columnId, {
+          transaction
+        });
     if (!column) {
       throw new HttpException('Колонка не найдена', HttpStatus.NOT_FOUND);
     }
 
-    const board = await this.boardRepository.findByPk(column.boardId, {
-      transaction,
-      ...(includeArchived ? { paranoid: false } : {})
-    });
+    const board = context
+      ? context.boardsById.get(column.boardId)
+      : await this.boardRepository.findByPk(column.boardId, {
+          transaction,
+          ...(includeArchived ? { paranoid: false } : {})
+        });
     if (!board) {
       throw new HttpException('Доска не найдена', HttpStatus.NOT_FOUND);
     }
@@ -292,17 +414,20 @@ export class TasksService {
     columnId: number,
     userId: number,
     transaction?: Transaction,
-    includeArchived = false
-  ): Promise<{ column: BoardColumn; board: Board; projectId: number }> {
+    includeArchived = false,
+    context?: TaskAccessContext
+  ): Promise<TaskColumnLocation> {
     const location = await this.getColumnLocation(
       columnId,
       transaction,
-      includeArchived
+      includeArchived,
+      context
     );
     await this.projectAccess.assertCanRead(
       location.projectId,
       userId,
-      transaction
+      transaction,
+      context?.projectAccess
     );
     return location;
   }
@@ -312,13 +437,18 @@ export class TasksService {
     userId: number,
     transaction?: Transaction,
     lockForUpdate = false,
-    includeArchived = false
+    includeArchived = false,
+    context?: TaskAccessContext
   ): Promise<Task> {
-    const task = await this.taskRepository.findByPk(taskId, {
-      transaction,
-      ...(includeArchived ? { paranoid: false } : {}),
-      ...(transaction && lockForUpdate ? { lock: transaction.LOCK.UPDATE } : {})
-    });
+    const task = context
+      ? context.tasksById.get(taskId)
+      : await this.taskRepository.findByPk(taskId, {
+          transaction,
+          ...(includeArchived ? { paranoid: false } : {}),
+          ...(transaction && lockForUpdate
+            ? { lock: transaction.LOCK.UPDATE }
+            : {})
+        });
     if (!task) {
       throw new HttpException('Задача не найдена', HttpStatus.NOT_FOUND);
     }
@@ -326,7 +456,8 @@ export class TasksService {
       task.columnId,
       userId,
       transaction,
-      includeArchived
+      includeArchived,
+      context
     );
     return task;
   }
@@ -614,6 +745,14 @@ export class TasksService {
       : query.columnStatus
         ? ' AND col.status = :columnStatus'
         : '';
+    const columnFilter = query.columnIds?.length
+      ? ' AND col.id IN (:columnIds)'
+      : query.columnId
+        ? ' AND col.id = :columnId'
+        : '';
+    const nameFilter = query.search?.trim()
+      ? ' AND strpos(lower(task.title), lower(:search)) > 0'
+      : '';
 
     // Назначение разрешено участнику проекта независимо от состава конкретной доски.
     // Иначе созданная штатным API задача исчезает из загрузки и списка ПЗ исполнителя.
@@ -622,6 +761,14 @@ export class TasksService {
        JOIN boards board ON board.id = col.board_id AND board."deletedAt" IS NULL
        JOIN projects project ON project.id = board.project_id AND project."deletedAt" IS NULL
        ${executorSource}
+       ${
+         hasExecutor
+           ? `LEFT JOIN LATERAL (
+         SELECT MAX(personal.production_start_date) AS start_date FROM task_assignees personal
+         WHERE personal.task_id = task.id AND personal.user_id = executor.id
+       ) production_planning ON true`
+           : ''
+       }
        WHERE task."deletedAt" IS NULL
          ${hasExecutor ? '' : `AND ${this.taskProjectReaderAccess()}`}
          ${
@@ -637,7 +784,7 @@ export class TasksService {
              ? `EXISTS (SELECT 1 FROM task_assignees assignment
                  WHERE assignment.task_id = task.id AND assignment.user_id = ${assignedUser})`
              : 'task.created_by_id = :userId'
-         }${statusFilter}`;
+         }${statusFilter}${columnFilter}${nameFilter}`;
   }
 
   /** Возвращает факты загрузки всех проектов после проверки права планирования в guard. */
@@ -673,14 +820,19 @@ export class TasksService {
     return this.sequelize.query<ExecutorWorkloadTask>(
       `SELECT executor.erp_id::int AS "executorId", task.id AS "taskId",
          project.id AS "projectId", project.title AS "projectName",
-         task.start_date AS "startDate", task.due_date AS "dueDate",
+         COALESCE(production_planning.start_date, task.start_date) AS "startDate", task.due_date AS "dueDate",
          task.time_norm_minutes AS "timeNormMinutes",
-         COALESCE(task.start_date < :debtBefore, false) AS "isDebt"
+         COALESCE(COALESCE(production_planning.start_date, task.start_date) < :debtBefore, false) AS "isDebt"
        ${this.personalTaskSource({ scope: 'assigned' }, true, !query.erpUserIds)}
-         AND ((task.start_date >= :start AND task.start_date < :end)
+         ${
+           query.onlyProductionProjects
+             ? 'AND project.show_in_production = true'
+             : ''
+         }
+         AND ((COALESCE(production_planning.start_date, task.start_date) >= :start AND COALESCE(production_planning.start_date, task.start_date) < :end)
            OR (task.due_date >= :start AND task.due_date < :end)
-           OR task.start_date < :debtBefore)
-         AND (task.time_norm_minutes > 0 OR task.start_date < :debtBefore)
+           OR COALESCE(production_planning.start_date, task.start_date) < :debtBefore)
+         AND (task.time_norm_minutes > 0 OR COALESCE(production_planning.start_date, task.start_date) < :debtBefore)
        ORDER BY task.id, executor.erp_id::int`,
       {
         replacements: {
@@ -706,7 +858,10 @@ export class TasksService {
         replacements: {
           userId,
           columnStatus: query.columnStatus,
-          columnStatuses: query.columnStatuses
+          columnStatuses: query.columnStatuses,
+          columnId: query.columnId,
+          columnIds: query.columnIds,
+          search: query.search?.trim()
         },
         type: QueryTypes.SELECT
       }
@@ -738,8 +893,9 @@ export class TasksService {
     // EXISTS не размножает задачу при нескольких участниках/назначениях.
     // Счётчики детей агрегируются только для выбранной страницы, без N+1 запросов.
     // Личный фильтр не скрывает дочерние задачи, архив и доступ остаются прежними.
-    const locations = await this.sequelize.query<PersonalTaskLocation>(
-      `WITH page AS MATERIALIZED (
+    const [locations, columnOptions] = await Promise.all([
+      this.sequelize.query<PersonalTaskLocation>(
+        `WITH page AS MATERIALIZED (
          SELECT task.id, task.parent_task_id AS "parentTaskId",
            project.id AS "projectId", project.prefix AS "projectPrefix",
            project.attributes_owner_only AS "attributesOwnerOnly",
@@ -776,19 +932,33 @@ export class TasksService {
          COALESCE(subtask_counts.completed, 0) AS "subtasksCompleted"
        FROM page LEFT JOIN subtask_counts ON subtask_counts."taskId" = page.id
        ORDER BY page."sortDate" ${direction} NULLS LAST, page.id ASC`,
-      {
-        replacements: {
-          userId,
-          completedStatus: ColumnStatus.Completed,
-          executorErpIds: executorErpId ? [executorErpId] : [],
-          columnStatus: query.columnStatus,
-          columnStatuses: query.columnStatuses,
-          limit: limit + 1,
-          offset
-        },
-        type: QueryTypes.SELECT
-      }
-    );
+        {
+          replacements: {
+            userId,
+            completedStatus: ColumnStatus.Completed,
+            executorErpIds: executorErpId ? [executorErpId] : [],
+            columnStatus: query.columnStatus,
+            columnStatuses: query.columnStatuses,
+            columnId: query.columnId,
+            columnIds: query.columnIds,
+            search: query.search?.trim(),
+            limit: limit + 1,
+            offset
+          },
+          type: QueryTypes.SELECT
+        }
+      ),
+      // Варианты подчиняются доступу и разделу, но не зависят от выбранных фильтров.
+      offset === 0 && !executorErpId && query.includeColumnOptions === 'true'
+        ? this.sequelize.query<PersonalTaskColumnOption>(
+            `SELECT DISTINCT col.id, col.title,
+               board.title AS "boardTitle", project.title AS "projectTitle"
+             ${this.personalTaskSource({ scope: query.scope })}
+             ORDER BY "projectTitle", "boardTitle", col.title, col.id`,
+            { replacements: { userId }, type: QueryTypes.SELECT }
+          )
+        : Promise.resolve(undefined)
+    ]);
     const page = locations.slice(0, limit);
     if (!page.length) {
       // Смещение за концом списка не превращает его общее число в ноль.
@@ -801,14 +971,23 @@ export class TasksService {
                   userId,
                   executorErpIds: executorErpId ? [executorErpId] : [],
                   columnStatus: query.columnStatus,
-                  columnStatuses: query.columnStatuses
+                  columnStatuses: query.columnStatuses,
+                  columnId: query.columnId,
+                  columnIds: query.columnIds,
+                  search: query.search?.trim()
                 },
                 type: QueryTypes.SELECT
               }
             )
           : [];
 
-      return { items: [], total: count?.total ?? 0, offset, hasMore: false };
+      return {
+        items: [],
+        total: count?.total ?? 0,
+        offset,
+        hasMore: false,
+        ...(columnOptions ? { columnOptions } : {})
+      };
     }
 
     // Не загружаем файлы и дочерние карточки; описание нужно только таблице ПЗ.
@@ -929,7 +1108,8 @@ export class TasksService {
       items,
       total: Number(locations[0].total),
       offset: offset + page.length,
-      hasMore: locations.length > limit
+      hasMore: locations.length > limit,
+      ...(columnOptions ? { columnOptions } : {})
     };
   }
 
@@ -1202,13 +1382,13 @@ export class TasksService {
   private hasStructuredTaskFilters(query: TaskListQueryDto): boolean {
     return Boolean(
       query.assigneeIds?.length ||
-        query.creatorIds?.length ||
-        query.priorities?.length ||
-        query.tagIds?.length ||
-        query.startDateFrom ||
-        query.startDateTo ||
-        query.dueDateFrom ||
-        query.dueDateTo
+      query.creatorIds?.length ||
+      query.priorities?.length ||
+      query.tagIds?.length ||
+      query.startDateFrom ||
+      query.startDateTo ||
+      query.dueDateFrom ||
+      query.dueDateTo
     );
   }
 
@@ -1583,12 +1763,14 @@ export class TasksService {
     const records = await this.sequelize.query<
       TaskTimeEntryRecord & Omit<TaskTimeReportEntry, keyof TaskTimeEntry>
     >(
-      `SELECT entry.id, entry.task_id AS "taskId", entry.user_id AS "userId",
+      `WITH report_entries AS (
+       SELECT entry.id, entry.task_id AS "taskId", entry.user_id AS "userId",
         entry.created_by_id AS "createdById",
         entry.duration_minutes AS "durationMinutes", entry.comment, entry."createdAt",
         actor.id AS "actorId", actor.login AS "actorLogin", actor.initial AS "actorInitial",
         actor.image AS "actorImage", actor.erp_id AS "erpUserId", actor.service_number AS "serviceNumber",
         task.title AS "taskTitle", task.task_number AS "taskNumber",
+        task.time_norm_minutes AS "timeNormMinutes", col.status AS "columnStatus",
         project.id AS "projectId", project.title AS "projectTitle", project.prefix AS "projectPrefix"
        FROM task_time_entries entry
        JOIN users actor ON actor.id = entry.user_id
@@ -1599,7 +1781,16 @@ export class TasksService {
        WHERE project.id IN (:projectIds)
          AND entry."createdAt" >= :start AND entry."createdAt" < :end
          ${query.beforeId ? 'AND entry.id < :beforeId' : ''}
-       ORDER BY entry.id DESC LIMIT :limit`,
+       ORDER BY entry.id DESC LIMIT :limit
+       ), task_totals AS (
+         SELECT history.task_id, SUM(history.duration_minutes)::double precision AS "taskTotalMinutes"
+         FROM task_time_entries history
+         JOIN (SELECT DISTINCT "taskId" FROM report_entries) selected ON selected."taskId" = history.task_id
+         GROUP BY history.task_id
+       )
+       SELECT report_entries.*, task_totals."taskTotalMinutes"
+       FROM report_entries JOIN task_totals ON task_totals.task_id = report_entries."taskId"
+       ORDER BY report_entries.id DESC`,
       {
         replacements: {
           projectIds,
@@ -1623,14 +1814,18 @@ export class TasksService {
         taskNumber: Number(record.taskNumber),
         projectId: Number(record.projectId),
         projectTitle: record.projectTitle,
-        projectPrefix: record.projectPrefix
+        projectPrefix: record.projectPrefix,
+        timeNormMinutes: record.timeNormMinutes,
+        columnStatus: normalizeLegacyColumnStatus(record.columnStatus),
+        // Полное время не ограничивается месяцем: норма делится между всеми записями задачи.
+        taskTotalMinutes: Number(record.taskTotalMinutes)
       })),
       nextCursor:
         records.length > limit ? Number(page[page.length - 1].id) : null
     };
   }
 
-  /** Возвращает записи фактического времени задачи от новых к старым. */
+  /** Возвращает страницу записей и общее фактическое время задачи. */
   async getTimeEntries(
     id: number,
     userId: number,
@@ -1638,26 +1833,36 @@ export class TasksService {
   ): Promise<TaskTimeEntryPage> {
     await this.assertTaskAccess(id, userId, undefined, false, true);
     const pageSize = Math.min(Math.max(query.limit || 50, 1), 100);
-    const records = await this.sequelize.query<TaskTimeEntryRecord>(
+    // Итог и страницу читаем из одного снимка. Курсор ограничивает только записи.
+    const records = await this.sequelize.query<TaskTimeEntryPageRecord>(
       `
-        SELECT
-          entry.id,
-          entry.task_id AS "taskId",
-          entry.user_id AS "userId",
-          entry.created_by_id AS "createdById",
-          entry.duration_minutes AS "durationMinutes",
-          entry.comment,
-          entry."createdAt",
-          actor.id AS "actorId",
-          actor.login AS "actorLogin",
-          actor.initial AS "actorInitial",
-          actor.image AS "actorImage"
-        FROM task_time_entries entry
-        INNER JOIN users actor ON actor.id = entry.user_id
-        WHERE entry.task_id = :taskId
-          ${query.beforeId ? 'AND entry.id < :beforeId' : ''}
-        ORDER BY entry.id DESC
-        LIMIT :limit
+        SELECT page.*, totals."totalMinutes"
+        FROM (
+          SELECT COALESCE(SUM(duration_minutes), 0)::double precision AS "totalMinutes"
+          FROM task_time_entries
+          WHERE task_id = :taskId
+        ) totals
+        LEFT JOIN LATERAL (
+          SELECT
+            entry.id,
+            entry.task_id AS "taskId",
+            entry.user_id AS "userId",
+            entry.created_by_id AS "createdById",
+            entry.duration_minutes AS "durationMinutes",
+            entry.comment,
+            entry."createdAt",
+            actor.id AS "actorId",
+            actor.login AS "actorLogin",
+            actor.initial AS "actorInitial",
+            actor.image AS "actorImage"
+          FROM task_time_entries entry
+          INNER JOIN users actor ON actor.id = entry.user_id
+          WHERE entry.task_id = :taskId
+            ${query.beforeId ? 'AND entry.id < :beforeId' : ''}
+          ORDER BY entry.id DESC
+          LIMIT :limit
+        ) page ON TRUE
+        ORDER BY page.id DESC
       `,
       {
         replacements: {
@@ -1668,14 +1873,19 @@ export class TasksService {
         type: QueryTypes.SELECT
       }
     );
-    const hasNextPage = records.length > pageSize;
-    const pageRecords = hasNextPage ? records.slice(0, pageSize) : records;
+    const entries = records.filter(
+      (record): record is TaskTimeEntryRecord & { totalMinutes: number } =>
+        record.id !== null
+    );
+    const hasNextPage = entries.length > pageSize;
+    const pageRecords = entries.slice(0, pageSize);
 
     return {
       items: pageRecords.map(record => this.mapTaskTimeEntry(record)),
       nextCursor: hasNextPage
         ? Number(pageRecords[pageRecords.length - 1].id)
-        : null
+        : null,
+      totalMinutes: records[0].totalMinutes
     };
   }
 
@@ -2210,7 +2420,8 @@ export class TasksService {
     task: Task,
     dto: UpdateTaskDto,
     userId: number,
-    transaction: Transaction
+    transaction: Transaction,
+    context?: TaskAccessContext
   ): Promise<void> {
     if ((task.controllerIds ?? [task.createdById]).includes(userId)) return;
 
@@ -2247,14 +2458,21 @@ export class TasksService {
         attributeFields.has(field as keyof UpdateTaskDto)
       )
     ) {
-      const projectId = await this.getProjectIdByColumnId(
-        task.columnId,
-        transaction
-      );
+      const projectId = context
+        ? (
+            await this.getColumnLocation(
+              task.columnId,
+              transaction,
+              false,
+              context
+            )
+          ).projectId
+        : await this.getProjectIdByColumnId(task.columnId, transaction);
       const project = await this.projectAccess.assertCanRead(
         projectId,
         userId,
-        transaction
+        transaction,
+        context?.projectAccess
       );
 
       if (project.attributesOwnerOnly === false) {
@@ -2276,11 +2494,25 @@ export class TasksService {
       )
     ) {
       // Дата начала работ по-прежнему требует действующего назначения.
-      const assignment = await this.assigneeRepository.findOne({
-        where: { taskId: task.id, userId },
-        transaction,
-        lock: transaction.LOCK.SHARE
-      });
+      if (context && !context.assigneeTaskIds) {
+        const assignments = await this.assigneeRepository.findAll({
+          attributes: ['taskId'],
+          where: { taskId: { [Op.in]: [...context.tasksById.keys()] }, userId },
+          order: [['taskId', 'ASC']],
+          transaction,
+          lock: transaction.LOCK.SHARE
+        });
+        context.assigneeTaskIds = new Set(
+          assignments.map(assignment => assignment.taskId)
+        );
+      }
+      const assignment = context
+        ? context.assigneeTaskIds.has(task.id)
+        : await this.assigneeRepository.findOne({
+            where: { taskId: task.id, userId },
+            transaction,
+            lock: transaction.LOCK.SHARE
+          });
       if (assignment) return;
     }
 
@@ -2327,7 +2559,9 @@ export class TasksService {
           transaction
         );
 
-      if (dto.startDate !== undefined || dto.dueDate !== undefined) {
+      // Перенос ручного начала не сдвигает требуемый срок: просрочку показываем в ПЗ.
+      // Новый срок по-прежнему проверяем относительно выбранного начала.
+      if (dto.dueDate !== undefined) {
         this.assertTaskDateOrder(
           dto.startDate !== undefined ? dto.startDate : task.startDate,
           dto.dueDate !== undefined ? dto.dueDate : task.dueDate
