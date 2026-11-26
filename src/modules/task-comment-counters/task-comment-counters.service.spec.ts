@@ -8,6 +8,7 @@ describe('task comment counter gateway', () => {
   let service: TaskCommentCountersService;
   const tasks = {
     getPersonalTaskIds: jest.fn(),
+    getReadableTaskCommentIds: jest.fn(),
     assertCanReadTaskComments: jest.fn()
   };
   const session = {
@@ -33,6 +34,34 @@ describe('task comment counter gateway', () => {
       ]
     }).compile();
     service = module.get(TaskCommentCountersService);
+  });
+
+  it('fetches totals once for authorized cards without changing read status', async (): Promise<void> => {
+    tasks.getReadableTaskCommentIds.mockResolvedValue([122, 123]);
+    post.mockResolvedValue({
+      data: [
+        { entityId: 122, total: 4, unread: 0 },
+        { entityId: 123, total: 0, unread: 0 }
+      ]
+    });
+
+    expect(await service.taskTotals(7, [122, 128, 123], session)).toMatchObject(
+      {
+        taskIds: [122, 123],
+        tasks: [{ taskId: 122, total: 4 }]
+      }
+    );
+    expect(tasks.getReadableTaskCommentIds).toHaveBeenCalledWith(
+      [122, 128, 123],
+      7
+    );
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0][1]).toEqual({
+      entityType: 'tasks',
+      entityIds: [122, 123],
+      markRead: false,
+      totalsOnly: true
+    });
   });
 
   afterAll((): void => {

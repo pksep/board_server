@@ -1,4 +1,6 @@
 import { plainToInstance } from 'class-transformer';
+import { AmqpConnection } from '@golevelup/nestjs-rabbitmq';
+import { Test } from '@nestjs/testing';
 import { validate } from 'class-validator';
 import { Attributes, DataTypes, Model } from 'sequelize';
 import { Sequelize } from 'sequelize-typescript';
@@ -7,6 +9,8 @@ import { User } from '../../users/model/users.model';
 import { ProjectTag } from '../../tags/model/project-tag.model';
 import { Board } from '../../boards/model/board.model';
 import { BoardColumn } from '../../columns/model/board-column.model';
+import { ProductionQueueWorkProvider } from '../../tasks/production-queue-work.provider';
+import { TasksService } from '../../tasks/tasks.service';
 import { CreateProjectDto } from '../dto/create-project.dto';
 import { UpdateProjectDto } from '../dto/update-project.dto';
 import { Project } from '../model/project.model';
@@ -112,6 +116,61 @@ describeWithDatabase(
         owner.id
       );
       expect(created.showInProduction).toBe(false);
+    });
+
+    it('publishes changes to production or members, while a permissions save does not queue recalculation', async (): Promise<void> => {
+      const project = await service.create(
+        {
+          title: 'Project queue notifications',
+          prefix: 'NOTIFYPRD',
+          membersIds: [member.id]
+        },
+        owner.id
+      );
+      const publish = jest.fn().mockResolvedValue(true);
+      const module = await Test.createTestingModule({
+        providers: [
+          ProductionQueueWorkProvider,
+          { provide: TasksService, useValue: {} },
+          { provide: Sequelize, useValue: database },
+          { provide: AmqpConnection, useValue: { publish } }
+        ]
+      }).compile();
+      const provider = module.get(ProductionQueueWorkProvider);
+      const waitForNotification = (): Promise<void> =>
+        new Promise(resolve => setTimeout(resolve, 130));
+      provider.onModuleInit();
+
+      try {
+        await waitForNotification();
+        expect(publish).toHaveBeenCalledTimes(1);
+        publish.mockClear();
+
+        await service.update(
+          {
+            id: project.id,
+            membersIds: [member.id],
+            taskPermissions: { otherMember: { canEditAttributes: true } }
+          },
+          owner.id
+        );
+        await waitForNotification();
+        expect(publish).not.toHaveBeenCalled();
+
+        await service.update(
+          { id: project.id, showInProduction: true },
+          owner.id
+        );
+        await waitForNotification();
+        expect(publish).toHaveBeenCalledTimes(1);
+        publish.mockClear();
+
+        await service.update({ id: project.id, membersIds: [] }, owner.id);
+        await waitForNotification();
+        expect(publish).toHaveBeenCalledTimes(1);
+      } finally {
+        await module.close();
+      }
     });
 
     it('persists explicit true in creation and both values in updates', async (): Promise<void> => {

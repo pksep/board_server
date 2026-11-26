@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Get,
   Param,
@@ -13,12 +14,23 @@ import { CurrentUser } from '../auth/current-user.decorator';
 import type { IUserDataToken } from '../auth/interfaces/interface';
 import { PersonalTaskQueryDto } from '../tasks/dto/personal-task-query.dto';
 import { TaskCommentCountersService } from './task-comment-counters.service';
+import { TaskCommentTotalsDto } from './dto/task-comment-totals.dto';
 import type { TaskCommentCounters } from './interfaces/task-comment-counter.interface';
 
 @ApiTags('Комментарии задач')
 @Controller('tasks')
 export class TaskCommentCountersController {
   constructor(private readonly counters: TaskCommentCountersService) {}
+
+  @ApiOperation({ summary: 'Суммы комментариев видимых карточек доски' })
+  @Post('comment-totals')
+  taskTotals(
+    @CurrentUser() user: IUserDataToken,
+    @Body() dto: TaskCommentTotalsDto,
+    @Req() request: Request
+  ): Promise<TaskCommentCounters> {
+    return this.counters.taskTotals(user.id, dto.taskIds, request);
+  }
 
   @ApiOperation({ summary: 'Комментарии всего личного списка задач' })
   @Get('personal/comment-counters')

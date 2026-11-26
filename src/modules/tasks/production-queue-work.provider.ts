@@ -192,8 +192,21 @@ export class ProductionQueueWorkProvider
       'afterSave',
       'productionQueue',
       (instance, options): void => {
-        if (this.planningModels.has(instance.constructor.name))
-          this.schedule(options.transaction);
+        const model = instance.constructor.name;
+        if (!this.planningModels.has(model)) return;
+
+        // Название, описание и права проекта не меняют состав работ очереди.
+        if (
+          model === 'Project' &&
+          !(instance.changed() || []).some(field =>
+            ['showInProduction', 'createdById', 'deletedAt'].includes(
+              String(field)
+            )
+          )
+        )
+          return;
+
+        this.schedule(options.transaction);
       }
     );
     this.sequelize.addHook(

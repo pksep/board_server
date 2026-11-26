@@ -216,6 +216,23 @@ describeWithDatabase(
       await persist(TaskAssignee.build(), { taskId: task.id, userId: user.id });
     }
 
+    it('limits batched comment totals to projects the user can read', async (): Promise<void> => {
+      const tasks = app.get(TasksService);
+      const ids = [task.id, task.id, 2147483647];
+
+      expect(await tasks.getReadableTaskCommentIds(ids, owner.id)).toEqual([
+        task.id
+      ]);
+      expect(await tasks.getReadableTaskCommentIds(ids, outsider.id)).toEqual(
+        []
+      );
+      await assignExecutor(outsider);
+      await task.destroy();
+      expect(await tasks.getReadableTaskCommentIds(ids, outsider.id)).toEqual([
+        task.id
+      ]);
+    });
+
     it('patches attributes atomically, preserves unrelated values and validates permissions', async (): Promise<void> => {
       await project.update({
         taskAttributeDefinitions: [

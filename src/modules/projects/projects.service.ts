@@ -264,13 +264,18 @@ export class ProjectsService {
           existingMembers.map(member => member.userId)
         );
 
-        await this.memberRepository.destroy({
-          where: {
-            projectId: dto.id,
-            userId: { [Op.notIn]: desiredMemberIds }
-          },
-          transaction
-        });
+        const retainedMembers = new Set(desiredMemberIds);
+        if (
+          existingMembers.some(member => !retainedMembers.has(member.userId))
+        ) {
+          await this.memberRepository.destroy({
+            where: {
+              projectId: dto.id,
+              userId: { [Op.notIn]: desiredMemberIds }
+            },
+            transaction
+          });
+        }
 
         const newMemberIds = desiredMemberIds.filter(
           memberId => !existingMemberIds.has(memberId)

@@ -21,6 +21,17 @@ export class TaskCommentCountersService {
     private readonly config: ConfigService
   ) {}
 
+  /** Фоновая сверка получает суммы без загрузки карточек и отметок прочтения. */
+  async taskTotals(
+    userId: number,
+    taskIds: number[],
+    session: CounterRequestSession
+  ): Promise<TaskCommentCounters> {
+    const ids = await this.tasks.getReadableTaskCommentIds(taskIds, userId);
+
+    return this.readCounters(ids, session, false, true);
+  }
+
   /** Дополняет уже проверенную выдачу задач и вложенных подзадач одним пакетом. */
   async attachToTasks(
     tasks: TaskCommentSnapshot[],

@@ -885,6 +885,24 @@ export class TasksService {
     return records.map(record => record.id);
   }
 
+  /** Проверяет доступ сразу для всех карточек, включая архивные задачи и доски. */
+  async getReadableTaskCommentIds(
+    taskIds: number[],
+    userId: number
+  ): Promise<number[]> {
+    if (!taskIds.length) return [];
+    const tasks = await this.sequelize.query<{ id: number }>(
+      `SELECT task.id FROM tasks task
+       JOIN board_columns col ON col.id = task.column_id AND col."deletedAt" IS NULL
+       JOIN boards board ON board.id = col.board_id
+       JOIN projects project ON project.id = board.project_id AND project."deletedAt" IS NULL
+       WHERE task.id IN (:taskIds) AND ${this.taskProjectReaderAccess()}`,
+      { replacements: { taskIds, userId }, type: QueryTypes.SELECT }
+    );
+
+    return tasks.map(task => task.id);
+  }
+
   /** Проверка доступа к счётчику не загружает описание и граф дочерних задач. */
   async assertCanReadTaskComments(
     taskId: number,
