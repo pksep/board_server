@@ -2466,7 +2466,7 @@ export class TasksService {
     }
   }
 
-  /** Собирает фактические роли пользователя, не доверяя редактируемому запросу. */
+  /** Определяет роли пользователя после проверки его доступа к проекту. */
   private getTaskRoles(
     task: Task,
     userId: number,
@@ -2478,7 +2478,7 @@ export class TasksService {
     if ((task.responsibleIds ?? []).includes(userId)) roles.push('responsible');
     if (assigned) roles.push('assignee');
 
-    return roles;
+    return roles.length ? roles : ['otherMember'];
   }
 
   /** Использует пакетные назначения при применении графика и одиночные при редактировании. */

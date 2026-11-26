@@ -3,7 +3,11 @@ import type {
   TaskPermissionRules
 } from '../interfaces/project-task-permissions.interface';
 
-export type ProjectTaskRole = 'controller' | 'responsible' | 'assignee';
+export type ProjectTaskRole =
+  | 'controller'
+  | 'responsible'
+  | 'assignee'
+  | 'otherMember';
 
 /** Отдельные настройки доски заменяют общие правила только на этой доске. */
 export function getTaskPermissionsForBoard(
@@ -46,16 +50,20 @@ export function restrictTaskPermissionMembers(
     : project;
 }
 
-/** Проверяет одно направление по спискам ролей. Без списка доступны все колонки. */
+/** Участнику без роли перенос нужно разрешить явно для каждого направления. */
 export function canMoveProjectTask(
   permissions: TaskPermissionRules | null | undefined,
   roles: ProjectTaskRole[],
   direction: 'moveToColumnIds' | 'moveFromColumnIds',
   columnId: number
 ): boolean {
-  return roles.some(
-    role => permissions?.[role]?.[direction]?.includes(columnId) ?? true
-  );
+  return roles.some(role => {
+    const columns = permissions?.[role]?.[direction];
+
+    if (columns === undefined) return role !== 'otherMember';
+
+    return columns === null || columns.includes(columnId);
+  });
 }
 
 /** Разрешение любой роли достаточно для изменения атрибутов. */
