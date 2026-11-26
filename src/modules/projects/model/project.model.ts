@@ -10,6 +10,11 @@ import {
 } from 'sequelize-typescript';
 import { User } from 'src/modules/users/model/users.model';
 import { ITaskAttributeDefinition } from '../interfaces/task-attribute.interface';
+import type { ProjectCreationAttributes } from '../interfaces/project-creation-attributes.interface';
+import type { ProjectMember } from './project-member.model';
+import type { UserFavorite } from './user-favorite.model';
+import type { Board } from '../../boards/model/board.model';
+import type { ProjectTag } from '../../tags/model/project-tag.model';
 import type { ProjectTaskPermissions } from '../interfaces/project-task-permissions.interface';
 
 // Lazy requires для решения circular dependency (SWC live bindings)
@@ -21,7 +26,7 @@ const lazyProjectTag = () =>
 const lazyUserFavorite = () => require('./user-favorite.model').UserFavorite;
 
 @Table({ tableName: 'projects', paranoid: true })
-export class Project extends Model<Project> {
+export class Project extends Model<Project, ProjectCreationAttributes> {
   @ApiProperty({
     nullable: true,
     description: 'Дополнительные права на действия с задачами проекта'
@@ -118,17 +123,17 @@ export class Project extends Model<Project> {
 
   @ApiHideProperty()
   @HasMany(lazyProjectMember)
-  members: any[];
+  members: ProjectMember[];
 
   @ApiHideProperty()
   @HasMany(lazyProjectTag)
-  tags: any[];
+  tags: ProjectTag[];
 
   @ApiHideProperty()
   @HasMany(lazyBoard)
-  boards: any[];
+  boards: Board[];
 
   @ApiHideProperty()
   @HasMany(lazyUserFavorite)
-  favorites: any[];
+  favorites: UserFavorite[];
 }

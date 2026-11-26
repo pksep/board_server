@@ -13,6 +13,11 @@ import { User } from 'src/modules/users/model/users.model';
 import { TTaskAttributeValues } from 'src/modules/projects/interfaces/task-attribute.interface';
 import type { TaskEntityReference } from '../interfaces/task-entity.interface';
 import { QueryTypes, Transaction } from 'sequelize';
+import type { BoardColumn } from '../../columns/model/board-column.model';
+import type { TaskAssignee } from './task-assignee.model';
+import type { TaskTag } from './task-tag.model';
+import type { TaskAttachment } from './task-attachment.model';
+import type { TaskCreationAttributes } from '../interfaces/task-creation-attributes.interface';
 
 // Lazy requires для решения circular dependency (SWC live bindings)
 const lazyBoardColumn = () =>
@@ -23,7 +28,7 @@ const lazyTaskAttachment = () =>
   require('./task-attachment.model').TaskAttachment;
 
 @Table({ tableName: 'tasks', paranoid: true })
-export class Task extends Model<Task> {
+export class Task extends Model<Task, TaskCreationAttributes> {
   @ApiProperty({ description: 'ID контроллеров задачи', type: [Number] })
   @Column({
     type: DataType.ARRAY(DataType.INTEGER),
@@ -183,7 +188,7 @@ export class Task extends Model<Task> {
 
   @ApiHideProperty()
   @BelongsTo(lazyBoardColumn)
-  column: any;
+  column: BoardColumn;
 
   @ApiHideProperty()
   @BelongsTo(() => User)
@@ -199,13 +204,13 @@ export class Task extends Model<Task> {
 
   @ApiHideProperty()
   @HasMany(lazyTaskAssignee)
-  assignees: any[];
+  assignees: TaskAssignee[];
 
   @ApiHideProperty()
   @HasMany(lazyTaskTag)
-  tags: any[];
+  tags: TaskTag[];
 
   @ApiHideProperty()
   @HasMany(lazyTaskAttachment)
-  attachments: any[];
+  attachments: TaskAttachment[];
 }

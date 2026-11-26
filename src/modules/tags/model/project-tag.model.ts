@@ -8,6 +8,8 @@ import {
   BelongsTo,
   HasMany
 } from 'sequelize-typescript';
+import type { Project } from '../../projects/model/project.model';
+import type { TaskTag } from '../../tasks/model/task-tag.model';
 
 // Lazy requires для решения circular dependency (SWC live bindings)
 const lazyProject = () => require('../../projects/model/project.model').Project;
@@ -45,9 +47,9 @@ export class ProjectTag extends Model<ProjectTag> {
 
   @ApiHideProperty()
   @BelongsTo(lazyProject)
-  project: any;
+  project: Project;
 
   @ApiHideProperty()
   @HasMany(lazyTaskTag)
-  taskTags: any[];
+  taskTags: TaskTag[];
 }

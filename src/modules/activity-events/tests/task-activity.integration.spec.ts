@@ -7,7 +7,7 @@ import { APP_GUARD } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import { getModelToken } from '@nestjs/sequelize';
 import { Test } from '@nestjs/testing';
-import { Attributes, Model } from 'sequelize';
+import { Attributes, Model, QueryTypes } from 'sequelize';
 import { Sequelize } from 'sequelize-typescript';
 import request = require('supertest');
 import models from '../../../configs/models';
@@ -49,6 +49,13 @@ import { ActivityEventPage } from '../interfaces/activity-event.interface';
 
 const databaseUrl = process.env.BOARD_ARCHIVE_TEST_DATABASE_URL;
 const describeWithDatabase = databaseUrl ? describe : describe.skip;
+const taskLookupMigration = require('../../../../migrations/2026/23.11.2026/20261123120000-add-task-activity-lookup-index.js');
+
+interface QueryPlanNode {
+  'Relation Name'?: string;
+  'Actual Loops'?: number;
+  Plans?: QueryPlanNode[];
+}
 
 /** Записывает реальные модели только в выделенную тестовую базу. */
 async function persist<T extends Model>(
@@ -127,6 +134,7 @@ describeWithDatabase(
         pool: { max: 2, min: 0 }
       });
       await sequelize.sync();
+      await taskLookupMigration.up(sequelize.getQueryInterface());
       [owner, first, second, outsider] = await Promise.all(
         ['owner', 'first', 'second', 'outsider'].map(label =>
           persist(User.build(), {
@@ -555,32 +563,127 @@ describeWithDatabase(
       );
     });
 
-    it('paginates new actions oldest-first without skipping a burst, while old pages stay newest-first', async (): Promise<void> => {
-      const snapshot = (await feed(first)).items[0].id;
-      for (let index = 0; index < 7; index += 1) {
-        await http(owner)
-          .put(`/tasks/${task.id}`)
-          .send({ title: `Delta ${index}` })
-          .expect(200);
+    it.each(['mine', 'all'])(
+      'paginates %s actions oldest-first without skipping a burst, while old pages stay newest-first',
+      async (scope): Promise<void> => {
+        const snapshot = (await feed(first, `?scope=${scope}`)).items[0].id;
+        for (let index = 0; index < 7; index += 1) {
+          await http(owner)
+            .put(`/tasks/${task.id}`)
+            .send({ title: `Delta ${index}` })
+            .expect(200);
+        }
+        const all = (await feed(first, `?scope=${scope}`)).items.map(
+          event => event.id
+        );
+        const incoming: number[] = [];
+        let cursor: number | null = snapshot;
+        do {
+          const page = await feed(
+            first,
+            `?scope=${scope}&afterId=${cursor}&limit=3`
+          );
+          expect(page.items.length).toBeLessThanOrEqual(3);
+          incoming.push(...page.items.map(event => event.id));
+          cursor = page.nextCursor;
+        } while (cursor);
+        expect(incoming).toEqual(all.filter(id => id > snapshot).reverse());
+        const older = await feed(
+          first,
+          `?scope=${scope}&beforeId=${all[2]}&limit=2`
+        );
+        expect(older.items.map(event => event.id)).toEqual(all.slice(3, 5));
+        await http(first)
+          .get(`/activity/task-feed?beforeId=${snapshot}&afterId=${snapshot}`)
+          .expect(400);
+        await http(first).get('/activity/task-feed?scope=invalid').expect(400);
+        await http(first).get('/activity/task-feed?afterId=-1').expect(400);
+        await http(first).get('/activity/task-feed?limit=101').expect(400);
       }
-      const all = (await feed(first)).items.map(event => event.id);
-      const incoming: number[] = [];
-      let cursor: number | null = snapshot;
-      do {
-        const page = await feed(first, `?afterId=${cursor}&limit=3`);
-        expect(page.items.length).toBeLessThanOrEqual(3);
-        incoming.push(...page.items.map(event => event.id));
-        cursor = page.nextCursor;
-      } while (cursor);
-      expect(incoming).toEqual(all.filter(id => id > snapshot).reverse());
-      const older = await feed(first, `?beforeId=${all[2]}&limit=2`);
-      expect(older.items.map(event => event.id)).toEqual(all.slice(3, 5));
-      await http(first)
-        .get(`/activity/task-feed?beforeId=${snapshot}&afterId=${snapshot}`)
-        .expect(400);
-      await http(first).get('/activity/task-feed?scope=invalid').expect(400);
-      await http(first).get('/activity/task-feed?afterId=-1').expect(400);
-      await http(first).get('/activity/task-feed?limit=101').expect(400);
+    );
+
+    it('does not scan the event journal for a reader without accessible projects', async (): Promise<void> => {
+      const querySpy = jest.spyOn(sequelize, 'query');
+      let sql: string;
+
+      try {
+        expect((await feed(outsider, '?scope=all')).items).toEqual([]);
+        sql = String(querySpy.mock.calls[0][0]);
+      } finally {
+        querySpy.mockRestore();
+      }
+
+      const rows = await sequelize.query<{
+        'QUERY PLAN': { Plan: QueryPlanNode }[];
+      }>(`EXPLAIN (ANALYZE, FORMAT JSON) ${sql}`, {
+        type: QueryTypes.SELECT,
+        replacements: { userId: outsider.id, limit: 51 }
+      });
+      const nodes = [rows[0]['QUERY PLAN'][0].Plan];
+      const eventScans: QueryPlanNode[] = [];
+
+      for (let index = 0; index < nodes.length; index += 1) {
+        const node = nodes[index];
+        if (node['Relation Name'] === 'activity_events') eventScans.push(node);
+        nodes.push(...(node.Plans ?? []));
+      }
+
+      // Проверяем выполненную работу, а не нестабильный порог времени тестовой машины.
+      expect(eventScans.length).toBeGreaterThan(0);
+      expect(eventScans.every(node => node['Actual Loops'] === 0)).toBe(true);
+    });
+
+    it('limits general pages only after checking each task destination', async (): Promise<void> => {
+      const destination = await persist(Project.build(), {
+        title: 'Hidden destination',
+        prefix: `HIDE${String.fromCharCode(64 + sequence)}`,
+        createdById: owner.id
+      });
+      const destinationBoard = await persist(Board.build(), {
+        title: 'Hidden board',
+        projectId: destination.id
+      });
+      const destinationColumn = await persist(BoardColumn.build(), {
+        title: 'Hidden column',
+        boardId: destinationBoard.id
+      });
+      const relocated = await persist(Task.build(), {
+        columnId: destinationColumn.id,
+        title: 'Relocated task',
+        taskNumber: 1,
+        createdById: owner.id
+      });
+      const original = (await feed(first)).items[0];
+
+      // Более свежих недоступных событий больше, чем размер страницы.
+      await ActivityEvent.bulkCreate(
+        Array.from({ length: 25 }, () => ({
+          projectId: project.id,
+          entityType: ActivityEntityType.Task,
+          entityId: String(relocated.id),
+          actionType: ActivityActionType.Updated
+        }))
+      );
+
+      const page = await feed(first, '?scope=all&limit=1');
+      expect(page.items.map(event => event.id)).toEqual([original.id]);
+      const delta = await feed(
+        first,
+        `?scope=all&afterId=${original.id}&limit=1`
+      );
+      expect(delta.items).toEqual([]);
+
+      await persist(ProjectMember.build(), {
+        projectId: destination.id,
+        userId: first.id
+      });
+      const visible = await feed(
+        first,
+        `?scope=all&afterId=${original.id}&limit=2`
+      );
+      expect(visible.items).toHaveLength(2);
+      expect(visible.nextCursor).toBe(visible.items[1].id);
+      expect(visible.items[0].taskProjectId).toBe(destination.id);
     });
 
     it('read-only requests for task or project do not erase history or mark another user', async (): Promise<void> => {
@@ -677,6 +780,144 @@ describeWithDatabase(
         .expect(200);
       expect(after.body.items).toEqual([]);
       expect(after.body.accessibleProjectIds).not.toContain(project.id);
+    });
+
+    it('preserves numeric task matching, existing read timestamps and other recipients with the lookup index', async (): Promise<void> => {
+      const oldReadAt = new Date('2026-10-01T00:00:00.000Z');
+      const original = (await feed(first)).items[0];
+      await ActivityEventRecipient.update(
+        { readAt: oldReadAt },
+        { where: { eventId: original.id, userId: first.id } }
+      );
+      const legacyEvent = await persist(ActivityEvent.build(), {
+        projectId: project.id,
+        entityType: ActivityEntityType.Task,
+        entityId: `00${task.id}`,
+        actionType: ActivityActionType.Updated,
+        actorUserId: owner.id
+      });
+      for (const user of [first, second]) {
+        await persist(ActivityEventRecipient.build(), {
+          eventId: legacyEvent.id,
+          userId: user.id
+        });
+      }
+      // A partial index must not cast arbitrary entity IDs of other entity types.
+      await persist(ActivityEvent.build(), {
+        projectId: project.id,
+        entityType: ActivityEntityType.Project,
+        entityId: 'external-project-id',
+        actionType: ActivityActionType.Updated,
+        actorUserId: owner.id
+      });
+
+      const before = await feed(first);
+      expect(before.items.map(event => event.id)).toEqual([
+        legacyEvent.id,
+        original.id
+      ]);
+      const read = await http(first)
+        .patch('/activity/task-feed/read')
+        .send({ taskId: task.id, throughEventId: legacyEvent.id })
+        .expect(200);
+      expect(read.body).toEqual({ throughEventId: legacyEvent.id });
+      const after = await feed(first);
+      expect(after.items.find(event => event.id === original.id)?.readAt).toBe(
+        oldReadAt.toISOString()
+      );
+      expect(after.items[0].readAt).not.toBeNull();
+      expect((await counts(first)).total).toBe(0);
+      const otherRecipient = await ActivityEventRecipient.findOne({
+        where: { eventId: legacyEvent.id, userId: second.id }
+      });
+      expect(otherRecipient?.readAt).toBeNull();
+    });
+
+    it('builds and removes the lookup index idempotently without changing feed or counts', async (): Promise<void> => {
+      const queryInterface = sequelize.getQueryInterface();
+      const beforeFeed = await feed(first);
+      const beforeCounts = await counts(first);
+      await taskLookupMigration.up(queryInterface);
+      await taskLookupMigration.up(queryInterface);
+      await taskLookupMigration.down(queryInterface);
+      await taskLookupMigration.down(queryInterface);
+      expect(await feed(first)).toEqual(beforeFeed);
+      expect(await counts(first)).toEqual(beforeCounts);
+      await taskLookupMigration.up(queryInterface);
+      const [indexes] = await sequelize.query(
+        `SELECT indexdef FROM pg_indexes
+         WHERE schemaname = 'public' AND indexname = 'activity_events_task_lookup_idx'`
+      );
+      expect(indexes).toHaveLength(1);
+      expect(await feed(first)).toEqual(beforeFeed);
+      expect(await counts(first)).toEqual(beforeCounts);
+    });
+
+    it('builds the lookup index with malformed historical task IDs and keeps those orphan recipients unchanged', async (): Promise<void> => {
+      const queryInterface = sequelize.getQueryInterface();
+      await taskLookupMigration.down(queryInterface);
+      const orphanIds: number[] = [];
+      for (const entityId of [
+        'old-task-key',
+        '2147483648',
+        '-2147483649',
+        '9'.repeat(64)
+      ]) {
+        const event = await persist(ActivityEvent.build(), {
+          projectId: project.id,
+          entityType: ActivityEntityType.Task,
+          entityId,
+          actionType: ActivityActionType.Updated,
+          actorUserId: owner.id
+        });
+        orphanIds.push(event.id);
+        await persist(ActivityEventRecipient.build(), {
+          eventId: event.id,
+          userId: first.id
+        });
+      }
+      const beforeFeed = await feed(first);
+      const beforeCounts = await counts(first);
+      await taskLookupMigration.up(queryInterface);
+      await taskLookupMigration.up(queryInterface);
+      expect(await feed(first)).toEqual(beforeFeed);
+      expect(await counts(first)).toEqual(beforeCounts);
+      await http(first)
+        .patch('/activity/task-feed/read')
+        .send({ taskId: task.id })
+        .expect(200);
+      const orphans = await ActivityEventRecipient.findAll({
+        where: { eventId: orphanIds, userId: first.id }
+      });
+      expect(orphans).toHaveLength(orphanIds.length);
+      expect(orphans.every(row => row.readAt === null)).toBe(true);
+    });
+
+    it('recovers an invalid concurrent lookup-index build', async (): Promise<void> => {
+      const queryInterface = sequelize.getQueryInterface();
+      await taskLookupMigration.down(queryInterface);
+      try {
+        // Duplicate task entity types deliberately leave an invalid concurrent index.
+        await expect(
+          sequelize.query(
+            `CREATE UNIQUE INDEX CONCURRENTLY activity_events_task_lookup_idx
+             ON public.activity_events (entity_type)`
+          )
+        ).rejects.toThrow();
+        const [invalid] = await sequelize.query(
+          `SELECT indisvalid FROM pg_index
+           WHERE indexrelid = 'public.activity_events_task_lookup_idx'::regclass`
+        );
+        expect(invalid).toEqual([{ indisvalid: false }]);
+      } finally {
+        await taskLookupMigration.up(queryInterface);
+      }
+      const [valid] = await sequelize.query(
+        `SELECT indisvalid FROM pg_index
+         WHERE indexrelid = 'public.activity_events_task_lookup_idx'::regclass`
+      );
+      expect(valid).toEqual([{ indisvalid: true }]);
+      expect((await feed(first)).items).toHaveLength(1);
     });
 
     it('has idempotent deployment migration and does not backfill old history', async (): Promise<void> => {

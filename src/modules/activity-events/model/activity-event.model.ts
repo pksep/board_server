@@ -14,6 +14,7 @@ import {
   ActivityEntityType
 } from '../activity-events.constants';
 import { ActivityChange } from '../interfaces/activity-event.interface';
+import type { ActivityEventCreationAttributes } from '../interfaces/activity-event-creation.interface';
 
 @Table({
   tableName: 'activity_events',
@@ -29,7 +30,10 @@ import { ActivityChange } from '../interfaces/activity-event.interface';
     }
   ]
 })
-export class ActivityEvent extends Model<ActivityEvent> {
+export class ActivityEvent extends Model<
+  ActivityEvent,
+  ActivityEventCreationAttributes
+> {
   @ApiProperty({ example: 1, description: 'Уникальный идентификатор события' })
   @Column({
     type: DataType.INTEGER,

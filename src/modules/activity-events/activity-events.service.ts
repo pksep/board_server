@@ -34,7 +34,7 @@ export class ActivityEventsService {
         actorUserId: event.actorUserId ?? null,
         changes: event.changes ?? [],
         metadata: event.metadata ?? {}
-      } as any,
+      },
       options
     );
 

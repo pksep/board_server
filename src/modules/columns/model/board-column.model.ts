@@ -10,6 +10,8 @@ import {
 } from 'sequelize-typescript';
 import { ColumnStatus } from '../interfaces/column-status.interface';
 import { ColumnMovePermission } from '../interfaces/column-move-permission.interface';
+import type { Board } from '../../boards/model/board.model';
+import type { Task } from '../../tasks/model/task.model';
 
 // Lazy requires для решения circular dependency (BoardColumn ↔ Board, BoardColumn → Task)
 const lazyBoard = () => require('../../boards/model/board.model').Board;
@@ -72,9 +74,9 @@ export class BoardColumn extends Model<BoardColumn> {
 
   @ApiHideProperty()
   @BelongsTo(lazyBoard)
-  board: any;
+  board: Board;
 
   @ApiHideProperty()
   @HasMany(lazyTask)
-  tasks: any[];
+  tasks: Task[];
 }

@@ -75,54 +75,14 @@ import type {
   TaskColumnLocation
 } from './interfaces/task-access-context.interface';
 
-export interface TaskListPage {
-  items: Task[];
-  total: number;
-  rootTotal?: number;
-  limit: number;
-  offset: number;
-  hasMore: boolean;
-}
-
-interface TaskTimeEntryRecord {
-  createdById: number;
-  actorId: number;
-  actorImage: string | null;
-  actorInitial: string | null;
-  actorLogin: string;
-  comment: string | null;
-  createdAt: Date | string;
-  durationMinutes: number;
-  id: number;
-  taskId: number | null;
-  userId: number;
-}
-
-export interface TaskTimeEntry {
-  createdById: number;
-  actor: {
-    id: number;
-    image: string | null;
-    initial: string | null;
-    login: string;
-  };
-  comment: string | null;
-  createdAt: Date | string;
-  durationMinutes: number;
-  id: number;
-  taskId: number | null;
-  userId: number;
-}
-
-export interface TaskTimeEntryPage {
-  items: TaskTimeEntry[];
-  nextCursor: number | null;
-  totalMinutes: number;
-}
-
-type TaskTimeEntryPageRecord = (TaskTimeEntryRecord | { id: null }) & {
-  totalMinutes: number;
-};
+import type { TaskListPage } from './interfaces/task-list.interface';
+import type { TaskFilterCandidate } from './interfaces/task-filter-candidate.interface';
+import type {
+  TaskTimeEntry,
+  TaskTimeEntryRecord,
+  TaskTimeEntryPage,
+  TaskTimeEntryPageRecord
+} from './interfaces/task-time-entry.interface';
 
 @Injectable()
 export class TasksService {
@@ -1037,22 +997,36 @@ export class TasksService {
     });
     const byId = new Map(tasks.map(task => [task.id, task]));
     // Подписи контроллеров/ответственных берём одним пакетом только для этих задач.
-    const participantIds = executorErpId
+    const taskIdsByParticipantId = new Map<number, number[]>();
+    if (executorErpId) {
+      for (const task of tasks) {
+        const ids = new Set([
+          ...(task.controllerIds ?? [task.createdById]),
+          ...(task.responsibleIds ?? []),
+          ...task.assignees.map(assignment => assignment.userId),
+          ...Object.values(task.customAttributeValues ?? {}).flatMap(value =>
+            Array.isArray(value) ? value.map(Number) : []
+          )
+        ]);
+
+        for (const id of ids) {
+          if (!Number.isSafeInteger(id) || id <= 0) continue;
+
+          const taskIds = taskIdsByParticipantId.get(id);
+          if (taskIds) taskIds.push(task.id);
+          else taskIdsByParticipantId.set(id, [task.id]);
+        }
+      }
+    }
+    const participantIds = [...taskIdsByParticipantId.keys()];
+    const parentIds = executorErpId
       ? [
           ...new Set(
-            tasks.flatMap(task => [
-              ...(task.controllerIds ?? [task.createdById]),
-              ...(task.responsibleIds ?? []),
-              ...task.assignees.map(assignment => assignment.userId),
-              ...Object.values(task.customAttributeValues ?? {}).flatMap(
-                value => (Array.isArray(value) ? value.map(Number) : [])
-              )
-            ])
+            tasks.flatMap(task =>
+              task.parentTaskId ? [task.parentTaskId] : []
+            )
           )
-        ].filter(id => Number.isSafeInteger(id) && id > 0)
-      : [];
-    const parentIds = executorErpId
-      ? tasks.flatMap(task => (task.parentTaskId ? [task.parentTaskId] : []))
+        ]
       : [];
     const [participants, parents] = await Promise.all([
       participantIds.length
@@ -1068,6 +1042,17 @@ export class TasksService {
           })
         : Promise.resolve([])
     ]);
+    const participantsByTaskId = new Map<number, User[]>();
+    // Порядок общего результата User сохраняется и внутри каждой карточки.
+    for (const user of participants) {
+      for (const taskId of taskIdsByParticipantId.get(user.id) ?? []) {
+        const users = participantsByTaskId.get(taskId);
+        if (users) users.push(user);
+        else participantsByTaskId.set(taskId, [user]);
+      }
+    }
+    const parentsById = new Map(parents.map(parent => [parent.id, parent]));
+
     const items = page.flatMap(location => {
       const task = byId.get(location.id);
 
@@ -1098,26 +1083,8 @@ export class TasksService {
                       ? {
                           displayContext: {
                             ...location.displayContext,
-                            users: participants.filter(
-                              user =>
-                                (
-                                  task.controllerIds ?? [task.createdById]
-                                ).includes(user.id) ||
-                                task.responsibleIds?.includes(user.id) ||
-                                task.assignees.some(
-                                  assignment => assignment.userId === user.id
-                                ) ||
-                                Object.values(
-                                  task.customAttributeValues ?? {}
-                                ).some(
-                                  value =>
-                                    Array.isArray(value) &&
-                                    value.some(id => Number(id) === user.id)
-                                )
-                            ),
-                            parentTask: parents.find(
-                              parent => parent.id === task.parentTaskId
-                            )
+                            users: participantsByTaskId.get(task.id) ?? [],
+                            parentTask: parentsById.get(task.parentTaskId)
                           }
                         }
                       : {})
@@ -1434,17 +1401,17 @@ export class TasksService {
   /** Сравнивает дату с включительными границами; пустая дата не совпадает с выбранным периодом. */
   private matchesTaskDateRange(
     date: Date | null | undefined,
-    from?: string,
-    to?: string
+    from?: number,
+    to?: number
   ): boolean {
-    if (!from && !to) return true;
+    if (from === undefined && to === undefined) return true;
     if (!date || Number.isNaN(date.getTime())) return false;
 
     const timestamp = date.getTime();
 
     return (
-      (!from || timestamp >= Date.parse(from)) &&
-      (!to || timestamp <= Date.parse(to))
+      (from === undefined || timestamp >= from) &&
+      (to === undefined || timestamp <= to)
     );
   }
 
@@ -1468,22 +1435,38 @@ export class TasksService {
     return new Set([...current].filter(id => next.has(id)));
   }
 
-  /** Поднимается по цепочке родителей и возвращает ID корневой карточки. */
-  private findRootTaskId(taskId: number, tasksById: Map<number, Task>): number {
+  /** Разрешает общих предков один раз; null в кэше сохраняет поведение циклической цепочки. */
+  private findRootTaskId(
+    taskId: number,
+    tasksById: Map<number, Pick<Task, 'id' | 'parentTaskId'>>,
+    rootsByTaskId: Map<number, number | null>
+  ): number {
     const visitedTaskIds = new Set<number>();
     let currentTaskId = taskId;
+    let rootTaskId: number | null = null;
 
     while (!visitedTaskIds.has(currentTaskId)) {
+      if (rootsByTaskId.has(currentTaskId)) {
+        rootTaskId = rootsByTaskId.get(currentTaskId);
+        break;
+      }
       visitedTaskIds.add(currentTaskId);
       const parentTaskId = Number(
         tasksById.get(currentTaskId)?.parentTaskId || 0
       );
 
-      if (!parentTaskId) return currentTaskId;
+      if (!parentTaskId) {
+        rootTaskId = currentTaskId;
+        break;
+      }
       currentTaskId = parentTaskId;
     }
 
-    return taskId;
+    for (const visitedTaskId of visitedTaskIds) {
+      rootsByTaskId.set(visitedTaskId, rootTaskId);
+    }
+
+    return rootTaskId ?? taskId;
   }
 
   /**
@@ -1494,7 +1477,7 @@ export class TasksService {
     columnId: number,
     query: TaskListQueryDto,
     archivedBoard = false
-  ): Promise<Task[]> {
+  ): Promise<TaskFilterCandidate[]> {
     const filterPrioritiesInDatabase = Boolean(
       (!query.includeSubtasks || query.flatSubtasks) && query.priorities?.length
     );
@@ -1564,25 +1547,31 @@ export class TasksService {
     const candidatesById = new Map(
       candidates.map(task => [Number(task.id), task])
     );
+    const creatorIds = new Set(query.creatorIds);
+    const startDateFrom = query.startDateFrom
+      ? Date.parse(query.startDateFrom)
+      : undefined;
+    const startDateTo = query.startDateTo
+      ? Date.parse(query.startDateTo)
+      : undefined;
+    const dueDateFrom = query.dueDateFrom
+      ? Date.parse(query.dueDateFrom)
+      : undefined;
+    const dueDateTo = query.dueDateTo ? Date.parse(query.dueDateTo) : undefined;
     let matchingTaskIds = new Set(
       candidates
         .filter(
           task =>
-            (!query.creatorIds?.length ||
-              query.creatorIds.includes(Number(task.createdById))) &&
+            (!creatorIds.size || creatorIds.has(Number(task.createdById))) &&
             (!query.includeSubtasks ||
               !query.priorities?.length ||
               query.priorities.includes(task.priority)) &&
             this.matchesTaskDateRange(
               task.startDate,
-              query.startDateFrom,
-              query.startDateTo
+              startDateFrom,
+              startDateTo
             ) &&
-            this.matchesTaskDateRange(
-              task.dueDate,
-              query.dueDateFrom,
-              query.dueDateTo
-            )
+            this.matchesTaskDateRange(task.dueDate, dueDateFrom, dueDateTo)
         )
         .map(task => Number(task.id))
     );
@@ -1620,10 +1609,12 @@ export class TasksService {
     // Подзадача остаётся в своей колонке, даже если родитель не загружен или отфильтрован.
     if (query.flatSubtasks) return [...matchingTaskIds];
 
+    const rootsByTaskId = new Map<number, number | null>();
+
     return [
       ...new Set(
         [...matchingTaskIds].map(taskId =>
-          this.findRootTaskId(taskId, candidatesById)
+          this.findRootTaskId(taskId, candidatesById, rootsByTaskId)
         )
       )
     ];
@@ -2090,7 +2081,7 @@ export class TasksService {
 
       // Вставляем новую верхнеуровневую задачу в начало колонки.
       await this.taskRepository.update(
-        { order: this.sequelize.literal('"order" + 1') as any },
+        { order: this.sequelize.literal('"order" + 1') },
         {
           where: {
             columnId,
@@ -2120,7 +2111,7 @@ export class TasksService {
             userId,
             ...(dto.controllerIds ?? [])
           ])
-        } as any,
+        },
         { transaction }
       );
 
@@ -2130,7 +2121,7 @@ export class TasksService {
           dto.assigneeIds.map(uid => ({
             taskId: task.id,
             userId: uid
-          })) as any[],
+          })),
           { transaction }
         );
       }
@@ -2140,7 +2131,7 @@ export class TasksService {
           dto.tagIds.map(tagId => ({
             taskId: task.id,
             projectTagId: tagId
-          })) as any[],
+          })),
           { transaction }
         );
       }
@@ -2267,7 +2258,7 @@ export class TasksService {
             userId,
             ...(dto.controllerIds ?? [])
           ])
-        } as any,
+        },
         { transaction }
       );
 
@@ -2276,7 +2267,7 @@ export class TasksService {
           dto.assigneeIds.map(uid => ({
             taskId: task.id,
             userId: uid
-          })) as any[],
+          })),
           { transaction }
         );
       }
@@ -2286,7 +2277,7 @@ export class TasksService {
           dto.tagIds.map(tagId => ({
             taskId: task.id,
             projectTagId: tagId
-          })) as any[],
+          })),
           { transaction }
         );
       }
@@ -2730,7 +2721,7 @@ export class TasksService {
         });
         if (dto.assigneeIds.length) {
           await this.assigneeRepository.bulkCreate(
-            dto.assigneeIds.map(uid => ({ taskId: id, userId: uid })) as any[],
+            dto.assigneeIds.map(uid => ({ taskId: id, userId: uid })),
             { transaction }
           );
         }
@@ -2747,7 +2738,7 @@ export class TasksService {
             dto.tagIds.map(tagId => ({
               taskId: id,
               projectTagId: tagId
-            })) as any[],
+            })),
             { transaction }
           );
         }
@@ -3599,7 +3590,7 @@ export class TasksService {
         mimeType: dto.mimeType,
         size: dto.size,
         uploadedById: userId
-      } as any);
+      });
 
       const boardId = await this.getBoardIdByColumnId(task.columnId);
       const updatedTask = await this.getById(taskId, userId);

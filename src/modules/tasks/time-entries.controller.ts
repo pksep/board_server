@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import { TasksService, TaskTimeEntry } from './tasks.service';
+import { TasksService } from './tasks.service';
+import type { TaskTimeEntry } from './interfaces/task-time-entry.interface';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { IUserDataToken } from '../auth/interfaces/interface';
 import { CreateTaskTimeEntryDto } from './dto/create-task-time-entry.dto';

@@ -15,6 +15,21 @@ module.exports = {
   },
   overrides: [
     {
+      files: ['src/**/*.ts'],
+      excludedFiles: ['src/**/*.spec.ts'],
+      rules: {
+        'no-restricted-syntax': [
+          'error',
+          {
+            selector:
+              ':matches(TSAsExpression, TSTypeAssertion) > :matches(TSAsExpression, TSTypeAssertion).expression',
+            message:
+              'Цепочки приведений скрывают несовместимость типов. Исправьте контракт или проверьте неизвестные данные.'
+          }
+        ]
+      }
+    },
+    {
       env: {
         node: true
       },

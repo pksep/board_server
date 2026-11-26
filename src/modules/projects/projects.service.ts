@@ -9,6 +9,7 @@ import { CreateProjectDto } from './dto/create-project.dto';
 import { UpdateProjectDto } from './dto/update-project.dto';
 import { ProjectTag } from '../tags/model/project-tag.model';
 import { ProjectAccessService } from './project-access.service';
+import type { ProjectMemberCreationAttributes } from './interfaces/project-creation-attributes.interface';
 import type { ProjectTaskPermissions } from './interfaces/project-task-permissions.interface';
 import { restrictTaskPermissionMembers } from './utils/project-task-permissions';
 
@@ -157,7 +158,7 @@ export class ProjectsService {
             dto.taskAttributeDefinitions
           ),
           createdById: userId
-        } as any,
+        },
         { transaction }
       );
 
@@ -175,16 +176,14 @@ export class ProjectsService {
         memberIds,
         transaction
       );
-      const members: Array<{
-        projectId: number;
-        userId: number;
-        order: number;
-      }> = memberIds.map(memberId => ({
-        projectId: project.id,
-        userId: memberId,
-        order: nextOrderByMemberId.get(memberId) ?? 0
-      }));
-      await this.memberRepository.bulkCreate(members as any[], { transaction });
+      const members: ProjectMemberCreationAttributes[] = memberIds.map(
+        memberId => ({
+          projectId: project.id,
+          userId: memberId,
+          order: nextOrderByMemberId.get(memberId) ?? 0
+        })
+      );
+      await this.memberRepository.bulkCreate(members, { transaction });
 
       await transaction.commit();
 
@@ -279,17 +278,15 @@ export class ProjectsService {
           newMemberIds,
           transaction
         );
-        const newMembers: Array<{
-          projectId: number;
-          userId: number;
-          order: number;
-        }> = newMemberIds.map(memberId => ({
-          projectId: dto.id,
-          userId: memberId,
-          order: nextOrderByMemberId.get(memberId) ?? 0
-        }));
+        const newMembers: ProjectMemberCreationAttributes[] = newMemberIds.map(
+          memberId => ({
+            projectId: dto.id,
+            userId: memberId,
+            order: nextOrderByMemberId.get(memberId) ?? 0
+          })
+        );
         if (newMembers.length) {
-          await this.memberRepository.bulkCreate(newMembers as any[], {
+          await this.memberRepository.bulkCreate(newMembers, {
             transaction
           });
         }
@@ -515,7 +512,7 @@ export class ProjectsService {
         return { isFavorite: false };
       }
 
-      await this.favoriteRepository.create({ projectId, userId } as any);
+      await this.favoriteRepository.create({ projectId, userId });
       return { isFavorite: true };
     } catch (error) {
       if (error instanceof HttpException) throw error;
@@ -561,7 +558,7 @@ export class ProjectsService {
     return normalized;
   }
 
-  /** Одним запросом рассчитывает следующую позицию проекта для всех участников. */
+  /** Возвращает только максимальные позиции участников, без загрузки всей истории членства. */
   private async getNextMemberOrders(
     userIds: number[],
     transaction: Transaction
@@ -569,8 +566,19 @@ export class ProjectsService {
     if (!userIds.length) return new Map();
 
     const memberships = await this.memberRepository.findAll({
-      attributes: ['userId', 'order'],
+      attributes: [
+        'userId',
+        [
+          Sequelize.fn(
+            'MAX',
+            Sequelize.fn('COALESCE', Sequelize.col('order'), 0)
+          ),
+          'order'
+        ]
+      ],
       where: { userId: { [Op.in]: userIds } },
+      group: ['userId'],
+      raw: true,
       transaction
     });
     const nextOrderByMemberId = new Map(userIds.map(memberId => [memberId, 0]));

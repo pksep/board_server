@@ -23,7 +23,10 @@ import { IUserDataToken } from '../auth/interfaces/interface';
 import { ActivityHistoryQueryDto } from '../activity-events/dto/activity-history-query.dto';
 import { TaskListQueryDto } from './dto/task-list-query.dto';
 import { CreateTaskTimeEntryDto } from './dto/create-task-time-entry.dto';
-import type { TaskTimeEntry, TaskTimeEntryPage } from './tasks.service';
+import type {
+  TaskTimeEntry,
+  TaskTimeEntryPage
+} from './interfaces/task-time-entry.interface';
 import type { Task } from './model/task.model';
 import { TaskGanttQueryDto } from './dto/task-gantt-query.dto';
 import type { TaskGanttSnapshot } from './interfaces/task-gantt.interface';
@@ -37,7 +40,7 @@ import type { TaskTimeReportPage } from './interfaces/task-time-report.interface
 import { TimeReportPermissionGuard } from './time-report-permission.guard';
 import { ExecutorPlanningPermissionGuard } from './executor-planning-permission.guard';
 import { TaskCommentCountersService } from '../task-comment-counters/task-comment-counters.service';
-import type { TaskListPage } from './tasks.service';
+import type { TaskListPage } from './interfaces/task-list.interface';
 import type { CounterRequestSession } from '../task-comment-counters/interfaces/task-comment-counter.interface';
 
 @ApiTags('Задачи')
