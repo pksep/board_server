@@ -76,6 +76,12 @@ class TaskPermissionRulesDto implements TaskPermissionRules {
   controller?: ProjectTaskRoleRuleDto | null;
 
   @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => ProjectTaskRoleRuleDto)
+  otherMember?: ProjectTaskRoleRuleDto | null;
+
+  @IsOptional()
   @IsArray()
   @ArrayUnique()
   @IsInt({ each: true })

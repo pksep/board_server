@@ -378,12 +378,15 @@ export class ProjectsService {
     const scopeColumns = scopes.map(scope => ({
       boardId: scope.boardId,
       ids: [
-        ...[scope.assignee, scope.responsible, scope.controller].flatMap(
-          role => [
-            ...(role?.moveToColumnIds ?? []),
-            ...(role?.moveFromColumnIds ?? [])
-          ]
-        ),
+        ...[
+          scope.assignee,
+          scope.responsible,
+          scope.controller,
+          scope.otherMember
+        ].flatMap(role => [
+          ...(role?.moveToColumnIds ?? []),
+          ...(role?.moveFromColumnIds ?? [])
+        ]),
         ...(scope.createRules ?? []).flatMap(rule => rule.columnIds)
       ]
     }));

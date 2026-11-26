@@ -1745,6 +1745,67 @@ describeWithDatabase(
       ).expect(403);
     });
 
+    it('applies separate rules to project members without any role in the task', async (): Promise<void> => {
+      await persist(ProjectMember.build(), {
+        projectId: project.id,
+        userId: outsider.id
+      });
+      const board = await persist(Board.build(), {
+        title: 'Board for other project members',
+        projectId: project.id
+      });
+      const target = await persist(BoardColumn.build(), {
+        title: 'Allowed target',
+        boardId: board.id
+      });
+      const token = 'date-outsider-token';
+      const taskPath = `/tasks/${task.id}`;
+      const move = (actorToken = token): request.Test =>
+        request(app.getHttpServer())
+          .patch(`${taskPath}/move`)
+          .auth(actorToken, { type: 'bearer' })
+          .send({ columnId: target.id, order: 0 });
+      const otherMember = {
+        moveFromColumnIds: [column.id],
+        moveToColumnIds: null,
+        canEditAttributes: true
+      };
+
+      await move().expect(403);
+      await write('put', taskPath, { priority: 'high' }, token).expect(403);
+
+      await project.update({
+        taskPermissions: { otherMember, boards: [{ boardId: board.id }] }
+      });
+      await write('put', taskPath, { priority: 'high' }, token).expect(200);
+      await write('put', taskPath, { title: 'Restricted' }, token).expect(403);
+      await move().expect(403);
+
+      await project.update({
+        taskPermissions: {
+          otherMember,
+          boards: [
+            {
+              boardId: board.id,
+              otherMember: { moveToColumnIds: [target.id] }
+            }
+          ]
+        }
+      });
+      await move('date-second-executor-token').expect(404);
+      await move().expect(200);
+      expect((await task.reload()).columnId).toBe(target.id);
+      await write('put', taskPath, { priority: 'low' }, token).expect(403);
+
+      await project.update({ taskPermissions: { otherMember } });
+      await write('put', taskPath, { priority: 'low' }, token).expect(200);
+      await persist(TaskAssignee.build(), {
+        taskId: task.id,
+        userId: outsider.id
+      });
+      await write('put', taskPath, { priority: 'high' }, token).expect(403);
+    });
+
     it('enforces an explicit controller attribute denial without removing title and assignment rights', async (): Promise<void> => {
       await project.update({
         taskPermissions: {

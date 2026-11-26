@@ -199,6 +199,7 @@ describeWithDatabase(
           canEditAttributes: true
         },
         controller: { canEditAttributes: false },
+        otherMember: { moveFromColumnIds: [column.id], moveToColumnIds: null },
         createRules: [{ userIds: [member.id], columnIds: [column.id] }]
       };
       await expect(
@@ -217,7 +218,7 @@ describeWithDatabase(
           {
             id: enabledProjectId,
             taskPermissions: {
-              controller: { moveToColumnIds: [foreignColumn.id] }
+              otherMember: { moveToColumnIds: [foreignColumn.id] }
             }
           },
           owner.id
@@ -349,9 +350,11 @@ describeWithDatabase(
         { controller: { canEditAttributes: 'yes' } },
         { responsible: { moveFromColumnIds: [1, 1] } },
         { assignee: { moveToColumnIds: ['2'] } },
+        { otherMember: { moveToColumnIds: ['2'] } },
         { createRules: [{ userIds: [1], columnIds: [0] }] },
         { boards: [{ boardId: 0 }] },
         { boards: [{ boardId: 1, controller: { canEditAttributes: 'yes' } }] },
+        { boards: [{ boardId: 1, otherMember: { canEditAttributes: 'yes' } }] },
         { createUserIds: [1, 1] },
         { boards: [{ boardId: 1, createUserIds: ['1'] }] }
       ];

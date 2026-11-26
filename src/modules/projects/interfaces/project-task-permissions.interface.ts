@@ -1,4 +1,5 @@
 export interface ProjectTaskRoleRule {
+  /** null разрешает все колонки. Для участника без роли отсутствие поля запрещает перенос. */
   moveToColumnIds?: number[] | null;
   moveFromColumnIds?: number[] | null;
   canEditAttributes?: boolean | null;
@@ -13,6 +14,7 @@ export interface TaskPermissionRules {
   assignee?: ProjectTaskRoleRule | null;
   responsible?: ProjectTaskRoleRule | null;
   controller?: ProjectTaskRoleRule | null;
+  otherMember?: ProjectTaskRoleRule | null;
   createUserIds?: number[] | null;
   createRules?: ProjectTaskCreationRule[] | null;
 }
