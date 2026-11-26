@@ -11,13 +11,26 @@ import {
   ArrayUnique,
   IsInt,
   Min,
-  IsBoolean
+  IsBoolean,
+  IsObject
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ValidateNested } from 'class-validator';
 import { ProjectTaskAttributeDto } from './project-task-attribute.dto';
+import { ProjectTaskPermissionsDto } from './project-task-permissions.dto';
 
 export class CreateProjectDto {
+  @ApiProperty({
+    type: ProjectTaskPermissionsDto,
+    required: false,
+    nullable: true
+  })
+  @IsOptional()
+  @IsObject()
+  @ValidateNested()
+  @Type(() => ProjectTaskPermissionsDto)
+  taskPermissions?: ProjectTaskPermissionsDto | null;
+
   @ApiProperty({
     default: false,
     description: 'Сохраняемая настройка отображения проекта на производстве'

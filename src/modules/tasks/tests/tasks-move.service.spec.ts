@@ -8,6 +8,7 @@ function createSubtaskMoveFixture(targetBoardId = 20) {
   };
   const subtask = {
     id: 2,
+    createdById: 7,
     taskNumber: 6,
     columnId: 10,
     parentTaskId: 1,
@@ -32,7 +33,8 @@ function createSubtaskMoveFixture(targetBoardId = 20) {
     emitTaskMoved: jest.fn()
   };
   const projectAccess = {
-    assertCanRead: jest.fn(),
+    loadReadAccess: jest.fn(),
+    assertCanRead: jest.fn().mockResolvedValue({ taskPermissions: null }),
     assertAssigneesBelongToProject: jest.fn()
   };
   const activityEvents = {
@@ -52,7 +54,7 @@ function createSubtaskMoveFixture(targetBoardId = 20) {
   };
   const service = new TasksService(
     taskRepository as any,
-    { findAll: jest.fn() } as any,
+    { findAll: jest.fn().mockResolvedValue([]) } as any,
     { destroy: jest.fn() } as any,
     {} as any,
     { findByPk: jest.fn() } as any,
@@ -148,7 +150,8 @@ describe('TasksService.move', () => {
       emitTaskMoved: jest.fn()
     };
     const projectAccess = {
-      assertCanRead: jest.fn(),
+      loadReadAccess: jest.fn(),
+      assertCanRead: jest.fn().mockResolvedValue({ taskPermissions: null }),
       getActiveMemberIds: jest.fn().mockResolvedValue([7]),
       assertAssigneesBelongToProject: jest.fn()
     };
@@ -229,6 +232,7 @@ describe('TasksService.move', () => {
     };
     const root = {
       id: 1,
+      createdById: 7,
       taskNumber: 5,
       columnId: 10,
       parentTaskId: null,
@@ -278,7 +282,7 @@ describe('TasksService.move', () => {
     };
     const service = new TasksService(
       taskRepository as any,
-      { findAll: jest.fn() } as any,
+      { findAll: jest.fn().mockResolvedValue([]) } as any,
       { destroy: jest.fn() } as any,
       {} as any,
       {} as any,
@@ -291,7 +295,8 @@ describe('TasksService.move', () => {
       wsGateway as any,
       {} as any,
       {
-        assertCanRead: jest.fn(),
+        loadReadAccess: jest.fn(),
+        assertCanRead: jest.fn().mockResolvedValue({ taskPermissions: null }),
         assertAssigneesBelongToProject: jest.fn()
       } as any,
       activityEvents as any

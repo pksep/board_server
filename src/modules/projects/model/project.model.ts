@@ -10,6 +10,7 @@ import {
 } from 'sequelize-typescript';
 import { User } from 'src/modules/users/model/users.model';
 import { ITaskAttributeDefinition } from '../interfaces/task-attribute.interface';
+import type { ProjectTaskPermissions } from '../interfaces/project-task-permissions.interface';
 
 // Lazy requires для решения circular dependency (SWC live bindings)
 // Project ↔ ProjectMember, Project ↔ Board, Project ↔ ProjectTag, Project ↔ UserFavorite
@@ -21,6 +22,18 @@ const lazyUserFavorite = () => require('./user-favorite.model').UserFavorite;
 
 @Table({ tableName: 'projects', paranoid: true })
 export class Project extends Model<Project> {
+  @ApiProperty({
+    nullable: true,
+    description: 'Дополнительные права на действия с задачами проекта'
+  })
+  @Column({
+    type: DataType.JSONB,
+    allowNull: true,
+    defaultValue: null,
+    field: 'task_permissions'
+  })
+  taskPermissions: ProjectTaskPermissions | null;
+
   @ApiProperty({ default: false })
   @Column({
     type: DataType.BOOLEAN,

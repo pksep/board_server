@@ -65,7 +65,13 @@ export class BoardsService {
         : 0;
       const boards = await this.boardRepository.findAll({
         ...archiveOptions,
-        include: [{ association: 'columns', attributes: ['id'] }],
+        include: [
+          {
+            association: 'columns',
+            attributes:
+              query.includeColumnTitles === 'true' ? ['id', 'title'] : ['id']
+          }
+        ],
         order: [
           ['order', 'ASC'],
           ['createdAt', 'ASC']
