@@ -33,7 +33,7 @@ describe('TasksService.createSubtask activity', () => {
     const columnRepository = {
       findByPk: jest.fn(async (_id: number, options: any) =>
         options?.include
-          ? { id: 5, board: { projectId: 30 } }
+          ? { id: 5, boardId: 20, board: { projectId: 30 } }
           : { id: 5, boardId: 20 }
       )
     };

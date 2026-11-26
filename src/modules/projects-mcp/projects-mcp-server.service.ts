@@ -28,6 +28,11 @@ import { UpdateTagDto } from '../tags/dto/update-tag.dto';
 import { CreateTaskDto } from '../tasks/dto/create-task.dto';
 import { MoveTaskDto } from '../tasks/dto/move-task.dto';
 import { UpdateTaskDto } from '../tasks/dto/update-task.dto';
+import { PersonalTaskQueryDto } from '../tasks/dto/personal-task-query.dto';
+import { CreateTaskTimeEntryDto } from '../tasks/dto/create-task-time-entry.dto';
+import { TaskTimeReportQueryDto } from '../tasks/dto/task-time-report-query.dto';
+import { TimeReportPermissionGuard } from '../tasks/time-report-permission.guard';
+import { TaskAttributeType } from '../projects/interfaces/task-attribute.interface';
 import { TasksService } from '../tasks/tasks.service';
 import { UsersService } from '../users/users.service';
 import { validateDto } from '../../utils/validation/validate-dto';
@@ -47,7 +52,8 @@ export class ProjectsMcpServerService {
     private tagsService: TagsService,
     private usersService: UsersService,
     private operations: ProjectsMcpOperationsService,
-    private taskComments: ProjectsMcpTaskCommentsService
+    private taskComments: ProjectsMcpTaskCommentsService,
+    private timeReportPermission: TimeReportPermissionGuard
   ) {}
 
   createServer(auth: ProjectsMcpAuthContext): McpServer {
@@ -61,8 +67,295 @@ export class ProjectsMcpServerService {
     this.registerWriteTools(server, auth);
     this.registerBoardAndTaskReadTools(server, auth);
     this.registerBoardAndTaskWriteTools(server, auth);
+    this.registerTaskDetailTools(server, auth);
 
     return server;
+  }
+
+  private registerTaskDetailTools(
+    server: McpServer,
+    auth: ProjectsMcpAuthContext
+  ): void {
+    const taskId = z.number().int().positive();
+    const title = z.string().trim().min(1).max(255);
+    const idempotencyKey = z.string().trim().min(8).max(128);
+
+    server.registerTool(
+      'tasks_personal_list',
+      {
+        description:
+          'Задачи текущего пользователя: assigned означает назначенные ему, created означает созданные им. Продолжайте по offset при hasMore.',
+        inputSchema: {
+          scope: z.enum(['created', 'assigned']),
+          limit: z.number().int().min(1).max(100).default(20),
+          offset: z.number().int().nonnegative().default(0)
+        },
+        annotations: this.readOnlyAnnotations('Мои задачи')
+      },
+      async input => {
+        this.assertScope(auth, ProjectsMcpScope.Read);
+
+        return this.toolResult(
+          await this.tasksService.getPersonalTasks(
+            auth.user.id,
+            await validateDto(PersonalTaskQueryDto, input)
+          )
+        );
+      }
+    );
+
+    server.registerTool(
+      'task_attributes_get',
+      {
+        description:
+          'Прочитать определения атрибутов проекта и текущие значения задачи. hasValue=false означает незаполненное поле; отсутствующее определение означает, что такого поля в проекте нет.',
+        inputSchema: { taskId },
+        annotations: this.readOnlyAnnotations('Атрибуты задачи')
+      },
+      async input => {
+        this.assertScope(auth, ProjectsMcpScope.Read);
+        const task = await this.tasksService.getById(
+          input.taskId,
+          auth.user.id
+        );
+        const projectId = await this.getProjectIdForColumn(
+          task.columnId,
+          auth.user.id
+        );
+        const project = await this.projectsService.getById(
+          projectId,
+          auth.user.id
+        );
+
+        return this.toolResult({
+          taskId: task.id,
+          taskTitle: task.title,
+          projectId,
+          projectTitle: project.title,
+          attributes: (project.taskAttributeDefinitions ?? []).map(
+            definition => {
+              const value = task.customAttributeValues?.[definition.id] ?? null;
+
+              return {
+                ...definition,
+                value,
+                hasValue:
+                  value !== null &&
+                  value !== '' &&
+                  (!Array.isArray(value) || value.length > 0)
+              };
+            }
+          )
+        });
+      }
+    );
+
+    server.registerTool(
+      'task_attributes_update',
+      {
+        description:
+          'Изменить значения существующих атрибутов задачи после чтения task_attributes_get. Остальные значения сохраняются. null очищает поле. Не создаёт новые определения полей проекта.',
+        inputSchema: {
+          taskId,
+          taskTitle: title,
+          attributes: z
+            .array(
+              z.object({
+                id: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+                name: z.string().trim().min(1).max(100),
+                type: z.enum(TaskAttributeType),
+                value: z.union([
+                  z.boolean(),
+                  z.number().finite(),
+                  z.string().max(5000),
+                  z.array(z.number().int().positive()).max(500),
+                  z.null()
+                ]),
+                participantNames: z.array(title).max(500).optional()
+              })
+            )
+            .min(1)
+            .max(100)
+            .refine(
+              attributes =>
+                new Set(attributes.map(attribute => attribute.id)).size ===
+                attributes.length,
+              'Атрибуты не должны повторяться'
+            ),
+          idempotencyKey
+        },
+        annotations: this.writeAnnotations('Изменить атрибуты задачи')
+      },
+      async input => {
+        this.assertScope(auth, ProjectsMcpScope.Update);
+
+        return this.toolResult(
+          await this.operations.run(
+            auth,
+            'task_attributes_update',
+            input.idempotencyKey,
+            input,
+            async () => {
+              const task = await this.tasksService.getById(
+                input.taskId,
+                auth.user.id
+              );
+              this.assertEntityTitle(task.title, input.taskTitle, 'задачи');
+              const projectId = await this.getProjectIdForColumn(
+                task.columnId,
+                auth.user.id
+              );
+              const project = await this.projectsService.getById(
+                projectId,
+                auth.user.id
+              );
+
+              for (const attribute of input.attributes) {
+                const definition = project.taskAttributeDefinitions?.find(
+                  item => item.id === attribute.id
+                );
+                if (!definition || definition.type !== attribute.type) {
+                  throw new BadRequestException(
+                    'Атрибут отсутствует или его тип изменился. Повторно прочитайте атрибуты задачи.'
+                  );
+                }
+
+                this.assertEntityTitle(
+                  definition.name,
+                  attribute.name,
+                  'атрибута'
+                );
+                if (
+                  definition.type === TaskAttributeType.Participants &&
+                  Array.isArray(attribute.value)
+                ) {
+                  await this.assertNamedUsers(
+                    attribute.value,
+                    attribute.participantNames
+                  );
+                }
+              }
+
+              const dto = await validateDto(UpdateTaskDto, {
+                customAttributeChanges: Object.fromEntries(
+                  input.attributes.map(attribute => [
+                    attribute.id,
+                    attribute.value
+                  ])
+                )
+              });
+              const updated = await this.tasksService.update(
+                input.taskId,
+                dto,
+                auth.user.id
+              );
+
+              return { value: this.toPlain(updated), projectId };
+            }
+          )
+        );
+      }
+    );
+
+    server.registerTool(
+      'task_time_report_get',
+      {
+        description:
+          'Учёт фактически записанного времени задач за дату или период, как на странице /time-tracking. Начало включительно, конец не включается; передавайте ISO даты с часовым поясом. Период до 32 суток, длинный период разбивайте на части до 31 дня. Возвращает автора записи, табель, ERP ID, задачу, проект, минуты и комментарий. Это все доступные записи, не только мои: для личного отчёта сравните userId с currentUserId. Продолжайте beforeId=nextCursor до null, не выдавайте частичную сумму за полный итог. Производственные результаты работ ERP в этот источник не входят.',
+        inputSchema: {
+          start: z.iso.datetime({ offset: true }),
+          end: z.iso.datetime({ offset: true }),
+          beforeId: z.number().int().positive().optional(),
+          limit: z.number().int().min(1).max(500).default(500)
+        },
+        annotations: this.readOnlyAnnotations('Учёт времени задач за период')
+      },
+      async input => {
+        this.assertScope(auth, ProjectsMcpScope.Read);
+        await this.timeReportPermission.assertMcpAccess(auth.accessToken);
+        const page = await this.tasksService.getTimeReport(
+          auth.user.id,
+          await validateDto(TaskTimeReportQueryDto, input)
+        );
+
+        return this.toolResult({ ...page, currentUserId: auth.user.id });
+      }
+    );
+
+    server.registerTool(
+      'task_time_entries_list',
+      {
+        description:
+          'Фактически затраченное время по задаче с комментариями, автором и датой каждой записи. Продолжайте по nextCursor при его наличии.',
+        inputSchema: {
+          taskId,
+          limit: z.number().int().min(1).max(100).default(50),
+          beforeId: z.number().int().positive().optional()
+        },
+        annotations: this.readOnlyAnnotations('Время выполнения задачи')
+      },
+      async ({ taskId, limit, beforeId }) => {
+        this.assertScope(auth, ProjectsMcpScope.Read);
+
+        return this.toolResult(
+          await this.tasksService.getTimeEntries(
+            taskId,
+            auth.user.id,
+            await validateDto(ActivityHistoryQueryDto, { limit, beforeId })
+          )
+        );
+      }
+    );
+
+    server.registerTool(
+      'task_time_entries_create',
+      {
+        description:
+          'Записать фактически затраченное время и комментарий о выполненной работе от имени текущего пользователя. Не является плановой оценкой или сроком задачи.',
+        inputSchema: {
+          taskId,
+          taskTitle: title,
+          durationMinutes: z.number().int().min(1).max(525600),
+          comment: z.string().max(2000).optional(),
+          idempotencyKey
+        },
+        annotations: this.writeAnnotations('Записать время выполнения')
+      },
+      async input => {
+        this.assertScope(auth, ProjectsMcpScope.Update);
+
+        return this.toolResult(
+          await this.operations.run(
+            auth,
+            'task_time_entries_create',
+            input.idempotencyKey,
+            input,
+            async () => {
+              const task = await this.tasksService.getById(
+                input.taskId,
+                auth.user.id
+              );
+              this.assertEntityTitle(task.title, input.taskTitle, 'задачи');
+              const projectId = await this.getProjectIdForColumn(
+                task.columnId,
+                auth.user.id
+              );
+              const dto = await validateDto(CreateTaskTimeEntryDto, {
+                durationMinutes: input.durationMinutes,
+                comment: input.comment
+              });
+              const entry = await this.tasksService.createTimeEntry(
+                input.taskId,
+                dto,
+                auth.user.id
+              );
+
+              return { value: entry, projectId };
+            }
+          )
+        );
+      }
+    );
   }
 
   private registerResources(

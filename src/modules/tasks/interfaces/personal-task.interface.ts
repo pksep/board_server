@@ -2,6 +2,7 @@ import type { Task } from '../model/task.model';
 import type { ColumnStatus } from '../../columns/interfaces/column-status.interface';
 import type { ITaskAttributeDefinition } from '../../projects/interfaces/task-attribute.interface';
 import type { User } from '../../users/model/users.model';
+import type { ProjectTaskPermissions } from '../../projects/interfaces/project-task-permissions.interface';
 
 /** Только подписи полей выбранной задачи; не каталог чужого проекта. */
 export interface ExecutorTaskDisplayContext {
@@ -23,6 +24,7 @@ export interface PersonalTaskLocation {
   projectPrefix: string;
   columnStatus: ColumnStatus | null;
   attributesOwnerOnly?: boolean;
+  taskPermissions?: ProjectTaskPermissions | null;
   canReadTask?: boolean;
   displayContext?: Omit<ExecutorTaskDisplayContext, 'users' | 'parentTask'>;
 }
@@ -40,6 +42,7 @@ export interface PersonalTaskItem {
   columnStatus: ColumnStatus | null;
   subtaskCounter: PersonalTaskSubtaskCounter;
   attributesOwnerOnly?: boolean;
+  taskPermissions?: ProjectTaskPermissions | null;
   canReadTask?: boolean;
   displayContext?: ExecutorTaskDisplayContext;
 }

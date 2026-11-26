@@ -5,6 +5,8 @@ import { Sequelize } from 'sequelize-typescript';
 import models from '../../../configs/models';
 import { User } from '../../users/model/users.model';
 import { ProjectTag } from '../../tags/model/project-tag.model';
+import { Board } from '../../boards/model/board.model';
+import { BoardColumn } from '../../columns/model/board-column.model';
 import { CreateProjectDto } from '../dto/create-project.dto';
 import { UpdateProjectDto } from '../dto/update-project.dto';
 import { Project } from '../model/project.model';
@@ -171,6 +173,202 @@ describeWithDatabase(
       expect(
         (await service.getById(enabledProjectId, owner.id)).showInProduction
       ).toBe(true);
+    });
+
+    it('persists task permissions and rejects references outside the project', async (): Promise<void> => {
+      const board = await persist(Board.build(), {
+        projectId: enabledProjectId,
+        title: 'Rules'
+      });
+      const column = await persist(BoardColumn.build(), {
+        boardId: board.id,
+        title: 'Allowed'
+      });
+      const foreign = await persist(Board.build(), {
+        projectId: legacyProject.id,
+        title: 'Other'
+      });
+      const foreignColumn = await persist(BoardColumn.build(), {
+        boardId: foreign.id,
+        title: 'Other'
+      });
+      const taskPermissions = {
+        assignee: {
+          moveToColumnIds: [column.id],
+          moveFromColumnIds: [],
+          canEditAttributes: true
+        },
+        controller: { canEditAttributes: false },
+        otherMember: { moveFromColumnIds: [column.id], moveToColumnIds: null },
+        createRules: [{ userIds: [member.id], columnIds: [column.id] }]
+      };
+      await expect(
+        service.update({ id: enabledProjectId, taskPermissions }, member.id)
+      ).rejects.toMatchObject({ status: 403 });
+      expect(
+        (
+          await service.update(
+            { id: enabledProjectId, taskPermissions },
+            owner.id
+          )
+        ).taskPermissions
+      ).toEqual(taskPermissions);
+      await expect(
+        service.update(
+          {
+            id: enabledProjectId,
+            taskPermissions: {
+              otherMember: { moveToColumnIds: [foreignColumn.id] }
+            }
+          },
+          owner.id
+        )
+      ).rejects.toMatchObject({ status: 400 });
+      await expect(
+        service.update(
+          {
+            id: enabledProjectId,
+            taskPermissions: {
+              createRules: [{ userIds: [outsider.id], columnIds: [column.id] }]
+            }
+          },
+          owner.id
+        )
+      ).rejects.toMatchObject({ status: 400 });
+      expect(
+        (await service.getById(enabledProjectId, owner.id)).taskPermissions
+      ).toEqual(taskPermissions);
+      expect(
+        (
+          await service.update(
+            { id: enabledProjectId, taskPermissions: null },
+            owner.id
+          )
+        ).taskPermissions
+      ).toBeNull();
+    });
+
+    it('persists separate board rules and rejects other boards, columns and duplicate scopes', async (): Promise<void> => {
+      const board = await persist(Board.build(), {
+        projectId: enabledProjectId,
+        title: 'Policy board'
+      });
+      const other = await persist(Board.build(), {
+        projectId: enabledProjectId,
+        title: 'Another board'
+      });
+      const foreign = await persist(Board.build(), {
+        projectId: legacyProject.id,
+        title: 'Foreign board'
+      });
+      const col = await persist(BoardColumn.build(), {
+        boardId: board.id,
+        title: 'Own column'
+      });
+      const otherCol = await persist(BoardColumn.build(), {
+        boardId: other.id,
+        title: 'Another column'
+      });
+      const taskPermissions = {
+        controller: { canEditAttributes: false },
+        boards: [
+          {
+            boardId: board.id,
+            responsible: { moveToColumnIds: [col.id] },
+            createRules: [{ userIds: [owner.id], columnIds: [col.id] }]
+          },
+          { boardId: other.id }
+        ]
+      };
+      await service.update({ id: enabledProjectId, taskPermissions }, owner.id);
+      expect(
+        (await service.getById(enabledProjectId, owner.id)).taskPermissions
+      ).toEqual(taskPermissions);
+
+      for (const boards of [
+        [{ boardId: foreign.id }],
+        [{ boardId: board.id }, { boardId: board.id }],
+        [
+          {
+            boardId: board.id,
+            controller: { moveFromColumnIds: [otherCol.id] }
+          }
+        ],
+        [
+          {
+            boardId: board.id,
+            createRules: [{ userIds: [owner.id], columnIds: [otherCol.id] }]
+          }
+        ]
+      ]) {
+        await expect(
+          service.update(
+            { id: enabledProjectId, taskPermissions: { boards } },
+            owner.id
+          )
+        ).rejects.toMatchObject({ status: 400 });
+      }
+      expect(
+        (await service.getById(enabledProjectId, owner.id)).taskPermissions
+      ).toEqual(taskPermissions);
+    });
+
+    it('validates the creator list and removes members from the project and board lists', async (): Promise<void> => {
+      const board = await persist(Board.build(), {
+        projectId: enabledProjectId,
+        title: 'Creator list'
+      });
+      const taskPermissions = {
+        createUserIds: [owner.id, member.id],
+        boards: [{ boardId: board.id, createUserIds: [member.id] }]
+      };
+      await service.update({ id: enabledProjectId, taskPermissions }, owner.id);
+      await expect(
+        service.update(
+          {
+            id: enabledProjectId,
+            taskPermissions: {
+              boards: [{ boardId: board.id, createUserIds: [outsider.id] }]
+            }
+          },
+          owner.id
+        )
+      ).rejects.toMatchObject({ status: 400 });
+
+      const updated = await service.update(
+        { id: enabledProjectId, membersIds: [] },
+        owner.id
+      );
+      expect(updated.taskPermissions).toEqual({
+        createUserIds: [owner.id],
+        boards: [{ boardId: board.id, createUserIds: [] }]
+      });
+    });
+
+    it('validates nested task permission types, including lists of IDs', async (): Promise<void> => {
+      const invalid = [
+        { controller: { canEditAttributes: 'yes' } },
+        { responsible: { moveFromColumnIds: [1, 1] } },
+        { assignee: { moveToColumnIds: ['2'] } },
+        { otherMember: { moveToColumnIds: ['2'] } },
+        { createRules: [{ userIds: [1], columnIds: [0] }] },
+        { boards: [{ boardId: 0 }] },
+        { boards: [{ boardId: 1, controller: { canEditAttributes: 'yes' } }] },
+        { boards: [{ boardId: 1, otherMember: { canEditAttributes: 'yes' } }] },
+        { createUserIds: [1, 1] },
+        { boards: [{ boardId: 1, createUserIds: ['1'] }] }
+      ];
+      for (const taskPermissions of invalid) {
+        const errors = await validate(
+          plainToInstance(UpdateProjectDto, {
+            id: enabledProjectId,
+            taskPermissions
+          })
+        );
+        expect(errors.some(error => error.property === 'taskPermissions')).toBe(
+          true
+        );
+      }
     });
 
     it('accepts booleans and rejects strings or objects in request contracts', async (): Promise<void> => {

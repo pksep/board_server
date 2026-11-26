@@ -75,7 +75,10 @@ const createContext = (options: TestContextOptions = {}) => {
   const wsGateway = { emitTaskUpdated: jest.fn() };
   const service = new TasksService(
     taskRepository as any,
-    { findAll: jest.fn() } as any,
+    {
+      findAll: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue(null)
+    } as any,
     { findAll: jest.fn() } as any,
     {} as any,
     {} as any,
@@ -84,7 +87,10 @@ const createContext = (options: TestContextOptions = {}) => {
     { transaction: jest.fn().mockResolvedValue(transaction) } as any,
     wsGateway as any,
     {} as any,
-    { assertCanRead: jest.fn() } as any,
+    {
+      loadReadAccess: jest.fn(),
+      assertCanRead: jest.fn().mockResolvedValue({ taskPermissions: null })
+    } as any,
     activityEvents as any
   );
 

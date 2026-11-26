@@ -421,14 +421,18 @@ describeWithDatabase('Column status API with isolated PostgreSQL', () => {
         .patch(`/tasks/${task.id}/move`)
         .set('x-test-user', String(outsider.id))
         .send({ columnId: target.id, order: 0 })
-        .expect(200);
-      expect((await task.reload()).columnId).toBe(target.id);
+        .expect(isExecutor ? 200 : 403);
+      expect((await task.reload()).columnId).toBe(
+        isExecutor ? target.id : column.id
+      );
     }
   );
 
-  it('allows only the task creator to leave a restricted column, not its assignee or project owner', async (): Promise<void> => {
+  it('checks the outgoing project rule even for an executor who owns the project', async (): Promise<void> => {
     await addParticipant();
-    await column.update({ movePermission: ColumnMovePermission.CreatorsOnly });
+    await project.update({
+      taskPermissions: { assignee: { moveFromColumnIds: [] } }
+    });
     const task = await taskIn(column.id, outsider.id);
     await persist(TaskAssignee.build(), { taskId: task.id, userId: owner.id });
     const target = await targetColumn();
@@ -449,10 +453,22 @@ describeWithDatabase('Column status API with isolated PostgreSQL', () => {
     expect((await task.reload()).columnId).toBe(target.id);
   });
 
-  it('does not restrict entering a protected column or ordering inside it', async (): Promise<void> => {
+  it('checks incoming rights separately and keeps ordering inside a column', async (): Promise<void> => {
     await addParticipant();
     const task = await taskIn(column.id);
     const target = await targetColumn(ColumnMovePermission.CreatorsOnly);
+    await persist(TaskAssignee.build(), {
+      taskId: task.id,
+      userId: outsider.id
+    });
+    await project.update({
+      taskPermissions: {
+        assignee: {
+          moveFromColumnIds: [column.id],
+          moveToColumnIds: [target.id]
+        }
+      }
+    });
     await request(app.getHttpServer())
       .patch(`/tasks/${task.id}/move`)
       .set('x-test-user', String(outsider.id))

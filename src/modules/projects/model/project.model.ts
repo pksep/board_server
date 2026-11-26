@@ -15,6 +15,7 @@ import type { ProjectMember } from './project-member.model';
 import type { UserFavorite } from './user-favorite.model';
 import type { Board } from '../../boards/model/board.model';
 import type { ProjectTag } from '../../tags/model/project-tag.model';
+import type { ProjectTaskPermissions } from '../interfaces/project-task-permissions.interface';
 
 // Lazy requires для решения circular dependency (SWC live bindings)
 // Project ↔ ProjectMember, Project ↔ Board, Project ↔ ProjectTag, Project ↔ UserFavorite
@@ -26,6 +27,18 @@ const lazyUserFavorite = () => require('./user-favorite.model').UserFavorite;
 
 @Table({ tableName: 'projects', paranoid: true })
 export class Project extends Model<Project, ProjectCreationAttributes> {
+  @ApiProperty({
+    nullable: true,
+    description: 'Дополнительные права на действия с задачами проекта'
+  })
+  @Column({
+    type: DataType.JSONB,
+    allowNull: true,
+    defaultValue: null,
+    field: 'task_permissions'
+  })
+  taskPermissions: ProjectTaskPermissions | null;
+
   @ApiProperty({ default: false })
   @Column({
     type: DataType.BOOLEAN,

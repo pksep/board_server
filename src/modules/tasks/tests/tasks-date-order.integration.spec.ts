@@ -216,6 +216,84 @@ describeWithDatabase(
       await persist(TaskAssignee.build(), { taskId: task.id, userId: user.id });
     }
 
+    it('patches attributes atomically, preserves unrelated values and validates permissions', async (): Promise<void> => {
+      await project.update({
+        taskAttributeDefinitions: [
+          { id: 'text', name: 'Описание', type: TaskAttributeType.Text },
+          { id: 'flag', name: 'Проверено', type: TaskAttributeType.Boolean },
+          { id: 'count', name: 'Количество', type: TaskAttributeType.Number }
+        ]
+      });
+      await task.update({
+        customAttributeValues: { text: 'Сохранить', flag: true, count: 5 }
+      });
+      await Promise.all([
+        write('put', `/tasks/${task.id}`, {
+          customAttributeChanges: { flag: false }
+        }).expect(200),
+        write('put', `/tasks/${task.id}`, {
+          customAttributeChanges: { count: 0 }
+        }).expect(200)
+      ]);
+      expect((await task.reload()).customAttributeValues).toEqual({
+        text: 'Сохранить',
+        flag: false,
+        count: 0
+      });
+      await write('put', `/tasks/${task.id}`, {
+        customAttributeChanges: { text: null }
+      }).expect(200);
+      expect((await task.reload()).customAttributeValues).toEqual({
+        text: null,
+        flag: false,
+        count: 0
+      });
+      await write('put', `/tasks/${task.id}`, {
+        customAttributeChanges: { missing: 'x' }
+      }).expect(400);
+      await write('put', `/tasks/${task.id}`, {
+        customAttributeChanges: { count: 'x' }
+      }).expect(400);
+      await write('put', `/tasks/${task.id}`, {
+        customAttributeChanges: { flag: true },
+        customAttributeValues: {}
+      }).expect(400);
+      await assignExecutor(secondExecutor);
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { customAttributeChanges: { flag: true } },
+        'date-second-executor-token'
+      ).expect(403);
+      await project.update({ attributesOwnerOnly: false });
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { customAttributeChanges: { flag: true } },
+        'date-second-executor-token'
+      ).expect(403);
+      await project.update({
+        taskPermissions: { assignee: { canEditAttributes: true } }
+      });
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { customAttributeChanges: { flag: true } },
+        'date-second-executor-token'
+      ).expect(200);
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { customAttributeChanges: { flag: false }, title: 'Нет прав' },
+        'date-second-executor-token'
+      ).expect(403);
+      expect((await task.reload()).customAttributeValues).toEqual({
+        text: null,
+        flag: true,
+        count: 0
+      });
+    });
+
     it('restores an empty controller list to the project owner while preserving the task author', async (): Promise<void> => {
       const recovered = await persist(Task.build(), {
         title: 'Recovered controllers',
@@ -283,7 +361,6 @@ describeWithDatabase(
 
     it('keeps custom attribute values restricted by default', async (): Promise<void> => {
       await assignExecutor(outsider);
-      expect(project.attributesOwnerOnly).toBe(true);
       await write(
         'put',
         `/tasks/${task.id}`,
@@ -292,12 +369,12 @@ describeWithDatabase(
       ).expect(403);
     });
 
-    it('opens attribute values to members without granting task management when the project setting is disabled', async (): Promise<void> => {
-      await persist(ProjectMember.build(), {
-        projectId: project.id,
-        userId: outsider.id
-      });
-      project.attributesOwnerOnly = false;
+    it('opens attribute values to a configured executor without granting task management', async (): Promise<void> => {
+      await assignExecutor(outsider);
+      project.taskPermissions = {
+        assignee: { canEditAttributes: true },
+        responsible: { canEditAttributes: true }
+      };
       project.taskAttributeDefinitions = [
         { id: 'reviewed', name: 'Проверено', type: TaskAttributeType.Boolean }
       ];
@@ -342,7 +419,7 @@ describeWithDatabase(
       ).expect(403);
       expect((await task.reload()).title).toBe('Existing task');
       expect(task.controllerIds).toEqual([owner.id]);
-      project.attributesOwnerOnly = true;
+      project.taskPermissions = null;
       await project.save();
       await write(
         'put',
@@ -352,12 +429,12 @@ describeWithDatabase(
       ).expect(403);
     });
 
-    it('lets a regular member change standard attributes and validates them with the existing rules', async (): Promise<void> => {
-      await persist(ProjectMember.build(), {
-        projectId: project.id,
-        userId: outsider.id
-      });
-      project.attributesOwnerOnly = false;
+    it('lets a configured executor change standard attributes and validates them with the existing rules', async (): Promise<void> => {
+      await assignExecutor(outsider);
+      project.taskPermissions = {
+        assignee: { canEditAttributes: true },
+        responsible: { canEditAttributes: true }
+      };
       await project.save();
 
       const values: Partial<CreateTaskDto> = {
@@ -389,7 +466,7 @@ describeWithDatabase(
         await TaskAssignee.count({
           where: { taskId: task.id, userId: outsider.id }
         })
-      ).toBe(0);
+      ).toBe(1);
       expect(saved.controllerIds).toEqual([owner.id]);
       expect(ws.emitTaskUpdated).toHaveBeenCalled();
 
@@ -413,7 +490,7 @@ describeWithDatabase(
       ).expect(403);
       expect((await task.reload()).priority).toBe('high');
 
-      project.attributesOwnerOnly = true;
+      project.taskPermissions = null;
       await project.save();
       await write(
         'put',
@@ -424,11 +501,8 @@ describeWithDatabase(
       await write('put', `/tasks/${task.id}`, { priority: 'low' }).expect(200);
     });
 
-    it('lets a member attach and detach a parent while preserving hierarchy checks and the default restriction', async (): Promise<void> => {
-      await persist(ProjectMember.build(), {
-        projectId: project.id,
-        userId: outsider.id
-      });
+    it('lets a configured executor attach and detach a parent with the existing hierarchy checks', async (): Promise<void> => {
+      await assignExecutor(outsider);
       const parent = await persist(Task.build(), {
         title: 'Parent',
         taskNumber: 2,
@@ -441,7 +515,14 @@ describeWithDatabase(
         { parentTaskId: parent.id },
         'date-outsider-token'
       ).expect(403);
-      project.attributesOwnerOnly = false;
+      await persist(TaskAssignee.build(), {
+        taskId: parent.id,
+        userId: outsider.id
+      });
+      project.taskPermissions = {
+        assignee: { canEditAttributes: true },
+        responsible: { canEditAttributes: true }
+      };
       await project.save();
 
       await write(
@@ -471,7 +552,7 @@ describeWithDatabase(
       ).expect(200);
       expect((await task.reload()).parentTaskId).toBeNull();
       expect(task.controllerIds).toEqual([owner.id]);
-      project.attributesOwnerOnly = true;
+      project.taskPermissions = null;
       await project.save();
       await write(
         'put',
@@ -482,7 +563,10 @@ describeWithDatabase(
     });
 
     it('does not grant project access when attribute editing is open', async (): Promise<void> => {
-      project.attributesOwnerOnly = false;
+      project.taskPermissions = {
+        assignee: { canEditAttributes: true },
+        responsible: { canEditAttributes: true }
+      };
       await project.save();
       await write(
         'put',
@@ -1419,7 +1503,10 @@ describeWithDatabase(
       expect(
         await TaskAssignee.findAll({ where: { taskId: task.id } })
       ).toEqual([expect.objectContaining({ userId: secondExecutor.id })]);
-      project.attributesOwnerOnly = false;
+      project.taskPermissions = {
+        assignee: { canEditAttributes: true },
+        responsible: { canEditAttributes: true }
+      };
       await project.save();
       await write(
         'put',
@@ -1448,7 +1535,8 @@ describeWithDatabase(
       null,
       ColumnStatus.Queued,
       ColumnStatus.InProgress,
-      ColumnStatus.Completed
+      ColumnStatus.Completed,
+      ColumnStatus.Archived
     ])('allows executors to move to %j', async (status): Promise<void> => {
       await assignExecutor(outsider);
       const target = await persist(BoardColumn.build(), {
@@ -1464,7 +1552,7 @@ describeWithDatabase(
       expect((await task.reload()).columnId).toBe(target.id);
     });
 
-    it('restricts archive moves to controllers and responsibles and preserves source restrictions', async (): Promise<void> => {
+    it('applies project directions to archive and combines several roles instead of legacy column permissions', async (): Promise<void> => {
       await assignExecutor(outsider);
       await persist(ProjectMember.build(), {
         projectId: project.id,
@@ -1475,28 +1563,314 @@ describeWithDatabase(
         boardId: column.boardId,
         status: ColumnStatus.Archived
       });
-      const move = (token: string): request.Test =>
+      const movement = (token: string): request.Test =>
         request(app.getHttpServer())
           .patch(`/tasks/${task.id}/move`)
           .auth(token, { type: 'bearer' })
           .send({ columnId: archive.id, order: 0 });
-      await move('date-outsider-token').expect(403);
-      await move('date-second-executor-token').expect(403);
+      await project.update({
+        taskPermissions: {
+          assignee: { moveFromColumnIds: [column.id], moveToColumnIds: [] },
+          responsible: { moveFromColumnIds: [], moveToColumnIds: [archive.id] }
+        }
+      });
+      await movement('date-outsider-token').expect(403);
+      await movement('date-second-executor-token').expect(403);
       expect((await task.reload()).columnId).toBe(column.id);
+
       await write('put', `/tasks/${task.id}`, {
         responsibleIds: [outsider.id]
       }).expect(200);
       await column.update({
         movePermission: ColumnMovePermission.CreatorsOnly
       });
-      await move('date-outsider-token').expect(403);
-      await column.update({ movePermission: ColumnMovePermission.AnyActions });
-      await move('date-outsider-token').expect(200);
-      await task.update({ columnId: column.id });
-      await move('date-owner-token').expect(200);
+      await movement('date-outsider-token').expect(200);
+      expect((await task.reload()).columnId).toBe(archive.id);
     });
 
-    it('checks archive authority for every task moved between boards, including subtasks', async (): Promise<void> => {
+    it('blocks an archived-status column only while project rules exclude it', async (): Promise<void> => {
+      await assignExecutor(outsider);
+      const archive = await persist(BoardColumn.build(), {
+        title: 'Archive',
+        boardId: column.boardId,
+        status: ColumnStatus.Archived
+      });
+      const movement = (): request.Test =>
+        request(app.getHttpServer())
+          .patch(`/tasks/${task.id}/move`)
+          .auth('date-outsider-token', { type: 'bearer' })
+          .send({ columnId: archive.id, order: 0 });
+
+      await project.update({
+        taskPermissions: { assignee: { moveToColumnIds: [column.id] } }
+      });
+      await movement().expect(403);
+      await project.update({ taskPermissions: null });
+      await movement().expect(200);
+      expect((await task.reload()).columnId).toBe(archive.id);
+    });
+
+    it('requires a matching user and column in one creation group for tasks and subtasks', async (): Promise<void> => {
+      await assignExecutor(outsider);
+      await assignExecutor(secondExecutor);
+      const allowed = await persist(BoardColumn.build(), {
+        title: 'Other column',
+        boardId: column.boardId
+      });
+      await project.update({
+        taskPermissions: {
+          createRules: [
+            { userIds: [outsider.id], columnIds: [allowed.id] },
+            { userIds: [secondExecutor.id], columnIds: [column.id] }
+          ]
+        }
+      });
+
+      await write(
+        'post',
+        `/columns/${column.id}/tasks`,
+        { title: 'Denied' },
+        'date-outsider-token'
+      ).expect(403);
+      await write(
+        'post',
+        `/columns/${allowed.id}/tasks`,
+        { title: 'Allowed' },
+        'date-outsider-token'
+      ).expect(201);
+      await write(
+        'post',
+        `/tasks/${task.id}/subtasks`,
+        { title: 'Denied' },
+        'date-outsider-token'
+      ).expect(403);
+      await write(
+        'post',
+        `/tasks/${task.id}/subtasks`,
+        { title: 'Allowed' },
+        'date-second-executor-token'
+      ).expect(201);
+      await write('post', `/columns/${allowed.id}/tasks`, {
+        title: 'Owner not listed'
+      }).expect(403);
+      await project.update({ taskPermissions: { createRules: null } });
+      await write(
+        'post',
+        `/columns/${column.id}/tasks`,
+        { title: 'Open to participants' },
+        'date-outsider-token'
+      ).expect(201);
+    });
+
+    it('uses a single list of creators on all columns of each scope', async (): Promise<void> => {
+      await assignExecutor(outsider);
+      const sameBoardColumn = await persist(BoardColumn.build(), {
+        title: 'Second column',
+        boardId: column.boardId
+      });
+      const secondBoard = await persist(Board.build(), {
+        title: 'Restricted board',
+        projectId: project.id
+      });
+      const boardColumn = await persist(BoardColumn.build(), {
+        title: 'Restricted column',
+        boardId: secondBoard.id
+      });
+      await project.update({
+        taskPermissions: {
+          createUserIds: [outsider.id],
+          boards: [{ boardId: secondBoard.id, createUserIds: [] }]
+        }
+      });
+
+      const token = 'date-outsider-token';
+      await write(
+        'post',
+        `/columns/${column.id}/tasks`,
+        { title: 'Allowed' },
+        token
+      ).expect(201);
+      await write(
+        'post',
+        `/columns/${sameBoardColumn.id}/tasks`,
+        { title: 'Allowed too' },
+        token
+      ).expect(201);
+      await write(
+        'post',
+        `/tasks/${task.id}/subtasks`,
+        { title: 'Allowed child' },
+        token
+      ).expect(201);
+      await write('post', `/columns/${column.id}/tasks`, {
+        title: 'Owner not on list'
+      }).expect(403);
+      await write(
+        'post',
+        `/columns/${boardColumn.id}/tasks`,
+        { title: 'Board denies creation' },
+        token
+      ).expect(403);
+    });
+
+    it('uses each board rules independently for exit, entry, creation and attribute editing', async (): Promise<void> => {
+      await assignExecutor(outsider);
+      const secondBoard = await persist(Board.build(), {
+        title: 'Second policy',
+        projectId: project.id
+      });
+      const target = await persist(BoardColumn.build(), {
+        title: 'Target',
+        boardId: secondBoard.id
+      });
+      const executorToken = 'date-outsider-token';
+      const move = (): request.Test =>
+        request(app.getHttpServer())
+          .patch(`/tasks/${task.id}/move`)
+          .auth(executorToken, { type: 'bearer' })
+          .send({ columnId: target.id, order: 0 });
+      const sourceRules = {
+        boardId: column.boardId,
+        assignee: { canEditAttributes: true, moveFromColumnIds: [column.id] },
+        createRules: []
+      };
+      const targetRules = {
+        boardId: secondBoard.id,
+        assignee: { moveToColumnIds: [] }
+      };
+
+      await project.update({
+        taskPermissions: { boards: [sourceRules, targetRules] }
+      });
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { priority: 'high' },
+        executorToken
+      ).expect(200);
+      await write(
+        'post',
+        `/columns/${column.id}/tasks`,
+        { title: 'Blocked' },
+        executorToken
+      ).expect(403);
+      await write(
+        'post',
+        `/tasks/${task.id}/subtasks`,
+        { title: 'Blocked child' },
+        executorToken
+      ).expect(403);
+      await write(
+        'post',
+        `/columns/${target.id}/tasks`,
+        { title: 'Allowed' },
+        executorToken
+      ).expect(201);
+      await move().expect(403);
+
+      const allowingTarget = {
+        ...targetRules,
+        assignee: { moveToColumnIds: [target.id] }
+      };
+      await project.update({
+        taskPermissions: {
+          boards: [
+            { ...sourceRules, assignee: { moveFromColumnIds: [] } },
+            allowingTarget
+          ]
+        }
+      });
+      await move().expect(403);
+      expect((await task.reload()).columnId).toBe(column.id);
+
+      // Доска без исключения снова использует общие разрешения проекта.
+      await project.update({ taskPermissions: { boards: [allowingTarget] } });
+      await move().expect(200);
+      expect((await task.reload()).columnId).toBe(target.id);
+      await write(
+        'put',
+        `/tasks/${task.id}`,
+        { priority: 'low' },
+        executorToken
+      ).expect(403);
+    });
+
+    it('applies separate rules to project members without any role in the task', async (): Promise<void> => {
+      await persist(ProjectMember.build(), {
+        projectId: project.id,
+        userId: outsider.id
+      });
+      const board = await persist(Board.build(), {
+        title: 'Board for other project members',
+        projectId: project.id
+      });
+      const target = await persist(BoardColumn.build(), {
+        title: 'Allowed target',
+        boardId: board.id
+      });
+      const token = 'date-outsider-token';
+      const taskPath = `/tasks/${task.id}`;
+      const move = (actorToken = token): request.Test =>
+        request(app.getHttpServer())
+          .patch(`${taskPath}/move`)
+          .auth(actorToken, { type: 'bearer' })
+          .send({ columnId: target.id, order: 0 });
+      const otherMember = {
+        moveFromColumnIds: [column.id],
+        moveToColumnIds: null,
+        canEditAttributes: true
+      };
+
+      await move().expect(403);
+      await write('put', taskPath, { priority: 'high' }, token).expect(403);
+
+      await project.update({
+        taskPermissions: { otherMember, boards: [{ boardId: board.id }] }
+      });
+      await write('put', taskPath, { priority: 'high' }, token).expect(200);
+      await write('put', taskPath, { title: 'Restricted' }, token).expect(403);
+      await move().expect(403);
+
+      await project.update({
+        taskPermissions: {
+          otherMember,
+          boards: [
+            {
+              boardId: board.id,
+              otherMember: { moveToColumnIds: [target.id] }
+            }
+          ]
+        }
+      });
+      await move('date-second-executor-token').expect(404);
+      await move().expect(200);
+      expect((await task.reload()).columnId).toBe(target.id);
+      await write('put', taskPath, { priority: 'low' }, token).expect(403);
+
+      await project.update({ taskPermissions: { otherMember } });
+      await write('put', taskPath, { priority: 'low' }, token).expect(200);
+      await persist(TaskAssignee.build(), {
+        taskId: task.id,
+        userId: outsider.id
+      });
+      await write('put', taskPath, { priority: 'high' }, token).expect(403);
+    });
+
+    it('enforces an explicit controller attribute denial without removing title and assignment rights', async (): Promise<void> => {
+      await project.update({
+        taskPermissions: {
+          controller: { canEditAttributes: false },
+          responsible: { canEditAttributes: true }
+        }
+      });
+      await write('put', `/tasks/${task.id}`, { priority: 'high' }).expect(403);
+      await write('put', `/tasks/${task.id}`, {
+        title: 'Still editable'
+      }).expect(200);
+      await task.update({ responsibleIds: [owner.id] });
+      await write('put', `/tasks/${task.id}`, { priority: 'high' }).expect(200);
+    });
+    it('checks roles for every task moved between boards, including subtasks', async (): Promise<void> => {
       await assignExecutor(outsider);
       await task.update({ responsibleIds: [outsider.id] });
       const child = await persist(Task.build(), {

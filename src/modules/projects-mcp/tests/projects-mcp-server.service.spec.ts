@@ -1,5 +1,8 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { ConfigService } from '@nestjs/config';
+import axios from 'axios';
+import { TimeReportPermissionGuard } from '../../tasks/time-report-permission.guard';
 import { ProjectsMcpServerService } from '../projects-mcp-server.service';
 import {
   PROJECTS_MCP_SCOPES,
@@ -45,6 +48,14 @@ describe('ProjectsMcpServerService', () => {
     getById: jest.fn(),
     getSubtasks: jest.fn().mockResolvedValue([]),
     getHistory: jest.fn().mockResolvedValue({ rows: [], count: 0 }),
+    getPersonalTasks: jest
+      .fn()
+      .mockResolvedValue({ items: [], offset: 0, hasMore: false }),
+    getTimeEntries: jest
+      .fn()
+      .mockResolvedValue({ items: [], nextCursor: null }),
+    createTimeEntry: jest.fn(),
+    getTimeReport: jest.fn().mockResolvedValue({ items: [], nextCursor: null }),
     create: jest.fn(),
     createSubtask: jest.fn(),
     update: jest.fn(),
@@ -76,7 +87,10 @@ describe('ProjectsMcpServerService', () => {
     tagsService as any,
     usersService as any,
     operations as any,
-    taskComments as any
+    taskComments as any,
+    new TimeReportPermissionGuard(
+      new ConfigService({ erpApiUrl: 'http://erp.invalid/api' })
+    )
   );
 
   beforeEach(() => {
@@ -135,6 +149,12 @@ describe('ProjectsMcpServerService', () => {
         'task_comments_create',
         'task_comments_list',
         'task_history_list',
+        'tasks_personal_list',
+        'task_attributes_get',
+        'task_attributes_update',
+        'task_time_entries_list',
+        'task_time_entries_create',
+        'task_time_report_get',
         'task_subtasks_list',
         'tasks_create',
         'tasks_delete',
@@ -182,6 +202,273 @@ describe('ProjectsMcpServerService', () => {
 
     await client.close();
     await server.close();
+  });
+
+  it('читает атрибуты, записывает отдельные изменения и время только текущего пользователя', async (): Promise<void> => {
+    const auth = {
+      user: { id: 7, login: 'DA', serviceNumber: '007' },
+      clientId: 'jest',
+      audience: PROJECTS_MCP_AUDIENCE,
+      scopes: new Set(PROJECTS_MCP_SCOPES),
+      accessToken: 'mcp-token'
+    };
+    projectsService.getById.mockResolvedValueOnce({
+      id: 1,
+      title: 'Board',
+      taskAttributeDefinitions: [
+        { id: 'flag', name: 'Проверено', type: 'boolean' },
+        { id: 'count', name: 'Количество', type: 'number' },
+        { id: 'text', name: 'Описание', type: 'text' }
+      ]
+    });
+    tasksService.getById.mockResolvedValue({
+      id: 3,
+      title: 'Проверить',
+      columnId: 4,
+      customAttributeValues: { flag: false, count: 0 }
+    });
+    columnsService.getById.mockResolvedValue({ id: 4, boardId: 2 });
+    const server = service.createServer(auth);
+    const client = new Client({ name: 'jest-task-details', version: '1' });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+
+    try {
+      const result = await client.callTool({
+        name: 'task_attributes_get',
+        arguments: { taskId: 3 }
+      });
+      expect(result.structuredContent).toMatchObject({
+        data: {
+          attributes: [
+            { id: 'flag', value: false, hasValue: true },
+            { id: 'count', value: 0, hasValue: true },
+            { id: 'text', value: null, hasValue: false }
+          ]
+        }
+      });
+      projectsService.getById.mockResolvedValueOnce({
+        id: 1,
+        title: 'Board',
+        taskAttributeDefinitions: [
+          { id: 'flag', name: 'Проверено', type: 'boolean' }
+        ]
+      });
+      tasksService.update.mockResolvedValue({ id: 3 });
+      const update = await client.callTool({
+        name: 'task_attributes_update',
+        arguments: {
+          taskId: 3,
+          taskTitle: 'Проверить',
+          attributes: [
+            { id: 'flag', name: 'Проверено', type: 'boolean', value: false }
+          ],
+          idempotencyKey: 'task-attrs-1'
+        }
+      });
+      expect(update.isError).not.toBe(true);
+      expect(tasksService.update).toHaveBeenCalledWith(
+        3,
+        { customAttributeChanges: { flag: false } },
+        7
+      );
+
+      const absent = await client.callTool({
+        name: 'task_attributes_update',
+        arguments: {
+          taskId: 3,
+          taskTitle: 'Проверить',
+          attributes: [
+            { id: 'missing', name: 'Нет поля', type: 'text', value: 'test' }
+          ],
+          idempotencyKey: 'task-attrs-2'
+        }
+      });
+      expect(absent.isError).toBe(true);
+      expect(tasksService.update).toHaveBeenCalledTimes(1);
+
+      tasksService.createTimeEntry.mockResolvedValue({
+        id: 9,
+        taskId: 3,
+        userId: 7,
+        durationMinutes: 120,
+        comment: 'Проверил чертежи'
+      });
+      const time = await client.callTool({
+        name: 'task_time_entries_create',
+        arguments: {
+          taskId: 3,
+          taskTitle: 'Проверить',
+          durationMinutes: 120,
+          comment: 'Проверил чертежи',
+          idempotencyKey: 'task-time-1'
+        }
+      });
+      expect(time.isError).not.toBe(true);
+      expect(tasksService.createTimeEntry).toHaveBeenCalledWith(
+        3,
+        { durationMinutes: 120, comment: 'Проверил чертежи' },
+        7
+      );
+      expect(operations.run).toHaveBeenCalledWith(
+        auth,
+        'task_time_entries_create',
+        'task-time-1',
+        expect.objectContaining({ durationMinutes: 120 }),
+        expect.any(Function)
+      );
+
+      for (const durationMinutes of [0, -1, 1.5, 525601]) {
+        expect(
+          (
+            await client.callTool({
+              name: 'task_time_entries_create',
+              arguments: {
+                taskId: 3,
+                taskTitle: 'Проверить',
+                durationMinutes,
+                idempotencyKey: 'invalid-time'
+              }
+            })
+          ).isError
+        ).toBe(true);
+      }
+      expect(tasksService.createTimeEntry).toHaveBeenCalledTimes(1);
+      await client.callTool({
+        name: 'task_time_entries_list',
+        arguments: { taskId: 3, limit: 10, beforeId: 9 }
+      });
+      expect(tasksService.getTimeEntries).toHaveBeenCalledWith(3, 7, {
+        limit: 10,
+        beforeId: 9
+      });
+      await client.callTool({
+        name: 'tasks_personal_list',
+        arguments: { scope: 'assigned', offset: 20 }
+      });
+      expect(tasksService.getPersonalTasks).toHaveBeenCalledWith(7, {
+        scope: 'assigned',
+        offset: 20,
+        limit: 20
+      });
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
+
+  it('читает штатный отчёт периода и проверяет актуальные права до чтения данных', async (): Promise<void> => {
+    const auth = {
+      user: { id: 7, login: 'DA', serviceNumber: '007' },
+      clientId: 'jest',
+      audience: PROJECTS_MCP_AUDIENCE,
+      scopes: new Set(PROJECTS_MCP_SCOPES),
+      accessToken: 'mcp-token'
+    };
+    const permissions = [
+      { resource_code: 'general.time-tracking', action: 'view' },
+      { resource_code: 'general.projects', action: 'view' }
+    ];
+    const get = jest
+      .spyOn(axios, 'get')
+      .mockResolvedValue({ data: { permissions } });
+    const server = service.createServer(auth);
+    const client = new Client({ name: 'jest-report', version: '1.0.0' });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const input = {
+      start: '2026-10-26T00:00:00+03:00',
+      end: '2026-10-27T00:00:00+03:00',
+      limit: 1,
+      beforeId: 30
+    };
+    const page = {
+      items: [
+        { id: 24, userId: 8, durationMinutes: 120, comment: 'Проверил чертежи' }
+      ],
+      nextCursor: 24
+    };
+
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      tasksService.getTimeReport.mockResolvedValue(page);
+      const result = await client.callTool({
+        name: 'task_time_report_get',
+        arguments: input
+      });
+
+      expect(result.structuredContent).toEqual({
+        data: { ...page, currentUserId: 7 }
+      });
+      expect(tasksService.getTimeReport).toHaveBeenCalledWith(7, input);
+      expect(get).toHaveBeenCalledWith(
+        'http://erp.invalid/api/authorization/me',
+        expect.objectContaining({
+          headers: {
+            Authorization: 'Bearer mcp-token',
+            compress: 'no-compress'
+          },
+          maxRedirects: 0
+        })
+      );
+
+      get.mockResolvedValue({ data: { permissions: [permissions[1]] } });
+      expect(
+        (
+          await client.callTool({
+            name: 'task_time_report_get',
+            arguments: input
+          })
+        ).isError
+      ).toBe(true);
+      expect(tasksService.getTimeReport).toHaveBeenCalledTimes(1);
+      get.mockRejectedValue(new Error('ERP unavailable'));
+      expect(
+        (
+          await client.callTool({
+            name: 'task_time_report_get',
+            arguments: input
+          })
+        ).isError
+      ).toBe(true);
+      expect(tasksService.getTimeReport).toHaveBeenCalledTimes(1);
+
+      for (const invalid of [
+        { start: 'invalid' },
+        { end: '2026-10-27' },
+        { limit: 501 },
+        { beforeId: 0 }
+      ]) {
+        expect(
+          (
+            await client.callTool({
+              name: 'task_time_report_get',
+              arguments: { ...input, ...invalid }
+            })
+          ).isError
+        ).toBe(true);
+      }
+      expect(tasksService.getTimeReport).toHaveBeenCalledTimes(1);
+      auth.scopes.clear();
+      get.mockClear();
+      expect(
+        (
+          await client.callTool({
+            name: 'task_time_report_get',
+            arguments: input
+          })
+        ).isError
+      ).toBe(true);
+      expect(get).not.toHaveBeenCalled();
+      expect(operations.run).not.toHaveBeenCalled();
+    } finally {
+      get.mockRestore();
+      await client.close();
+      await server.close();
+    }
   });
 
   it('создаёт доску через идемпотентную MCP write-операцию', async () => {

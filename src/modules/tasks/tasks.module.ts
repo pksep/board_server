@@ -43,6 +43,6 @@ import { ProductionQueueWorkProvider } from './production-queue-work.provider';
     ProjectsModule,
     ActivityEventsModule
   ],
-  exports: [TasksService, TaskCommentCountersService]
+  exports: [TasksService, TimeReportPermissionGuard, TaskCommentCountersService]
 })
 export class TasksModule {}

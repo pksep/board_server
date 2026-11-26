@@ -13,6 +13,7 @@ export type ProjectCreationAttributes = Optional<
     | 'showInProduction'
     | 'attributesOwnerOnly'
     | 'taskAttributeDefinitions'
+    | 'taskPermissions'
     | 'taskCounter'
     | 'createdById'
   >,
@@ -21,6 +22,7 @@ export type ProjectCreationAttributes = Optional<
   | 'showInProduction'
   | 'attributesOwnerOnly'
   | 'taskAttributeDefinitions'
+  | 'taskPermissions'
   | 'taskCounter'
 >;
 

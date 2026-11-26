@@ -1,7 +1,7 @@
 import { HttpException, HttpStatus, Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/sequelize';
 import { Sequelize } from 'sequelize-typescript';
-import { Op, Transaction } from 'sequelize';
+import { Op, QueryTypes, Transaction } from 'sequelize';
 import { Project } from './model/project.model';
 import { ProjectMember } from './model/project-member.model';
 import { UserFavorite } from './model/user-favorite.model';
@@ -10,6 +10,8 @@ import { UpdateProjectDto } from './dto/update-project.dto';
 import { ProjectTag } from '../tags/model/project-tag.model';
 import { ProjectAccessService } from './project-access.service';
 import type { ProjectMemberCreationAttributes } from './interfaces/project-creation-attributes.interface';
+import type { ProjectTaskPermissions } from './interfaces/project-task-permissions.interface';
+import { restrictTaskPermissionMembers } from './utils/project-task-permissions';
 
 @Injectable()
 export class ProjectsService {
@@ -151,6 +153,7 @@ export class ProjectsService {
           description: dto.description || '',
           attributesOwnerOnly: dto.attributesOwnerOnly ?? true,
           showInProduction: dto.showInProduction ?? false,
+          taskPermissions: dto.taskPermissions ?? null,
           taskAttributeDefinitions: this.normalizeTaskAttributeDefinitions(
             dto.taskAttributeDefinitions
           ),
@@ -162,6 +165,12 @@ export class ProjectsService {
       // Для каждого участника порядок проектов хранится отдельно.
       const memberIds = Array.from(
         new Set([userId, ...(dto.membersIds || [])])
+      );
+      await this.assertTaskPermissionReferences(
+        project.id,
+        dto.taskPermissions,
+        memberIds,
+        transaction
       );
       const nextOrderByMemberId = await this.getNextMemberOrders(
         memberIds,
@@ -212,6 +221,31 @@ export class ProjectsService {
       if (dto.taskAttributeDefinitions !== undefined) {
         project.taskAttributeDefinitions =
           this.normalizeTaskAttributeDefinitions(dto.taskAttributeDefinitions);
+      }
+
+      if (dto.taskPermissions !== undefined) {
+        const memberIds = dto.membersIds
+          ? [...new Set([userId, ...dto.membersIds])]
+          : [
+              userId,
+              ...(await this.projectAccess.getActiveMemberIds(
+                dto.id,
+                transaction
+              ))
+            ];
+        await this.assertTaskPermissionReferences(
+          dto.id,
+          dto.taskPermissions,
+          memberIds,
+          transaction
+        );
+        project.taskPermissions = dto.taskPermissions;
+      } else if (dto.membersIds && project.taskPermissions) {
+        const remaining = new Set([userId, ...dto.membersIds]);
+        project.taskPermissions = restrictTaskPermissionMembers(
+          project.taskPermissions,
+          remaining
+        );
       }
 
       await project.save({ transaction });
@@ -268,6 +302,125 @@ export class ProjectsService {
       throw new HttpException(
         'Ошибка при обновлении проекта',
         HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  /** Не позволяет выдать право на колонку другого проекта или постороннему человеку. */
+  private async assertTaskPermissionReferences(
+    projectId: number,
+    permissions: ProjectTaskPermissions | null | undefined,
+    memberIds: number[],
+    transaction: Transaction
+  ): Promise<void> {
+    if (!permissions) return;
+
+    const boards = permissions.boards ?? [];
+    const boardIds = boards.filter(Boolean).map(board => board.boardId);
+
+    if (
+      boardIds.length !== boards.length ||
+      new Set(boardIds).size !== boardIds.length
+    ) {
+      throw new HttpException(
+        'Для каждой доски добавьте только один набор разрешений',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    if (boardIds.length) {
+      const owned = await this.sequelize.query<{ id: number }>(
+        'SELECT id FROM boards WHERE project_id = :projectId AND id IN (:boardIds)',
+        {
+          replacements: { projectId, boardIds },
+          transaction,
+          type: QueryTypes.SELECT
+        }
+      );
+      if (owned.length !== boardIds.length) {
+        throw new HttpException(
+          'Доски должны относиться к этому проекту',
+          HttpStatus.BAD_REQUEST
+        );
+      }
+    }
+
+    const members = new Set(memberIds);
+    const scopes = [{ ...permissions, boardId: null }, ...boards];
+    if (
+      scopes.some(scope => scope.createUserIds?.some(id => !members.has(id)))
+    ) {
+      throw new HttpException(
+        'Для создания задач выберите участников проекта',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    const createRules = scopes.flatMap(scope => scope.createRules ?? []);
+    if (
+      createRules.some(
+        rule =>
+          !rule ||
+          !rule.userIds.length ||
+          !rule.columnIds.length ||
+          rule.userIds.some(id => !members.has(id))
+      )
+    ) {
+      throw new HttpException(
+        'Для создания задач выберите участников проекта и колонки',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    const scopeColumns = scopes.map(scope => ({
+      boardId: scope.boardId,
+      ids: [
+        ...[
+          scope.assignee,
+          scope.responsible,
+          scope.controller,
+          scope.otherMember
+        ].flatMap(role => [
+          ...(role?.moveToColumnIds ?? []),
+          ...(role?.moveFromColumnIds ?? [])
+        ]),
+        ...(scope.createRules ?? []).flatMap(rule => rule.columnIds)
+      ]
+    }));
+    const columnIds = [...new Set(scopeColumns.flatMap(scope => scope.ids))];
+    if (!columnIds.length) return;
+
+    // Архивные колонки сохраняют принадлежность проекту; задачи в них всё равно нельзя создать до восстановления.
+    const columns = await this.sequelize.query<{ id: number; boardId: number }>(
+      `SELECT col.id, col.board_id AS "boardId" FROM board_columns col
+       JOIN boards board ON board.id = col.board_id
+       WHERE board.project_id = :projectId AND col.id IN (:columnIds)`,
+      {
+        replacements: { projectId, columnIds },
+        transaction,
+        type: QueryTypes.SELECT
+      }
+    );
+    if (columns.length !== columnIds.length) {
+      throw new HttpException(
+        'Колонки должны относиться к этому проекту',
+        HttpStatus.BAD_REQUEST
+      );
+    }
+
+    const columnBoards = new Map(
+      columns.map(column => [column.id, column.boardId])
+    );
+    if (
+      scopeColumns.some(
+        scope =>
+          scope.boardId !== null &&
+          scope.ids.some(id => columnBoards.get(id) !== scope.boardId)
+      )
+    ) {
+      throw new HttpException(
+        'Колонки должны относиться к выбранной доске',
+        HttpStatus.BAD_REQUEST
       );
     }
   }

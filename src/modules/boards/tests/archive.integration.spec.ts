@@ -139,9 +139,13 @@ describeWithDatabase('Archive API with isolated PostgreSQL', () => {
 
   beforeEach(async (): Promise<void> => {
     sequence += 1;
+    const prefixSuffix = String.fromCharCode(
+      65 + Math.floor((sequence - 1) / 26),
+      65 + ((sequence - 1) % 26)
+    );
     project = await persist(Project.build(), {
       title: 'Archive QA',
-      prefix: `ARC${String.fromCharCode(64 + sequence)}`,
+      prefix: `ARC${prefixSuffix}`,
       createdById: owner.id
     });
     await persist(ProjectMember.build(), {
@@ -587,6 +591,37 @@ describeWithDatabase('Archive API with isolated PostgreSQL', () => {
       .put(`/tasks/${root.id}`)
       .send({ title: 'Changed' })
       .set('x-test-user', String(owner.id))
+      .expect(404);
+  });
+
+  it('возвращает названия живых колонок для настроек без изменения доступов и обычной выдачи', async (): Promise<void> => {
+    const archivedColumn = await persist(BoardColumn.build(), {
+      boardId: board.id,
+      title: 'Archived column'
+    });
+    await archivedColumn.destroy();
+    const endpoint = `/projects/${project.id}/boards`;
+    const plain = await request(app.getHttpServer())
+      .get(endpoint)
+      .set('x-test-user', String(owner.id))
+      .expect(200);
+    const catalog = await request(app.getHttpServer())
+      .get(`${endpoint}?includeColumnTitles=true`)
+      .set('x-test-user', String(owner.id))
+      .expect(200);
+
+    expect(plain.body[0].columns).toEqual(
+      expect.arrayContaining(columns.map(column => ({ id: column.id })))
+    );
+    expect(catalog.body[0].columns).toHaveLength(columns.length);
+    expect(catalog.body[0].columns).toEqual(
+      expect.arrayContaining(
+        columns.map(column => ({ id: column.id, title: column.title }))
+      )
+    );
+    await request(app.getHttpServer())
+      .get(`${endpoint}?includeColumnTitles=true`)
+      .set('x-test-user', String(outsider.id))
       .expect(404);
   });
 
