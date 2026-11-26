@@ -52,6 +52,7 @@ describe('TasksService.update activity', () => {
     };
     const assigneeRepository = {
       findAll: jest.fn().mockResolvedValue([{ userId: 2 }]),
+      findOne: jest.fn().mockResolvedValue(null),
       destroy: jest.fn(),
       bulkCreate: jest.fn()
     };

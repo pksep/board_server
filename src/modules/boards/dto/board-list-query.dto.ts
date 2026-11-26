@@ -9,6 +9,14 @@ export class BoardListQueryDto {
   archive?: 'active' | 'archived';
 
   @ApiPropertyOptional({
+    enum: ['true', 'false'],
+    description: 'Включить названия колонок для выбора в настройках проекта'
+  })
+  @IsOptional()
+  @IsIn(['true', 'false'])
+  includeColumnTitles?: 'true' | 'false';
+
+  @ApiPropertyOptional({
     example: 5,
     minimum: 1,
     maximum: 100,

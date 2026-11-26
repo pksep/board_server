@@ -73,7 +73,12 @@ export class ProjectAccessService {
     if (!projectIds.length)
       return { projectsById: new Map(), memberProjectIds: new Set() };
     const projects = await this.projectRepository.findAll({
-      attributes: ['id', 'createdById', 'attributesOwnerOnly'],
+      attributes: [
+        'id',
+        'createdById',
+        'attributesOwnerOnly',
+        'taskPermissions'
+      ],
       where: { id: { [Op.in]: projectIds } },
       order: [['id', 'ASC']],
       transaction

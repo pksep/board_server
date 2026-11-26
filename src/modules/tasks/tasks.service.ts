@@ -11,7 +11,6 @@ import { UpdateTaskDto } from './dto/update-task.dto';
 import { MoveTaskDto } from './dto/move-task.dto';
 import { Project } from '../projects/model/project.model';
 import { BoardColumn } from '../columns/model/board-column.model';
-import { ColumnMovePermission } from '../columns/interfaces/column-move-permission.interface';
 import {
   ColumnStatus,
   normalizeLegacyColumnStatus
@@ -30,6 +29,13 @@ import {
   IncludeOptions
 } from 'sequelize';
 import { ProjectAccessService } from '../projects/project-access.service';
+import {
+  canCreateProjectTask,
+  canEditProjectTaskAttributes,
+  canMoveProjectTask,
+  getTaskPermissionsForBoard,
+  type ProjectTaskRole
+} from '../projects/utils/project-task-permissions';
 import { ActivityEventsService } from '../activity-events/activity-events.service';
 import {
   ActivityActionType,
@@ -202,11 +208,20 @@ export class TasksService {
     return col?.boardId;
   }
 
-  /** Получить projectId через column → board → project */
+  /** Возвращает проект колонки для операций, которым не нужны правила доски. */
   private async getProjectIdByColumnId(
     columnId: number,
     transaction?: Transaction
   ): Promise<number> {
+    return (await this.getTaskPermissionLocation(columnId, transaction))
+      .projectId;
+  }
+
+  /** Получает доску и проект колонки одним запросом для проверки прав задачи. */
+  private async getTaskPermissionLocation(
+    columnId: number,
+    transaction?: Transaction
+  ): Promise<{ projectId: number; boardId: number }> {
     const column = await this.columnRepository.findByPk(columnId, {
       include: [{ association: 'board', attributes: ['projectId'] }],
       ...(transaction ? { transaction } : {})
@@ -214,7 +229,7 @@ export class TasksService {
     if (!column) {
       throw new HttpException('Колонка не найдена', HttpStatus.NOT_FOUND);
     }
-    return column.board.projectId;
+    return { projectId: column.board.projectId, boardId: column.boardId };
   }
 
   /** Проверяет динамические значения задачи по актуальным настройкам проекта. */
@@ -899,6 +914,7 @@ export class TasksService {
          SELECT task.id, task.parent_task_id AS "parentTaskId",
            project.id AS "projectId", project.prefix AS "projectPrefix",
            project.attributes_owner_only AS "attributesOwnerOnly",
+           ${executorErpId ? `CASE WHEN ${this.taskProjectReaderAccess()} THEN project.task_permissions ELSE NULL END AS "taskPermissions",` : ''}
            col.status AS "columnStatus", ${dateColumn} AS "sortDate", COUNT(*) OVER()::int AS total,
            ${this.taskProjectReaderAccess()} AS "canReadTask"
            ${
@@ -1069,6 +1085,14 @@ export class TasksService {
               ...(executorErpId
                 ? {
                     attributesOwnerOnly: location.attributesOwnerOnly,
+                    ...(location.canReadTask
+                      ? {
+                          taskPermissions: getTaskPermissionsForBoard(
+                            location.taskPermissions,
+                            location.displayContext?.boardId
+                          )
+                        }
+                      : {}),
                     canReadTask: location.canReadTask,
                     ...(location.displayContext
                       ? {
@@ -2016,11 +2040,16 @@ export class TasksService {
   ): Promise<Task> {
     const transaction = await this.sequelize.transaction();
     try {
-      const projectId = await this.getProjectIdByColumnId(
+      const { projectId, boardId } = await this.getTaskPermissionLocation(
         columnId,
         transaction
       );
-      await this.projectAccess.assertCanRead(projectId, userId, transaction);
+      const project = await this.projectAccess.assertCanRead(
+        projectId,
+        userId,
+        transaction
+      );
+      this.assertTaskCreationAllowed(project, boardId, userId, columnId);
 
       const startDate = dto.startDate ? new Date(dto.startDate) : new Date();
       const dueDate = dto.dueDate ? new Date(dto.dueDate) : startDate;
@@ -2133,7 +2162,6 @@ export class TasksService {
       const result = await this.getById(task.id, userId);
 
       // WS: уведомляем о создании
-      const boardId = await this.getBoardIdByColumnId(columnId);
       this.wsGateway.emitTaskCreated(boardId, result);
 
       return result;
@@ -2170,11 +2198,16 @@ export class TasksService {
         );
       }
 
-      const projectId = await this.getProjectIdByColumnId(
+      const { projectId, boardId } = await this.getTaskPermissionLocation(
         parent.columnId,
         transaction
       );
-      await this.projectAccess.assertCanRead(projectId, userId, transaction);
+      const project = await this.projectAccess.assertCanRead(
+        projectId,
+        userId,
+        transaction
+      );
+      this.assertTaskCreationAllowed(project, boardId, userId, parent.columnId);
 
       const startDate = dto.startDate ? new Date(dto.startDate) : new Date();
       const dueDate = dto.dueDate ? new Date(dto.dueDate) : startDate;
@@ -2296,7 +2329,6 @@ export class TasksService {
       const result = await this.getById(task.id, userId);
 
       // WS: уведомляем о создании подзадачи
-      const boardId = await this.getBoardIdByColumnId(parent.columnId);
       this.wsGateway.emitTaskCreated(boardId, result);
 
       return result;
@@ -2415,7 +2447,72 @@ export class TasksService {
     }
   }
 
-  /** Проверяет именно поля: отдельное перемещение сохраняет правила исходной колонки. */
+  /** Ограничение создания одинаково действует для задач и подзадач. */
+  private assertTaskCreationAllowed(
+    project: Project,
+    boardId: number,
+    userId: number,
+    columnId: number
+  ): void {
+    const permissions = getTaskPermissionsForBoard(
+      project?.taskPermissions,
+      boardId
+    );
+    if (!canCreateProjectTask(permissions, userId, columnId)) {
+      throw new HttpException(
+        'Вы не можете создавать задачи в этой колонке',
+        HttpStatus.FORBIDDEN
+      );
+    }
+  }
+
+  /** Собирает фактические роли пользователя, не доверяя редактируемому запросу. */
+  private getTaskRoles(
+    task: Task,
+    userId: number,
+    assigned: boolean
+  ): ProjectTaskRole[] {
+    const roles: ProjectTaskRole[] = [];
+    if ((task.controllerIds ?? [task.createdById]).includes(userId))
+      roles.push('controller');
+    if ((task.responsibleIds ?? []).includes(userId)) roles.push('responsible');
+    if (assigned) roles.push('assignee');
+
+    return roles;
+  }
+
+  /** Использует пакетные назначения при применении графика и одиночные при редактировании. */
+  private async isTaskAssignee(
+    task: Task,
+    userId: number,
+    transaction: Transaction,
+    context?: TaskAccessContext
+  ): Promise<boolean> {
+    if (context && !context.assigneeTaskIds) {
+      const assignments = await this.assigneeRepository.findAll({
+        attributes: ['taskId'],
+        where: { taskId: { [Op.in]: [...context.tasksById.keys()] }, userId },
+        order: [['taskId', 'ASC']],
+        transaction,
+        lock: transaction.LOCK.SHARE
+      });
+      context.assigneeTaskIds = new Set(
+        assignments.map(assignment => assignment.taskId)
+      );
+    }
+
+    return context
+      ? context.assigneeTaskIds!.has(task.id)
+      : Boolean(
+          await this.assigneeRepository.findOne({
+            where: { taskId: task.id, userId },
+            transaction,
+            lock: transaction.LOCK.SHARE
+          })
+        );
+  }
+
+  /** Отличает права на атрибуты от назначения людей и управления самой задачей. */
   private async assertCanEditTaskFields(
     task: Task,
     dto: UpdateTaskDto,
@@ -2423,25 +2520,11 @@ export class TasksService {
     transaction: Transaction,
     context?: TaskAccessContext
   ): Promise<void> {
-    if ((task.controllerIds ?? [task.createdById]).includes(userId)) return;
-
-    let fields = Object.entries(dto).filter(([, value]) => value !== undefined);
-
-    if (fields.some(([field]) => field === 'assigneeIds')) {
-      if (!(task.responsibleIds ?? []).includes(userId)) {
-        throw new HttpException(
-          'Изменять исполнителей могут только контроллеры и ответственные',
-          HttpStatus.FORBIDDEN
-        );
-      }
-
-      fields = fields.filter(([field]) => field !== 'assigneeIds');
-    }
-
-    if (!fields.length) return;
-
-    // Открываются значения стандартных и пользовательских атрибутов, но не управление задачей.
-    const attributeFields = new Set<keyof UpdateTaskDto>([
+    const controller = (task.controllerIds ?? [task.createdById]).includes(
+      userId
+    );
+    const responsible = (task.responsibleIds ?? []).includes(userId);
+    const attributeFields = new Set<string>([
       'linkedEntity',
       'dueDate',
       'startDate',
@@ -2453,75 +2536,63 @@ export class TasksService {
       'customAttributeValues',
       'customAttributeChanges'
     ]);
+    const fields = Object.entries(dto)
+      .filter(([, value]) => value !== undefined)
+      .map(([field]) => field);
+
     if (
-      fields.some(([field]) =>
-        attributeFields.has(field as keyof UpdateTaskDto)
+      fields.some(
+        field =>
+          field !== 'description' &&
+          !attributeFields.has(field) &&
+          !controller &&
+          !(field === 'assigneeIds' && responsible)
       )
     ) {
-      const projectId = context
-        ? (
-            await this.getColumnLocation(
-              task.columnId,
-              transaction,
-              false,
-              context
-            )
-          ).projectId
-        : await this.getProjectIdByColumnId(task.columnId, transaction);
-      const project = await this.projectAccess.assertCanRead(
-        projectId,
-        userId,
-        transaction,
-        context?.projectAccess
+      throw new HttpException(
+        'У вас нет права изменять эти поля задачи',
+        HttpStatus.FORBIDDEN
       );
-
-      if (project.attributesOwnerOnly === false) {
-        fields = fields.filter(
-          ([field]) => !attributeFields.has(field as keyof UpdateTaskDto)
-        );
-
-        if (!fields.length) return;
-      }
     }
 
-    // Доступ к задаче уже проверен: описание не зависит от создателя или назначения.
-    if (fields.length === 1 && fields[0][0] === 'description') return;
+    const attributes = fields.filter(field => attributeFields.has(field));
+    if (!attributes.length) return;
 
+    const { projectId, board } = await this.getColumnLocation(
+      task.columnId,
+      transaction,
+      false,
+      context
+    );
+    const project = await this.projectAccess.assertCanRead(
+      projectId,
+      userId,
+      transaction,
+      context?.projectAccess
+    );
+    const assigned = await this.isTaskAssignee(
+      task,
+      userId,
+      transaction,
+      context
+    );
+    const roles = this.getTaskRoles(task, userId, assigned);
     if (
-      fields.length > 0 &&
-      fields.every(
-        ([field]) => field === 'startDate' || field === 'description'
+      canEditProjectTaskAttributes(
+        getTaskPermissionsForBoard(project?.taskPermissions, board.id),
+        roles
       )
-    ) {
-      // Дата начала работ по-прежнему требует действующего назначения.
-      if (context && !context.assigneeTaskIds) {
-        const assignments = await this.assigneeRepository.findAll({
-          attributes: ['taskId'],
-          where: { taskId: { [Op.in]: [...context.tasksById.keys()] }, userId },
-          order: [['taskId', 'ASC']],
-          transaction,
-          lock: transaction.LOCK.SHARE
-        });
-        context.assigneeTaskIds = new Set(
-          assignments.map(assignment => assignment.taskId)
-        );
-      }
-      const assignment = context
-        ? context.assigneeTaskIds.has(task.id)
-        : await this.assigneeRepository.findOne({
-            where: { taskId: task.id, userId },
-            transaction,
-            lock: transaction.LOCK.SHARE
-          });
-      if (assignment) return;
-    }
+    )
+      return;
+
+    // Личную дату начала по-прежнему может менять исполнитель.
+    if (assigned && attributes.every(field => field === 'startDate')) return;
 
     throw new HttpException(
-      'Изменять остальные поля задачи может только контроллер. Дату начала работ также может менять исполнитель.',
+      'Ваша роль не может изменять атрибуты этой задачи',
       HttpStatus.FORBIDDEN
     );
   }
-
   /**
    * Обновить задачу
    */
@@ -2852,7 +2923,7 @@ export class TasksService {
         );
       }
 
-      await this.assertTasksCanLeaveColumns(
+      await this.assertTasksCanMoveColumns(
         [task],
         currentParent.columnId,
         userId,
@@ -3036,69 +3107,91 @@ export class TasksService {
     return order;
   }
 
-  /** Проверяет только выход, блокируя исходные правила до завершения переноса. */
-  private async assertTasksCanLeaveColumns(
+  /** Проверяет выход и вход задачи по правилам исходного и целевого проектов. */
+  private async assertTasksCanMoveColumns(
     tasks: Task[],
     targetColumnId: number,
     userId: number,
     transaction: Transaction
   ): Promise<void> {
-    const target = await this.columnRepository.findByPk(targetColumnId, {
-      attributes: ['id', 'status'],
+    const leaving = tasks.filter(task => task.columnId !== targetColumnId);
+    if (!leaving.length) return;
+
+    const columnIds = [
+      ...new Set([targetColumnId, ...leaving.map(task => task.columnId)])
+    ];
+    const locations = new Map<number, TaskColumnLocation>();
+    for (const id of columnIds)
+      locations.set(id, await this.getColumnLocation(id, transaction));
+
+    const projectIds = [
+      ...new Set([...locations.values()].map(location => location.projectId))
+    ];
+    const access = await this.projectAccess.loadReadAccess(
+      projectIds,
+      userId,
+      transaction
+    );
+    const targetLocation = locations.get(targetColumnId)!;
+    const target = await this.projectAccess.assertCanRead(
+      targetLocation.projectId,
+      userId,
+      transaction,
+      access
+    );
+    const memberships = await this.assigneeRepository.findAll({
+      where: { userId, taskId: { [Op.in]: leaving.map(task => task.id) } },
+      attributes: ['taskId'],
       transaction,
       lock: Transaction.LOCK.SHARE
     });
-    if (!target)
-      throw new HttpException('Колонка не найдена', HttpStatus.NOT_FOUND);
+    const assigned = new Set(memberships.map(membership => membership.taskId));
 
-    if (
-      target.status === ColumnStatus.Archived &&
-      tasks.some(
-        task =>
-          task.columnId !== targetColumnId &&
-          !(task.controllerIds ?? [task.createdById]).includes(userId) &&
-          !(task.responsibleIds ?? []).includes(userId)
-      )
-    ) {
-      throw new HttpException(
-        'В архив задачу могут переместить только контроллеры и ответственные',
-        HttpStatus.FORBIDDEN
-      );
-    }
-
-    const leaving = tasks.filter(task => task.columnId !== targetColumnId);
-    const columnIds = [...new Set(leaving.map(task => task.columnId))].sort(
-      (left, right) => left - right
-    );
-    const columns = new Map<number, BoardColumn>();
-
-    // Одно чтение на исходную колонку, не на каждую подзадачу; без JOIN в блокирующем запросе.
-    for (const id of columnIds) {
-      const column = await this.columnRepository.findByPk(id, {
-        attributes: ['id', 'movePermission'],
+    // Включая подзадачи, которые фактически покидают исходные колонки.
+    for (const task of leaving) {
+      const sourceLocation = locations.get(task.columnId)!;
+      const source = await this.projectAccess.assertCanRead(
+        sourceLocation.projectId,
+        userId,
         transaction,
-        lock: Transaction.LOCK.SHARE
-      });
-      if (!column)
-        throw new HttpException('Колонка не найдена', HttpStatus.NOT_FOUND);
-      columns.set(id, column);
-    }
-
-    if (
-      leaving.some(
-        task =>
-          columns.get(task.columnId)!.movePermission ===
-            ColumnMovePermission.CreatorsOnly &&
-          !(task.controllerIds ?? [task.createdById]).includes(userId)
-      )
-    ) {
-      throw new HttpException(
-        'Из этой колонки задачу может переместить только контроллер',
-        HttpStatus.FORBIDDEN
+        access
       );
+      const roles = this.getTaskRoles(task, userId, assigned.has(task.id));
+
+      if (
+        !canMoveProjectTask(
+          getTaskPermissionsForBoard(
+            source.taskPermissions,
+            sourceLocation.board.id
+          ),
+          roles,
+          'moveFromColumnIds',
+          task.columnId
+        )
+      ) {
+        throw new HttpException(
+          'Ваша роль не может переносить задачи из этой колонки',
+          HttpStatus.FORBIDDEN
+        );
+      }
+      if (
+        !canMoveProjectTask(
+          getTaskPermissionsForBoard(
+            target.taskPermissions,
+            targetLocation.board.id
+          ),
+          roles,
+          'moveToColumnIds',
+          targetColumnId
+        )
+      ) {
+        throw new HttpException(
+          'Ваша роль не может переносить задачи в эту колонку',
+          HttpStatus.FORBIDDEN
+        );
+      }
     }
   }
-
   /**
    * Перемещает задачу в колонку с проверкой каждого фактического выхода.
    * Внутри доски подзадачи перемещаются независимо; между досками переносится иерархия.
@@ -3128,7 +3221,7 @@ export class TasksService {
         !isSubtask && isCrossBoard
           ? await this.getTaskHierarchy(task, transaction)
           : [task];
-      await this.assertTasksCanLeaveColumns(
+      await this.assertTasksCanMoveColumns(
         hierarchy,
         dto.columnId,
         userId,
