@@ -120,7 +120,7 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
           useValue: model
         })),
         { provide: Sequelize, useValue: sequelize },
-        { provide: WsGateway, useValue: {} },
+        { provide: WsGateway, useValue: { emitTaskUpdated: jest.fn() } },
         { provide: S3Service, useValue: {} },
         { provide: JwtService, useValue: new JwtService() },
         { provide: APP_GUARD, useClass: TokenAuth },
@@ -248,6 +248,113 @@ describeWithDatabase('Gantt API with isolated PostgreSQL', () => {
 
     return response.body;
   }
+
+  it('discovers automatic ERP work and removes it after status, norm or assignment changes', async (): Promise<void> => {
+    const erpUserId = 970000 + project.id;
+    await outsider.update({ erpId: String(erpUserId), ban: false });
+    await persist(ProjectMember.build(), {
+      projectId: project.id,
+      userId: outsider.id
+    });
+    await roots[0].update({ timeNormMinutes: 30 });
+    await roots[1].update({ timeNormMinutes: 90 });
+
+    // Задача обнаруживается без ручного включения и без переданного списка ID.
+    expect(await service.getProductionQueueResourceIds()).toContain(erpUserId);
+    expect(
+      await service.getProductionQueueWork(erpUserId, [], undefined, true)
+    ).toEqual([
+      {
+        taskId: roots[1].id,
+        title: roots[1].title,
+        timeNormMinutes: 90,
+        dueDate: roots[1].dueDate,
+        startDate: roots[1].startDate,
+        startDateRevision: 0
+      }
+    ]);
+    expect(
+      await service.getProductionQueueWork(erpUserId, [roots[0].id])
+    ).toEqual([]);
+    await columns[1].update({ status: ColumnStatus.Queued });
+    expect(
+      await service.getProductionQueueWork(erpUserId, [], undefined, true)
+    ).toEqual([]);
+    expect(await service.getProductionQueueResourceIds()).not.toContain(
+      erpUserId
+    );
+    await columns[1].update({ status: ColumnStatus.InProgress });
+    await roots[1].update({ timeNormMinutes: null });
+    expect(
+      await service.getProductionQueueWork(erpUserId, [], undefined, true)
+    ).toEqual([]);
+    await roots[1].update({ timeNormMinutes: 90 });
+    await TaskAssignee.destroy({
+      where: { taskId: roots[1].id, userId: outsider.id }
+    });
+    expect(
+      await service.getProductionQueueWork(erpUserId, [], undefined, true)
+    ).toEqual([]);
+    expect(await service.getProductionQueueResourceIds()).not.toContain(
+      erpUserId
+    );
+  });
+
+  it('exposes explicit card start revisions to ERP without treating due-date edits as start edits', async (): Promise<void> => {
+    const erpUserId = 980000 + project.id;
+    await outsider.update({ erpId: String(erpUserId), ban: false });
+    await persist(ProjectMember.build(), {
+      projectId: project.id,
+      userId: outsider.id
+    });
+    await roots[1].update({ timeNormMinutes: 60 });
+
+    const edited = await service.update(
+      roots[1].id,
+      {
+        startDate: '2026-09-10T06:00:00Z',
+        dueDate: '2026-10-14T06:00:00Z'
+      },
+      owner.id
+    );
+    expect(edited.startDateRevision).toBe(1);
+    expect(
+      await service.getProductionQueueWork(erpUserId, [], undefined, true)
+    ).toEqual([
+      expect.objectContaining({
+        dueDate: new Date('2026-10-14T06:00:00Z'),
+        startDate: new Date('2026-09-10T06:00:00Z'),
+        startDateRevision: 1
+      })
+    ]);
+
+    const dueOnly = await service.update(
+      roots[1].id,
+      { dueDate: '2026-10-15T06:00:00Z' },
+      owner.id
+    );
+    expect(dueOnly.startDateRevision).toBe(1);
+    expect(
+      await service.getProductionQueueWork(erpUserId, [], undefined, true)
+    ).toEqual([
+      expect.objectContaining({
+        dueDate: new Date('2026-10-15T06:00:00Z'),
+        startDateRevision: 1
+      })
+    ]);
+    const sameStart = await service.update(
+      roots[1].id,
+      { startDate: '2026-09-10T08:00:00+02:00' },
+      owner.id
+    );
+    expect(sameStart.startDateRevision).toBe(1);
+    const nextStart = await service.update(
+      roots[1].id,
+      { startDate: '2026-09-11T06:00:00Z' },
+      owner.id
+    );
+    expect(nextStart.startDateRevision).toBe(2);
+  });
 
   it('preserves real column statuses, dates, root-only rows and board/column/task order', async (): Promise<void> => {
     const earlier = await persist(Board.build(), {

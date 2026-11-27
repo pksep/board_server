@@ -151,6 +151,16 @@ export class Task extends Model<Task> {
   })
   startDate: Date;
 
+  /** Версия явного редактирования даты; проекция ERP её не меняет. */
+  @ApiHideProperty()
+  @Column({
+    type: DataType.INTEGER,
+    allowNull: false,
+    defaultValue: 0,
+    field: 'start_date_revision'
+  })
+  startDateRevision: number;
+
   @ApiProperty({ description: 'Значения пользовательских атрибутов задачи' })
   @Column({
     type: DataType.JSONB,

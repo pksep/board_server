@@ -17,6 +17,7 @@ import { TasksService } from './tasks.service';
 import type {
   ProductionQueueWorkRequest,
   ProductionQueueWorkResponse,
+  ProductionQueueResourcesResponse,
   ProductionQueueDates
 } from './interfaces/production-queue-work.interface';
 
@@ -58,7 +59,10 @@ export class ProductionQueueWorkProvider
       !Number.isSafeInteger(request?.resourceId) ||
       request.resourceId <= 0 ||
       !Array.isArray(request.taskIds) ||
-      !request.taskIds.length ||
+      (!request.taskIds.length && request.includeAssigned !== true) ||
+      (request.includeAssigned !== undefined &&
+        typeof request.includeAssigned !== 'boolean') ||
+      (request.includeAssigned === true && request.actorErpId !== undefined) ||
       request.taskIds.length > 10000 ||
       request.taskIds.some(id => !Number.isSafeInteger(id) || id <= 0) ||
       (request.actorErpId !== undefined &&
@@ -71,12 +75,24 @@ export class ProductionQueueWorkProvider
         items: await this.tasks.getProductionQueueWork(
           request.resourceId,
           request.taskIds,
-          request.actorErpId
+          request.actorErpId,
+          request.includeAssigned
         )
       };
     } catch (error) {
       return { error: error.message, status: error.status || 503 };
     }
+  }
+
+  /** Обнаружение назначений использует тот же доверенный канал, что чтение нормы. */
+  @Public()
+  @RabbitRPC({
+    exchange: 'erp',
+    routingKey: 'board.production-planning.resources',
+    queue: 'board.production-planning.resources'
+  })
+  async resources(): Promise<ProductionQueueResourcesResponse> {
+    return { resourceIds: await this.tasks.getProductionQueueResourceIds() };
   }
 
   /** Только зафиксированные изменения могут перестраивать внешнюю очередь. */
