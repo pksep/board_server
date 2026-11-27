@@ -132,7 +132,8 @@ export class TasksService {
   async getProductionQueueWork(
     resourceId: number,
     taskIds: number[],
-    actorErpId?: number
+    actorErpId?: number,
+    includeAssigned = false
   ): Promise<ProductionQueueWork[]> {
     if (actorErpId) {
       const actor = await User.findOne({
@@ -170,14 +171,36 @@ export class TasksService {
       });
     }
     return this.sequelize.query<ProductionQueueWork>(
-      `SELECT task.id AS "taskId", task.title, task.time_norm_minutes AS "timeNormMinutes"
-       ${this.personalTaskSource({ scope: 'assigned' }, true)}
-       AND task.id IN (:taskIds) AND task.time_norm_minutes > 0 ORDER BY task.id`,
+      `SELECT task.id AS "taskId", task.title, task.time_norm_minutes AS "timeNormMinutes",
+         task.due_date AS "dueDate", task.start_date AS "startDate",
+         task.start_date_revision AS "startDateRevision"
+       ${this.personalTaskSource({ scope: 'assigned', columnStatus: ColumnStatus.InProgress }, true)}
+       ${includeAssigned ? '' : 'AND task.id IN (:taskIds)'}
+       AND task.time_norm_minutes > 0 ORDER BY task.id`,
       {
-        replacements: { taskIds, executorErpIds: [String(resourceId)] },
+        replacements: {
+          taskIds,
+          executorErpIds: [String(resourceId)],
+          columnStatus: ColumnStatus.InProgress
+        },
         type: QueryTypes.SELECT
       }
     );
+  }
+
+  /** Не требует существующей очереди ERP; архивы и состав проекта проверяются общим источником. */
+  async getProductionQueueResourceIds(): Promise<number[]> {
+    const rows = await this.sequelize.query<{ resourceId: number }>(
+      `SELECT DISTINCT executor.erp_id::int AS "resourceId"
+       ${this.personalTaskSource({ scope: 'assigned', columnStatus: ColumnStatus.InProgress }, true, true)}
+       AND task.time_norm_minutes > 0 ORDER BY "resourceId"`,
+      {
+        replacements: { columnStatus: ColumnStatus.InProgress },
+        type: QueryTypes.SELECT
+      }
+    );
+
+    return rows.map(row => row.resourceId);
   }
 
   constructor(
@@ -2710,7 +2733,11 @@ export class TasksService {
       if (dto.description !== undefined) task.description = dto.description;
       if (dto.priority !== undefined) task.priority = dto.priority;
       if (dto.dueDate !== undefined) task.dueDate = dto.dueDate as any;
-      if (dto.startDate !== undefined) task.startDate = dto.startDate as any;
+      if (dto.startDate !== undefined) {
+        if (before.startDate !== this.normalizeDate(dto.startDate))
+          task.startDateRevision = (Number(task.startDateRevision) || 0) + 1;
+        task.startDate = dto.startDate as any;
+      }
       if (customAttributeValues !== undefined) {
         task.customAttributeValues = customAttributeValues;
       }
